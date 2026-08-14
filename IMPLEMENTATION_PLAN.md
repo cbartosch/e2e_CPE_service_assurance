@@ -215,8 +215,16 @@ least believable part of the document.
    is a regression test that has not been tested, and the rest of this suite should be held to the
    same standard rather than to a passing run.
 2. **The specification's model list has 34 entries, not 33.** Counted from its own bullet list. Two
-   earlier docstrings in this repository said 33 and were wrong; the count is now asserted by a test
-   that parses the specification rather than restated in prose.
+   earlier docstrings in this repository said 33 and were wrong.
+
+   `domain/__init__.py` then claimed the count was "asserted by `tests/unit/test_domain_exports.py`"
+   — a file that did not exist, which made the correction itself another unbacked claim. The reason
+   it could not exist is worth recording: the specification lived only outside the repository, so
+   nothing that runs in CI could read the list every model, enum and node here is answerable to. It
+   is now vendored at `docs/specification.md` and parsed by that test, which checks 34 required names
+   against 40 exported models and 6 declared supporting ones. A copy invites drift, so the test also
+   compares the vendored file against the original byte-for-byte when the original is present, and
+   skips when it is not.
 3. **`simulated: True` is returned even when the gate permits the write.** This is deliberate — a
    fixture-backed adapter never opens a TR-069 session, and claiming otherwise would be the defect —
    but it means "did this write really happen?" must be read from `result["gate"]["permitted"]`, not
