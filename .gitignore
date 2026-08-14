@@ -1,0 +1,26 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Secrets. .env.example is committed; .env is not, and neither is anything that looks like a key.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

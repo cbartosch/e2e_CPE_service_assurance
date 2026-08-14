@@ -1,0 +1,160 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lpr-cpe-assurance"
+version = "0.1.0"
+description = "Predictive CPE service assurance workflow for Liberty Puerto Rico (HFC + PON)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+# Pinned to the versions the design was VERIFIED against on 2026-08-14 (see
+# IMPLEMENTATION_PLAN.md §2). The lower bounds are not decorative: the interrupt/resume surface
+# this code depends on -- `__interrupt__` in the returned mapping, `snapshot.interrupts`, and
+# resume-by-id mapping -- was measured on langgraph 1.2.11, not read from documentation.
+dependencies = [
+    "langgraph>=1.2.11,<2",
+    "langgraph-checkpoint>=4.2.0,<5",
+    "langchain-core>=1.5.4,<2",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.7",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "structlog>=25.1",
+    "pyyaml>=6.0",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+# Postgres is OPTIONAL and imported lazily. `psycopg` alone is not sufficient on Windows or on a
+# slim CI image -- importing langgraph.checkpoint.postgres without libpq raises
+# "ImportError: no pq wrapper available", which is why the binary extra is named here and why
+# persistence/checkpointer.py does not import it at module scope.
+postgres = [
+    "langgraph-checkpoint-postgres>=3.1.2,<4",
+    "psycopg[binary,pool]>=3.2",
+]
+# OR-Tools carries a large native wheel and is not needed for the greedy fallback path, so the
+# dispatch optimizer degrades rather than failing to import.
+optimizer = ["ortools>=9.11"]
+anthropic = ["anthropic>=0.40"]
+otel = [
+    "opentelemetry-api>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-instrumentation-fastapi>=0.50b0",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "types-pyyaml",
+    "types-python-dateutil",
+]
+
+[project.scripts]
+lpr-cpe = "lpr_cpe.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lpr_cpe"]
+
+# --------------------------------------------------------------------------------------------
+# Ruff
+# --------------------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "N",         # pep8-naming
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "C4",        # comprehensions
+    "SIM",       # simplify
+    "ASYNC",     # async correctness
+    "DTZ",       # naive datetimes -- load-bearing here, see IMPLEMENTATION_PLAN.md A3
+    # BLE is selected precisely because this system has a small number of places where swallowing
+    # every exception is the correct behaviour -- a detector that raises would take the other twelve
+    # down with it. Selecting the rule means each of those places carries an explicit `noqa` with a
+    # reason, and any *accidental* bare `except Exception` is a lint failure rather than a habit.
+    "BLE",
+    "RUF",
+]
+ignore = [
+    "B008",   # FastAPI's Depends(...) in defaults is the framework's own idiom
+    "SIM108", # a ternary is not always clearer than an if
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Fixtures and scenario tests deliberately hard-code timestamps and long literal payloads.
+"tests/**" = ["DTZ001", "E501"]
+"src/lpr_cpe/simulation/fixtures/**" = ["E501"]
+# RUF022 wants one flat sorted `__all__`. This one is sorted *within* five labelled groups, and the
+# grouping is the point: the middle group is exactly the specification's "Required domain models"
+# list, so a reader can count it against the specification and a test can parse it. Flattening the
+# groups would make that check impossible to see. Each group is still individually sorted.
+"src/lpr_cpe/domain/__init__.py" = ["RUF022"]
+
+# --------------------------------------------------------------------------------------------
+# Mypy
+# --------------------------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["src/lpr_cpe"]
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+# `opentelemetry.*` is here for the same reason as `ortools.*`: it is an optional extra imported
+# inside a function, so a strict-mode run on a machine without the extra installed must not fail on
+# an import it is designed to survive missing.
+[[tool.mypy.overrides]]
+module = [
+    "ortools.*",
+    "langgraph.*",
+    "langchain_core.*",
+    "structlog.*",
+    "anthropic.*",
+    "opentelemetry.*",
+]
+ignore_missing_imports = true
+
+# --------------------------------------------------------------------------------------------
+# Pytest
+# --------------------------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "postgres: needs a reachable PostgreSQL; skipped unless LPR_TEST_POSTGRES_DSN is set",
+    "optimizer: needs the ortools extra installed",
+    "scenario: end-to-end scenario from the specification's required list",
+]
+filterwarnings = ["error::DeprecationWarning:lpr_cpe.*"]
+
+[tool.coverage.run]
+source = ["src/lpr_cpe"]
+branch = true
+omit = ["*/simulation/fixtures/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.$",
+]
