@@ -106,7 +106,9 @@ diagrams.** Fewer fully working, fully tested paths beat more stubs. Anything in
 Build order actually used:
 
 1. `config` — settings, modes, the clock, the two feature switches from A4.
-2. `domain` — the 33 record types, as Pydantic v2 models with validators.
+2. `domain` — the record types the specification names, as Pydantic v2 models with validators. Its
+   bullet list has **34** entries, not the 33 a quick count suggests; the number is asserted by a
+   test that parses the specification rather than trusted to a comment.
 3. `graph/state.py` — the state contract and its append-only reducers.
 4. `security` — redaction and the boundary rule, because §4's MAC masking is a *boundary*
    obligation that later code must be able to call, not an afterthought.
@@ -167,27 +169,60 @@ implementation sits behind the same Protocol and is exercised only when a key is
 
 ## 5. Status
 
-| Area | State |
-| --- | --- |
-| API verification (§2) | done, measured |
-| Project scaffold, pyproject, Makefile | pending |
-| `config` | pending |
-| `domain` (33 models) | pending |
-| `graph/state.py` contract | pending |
-| `security` redaction | pending |
-| `policies` engine + pack | pending |
-| `integrations` Protocols + simulator | pending |
-| `detectors` (13) | pending |
-| `decision_services`, `dispatch` | pending |
-| `graph` parent + subgraphs + interrupts | pending |
-| `persistence` + migrations | pending |
-| `api` | pending |
-| `observability` + KPIs | pending |
-| tests | pending |
-| docs + diagrams | pending |
-| demo | pending |
+"Done" below means the code exists **and** something ran against it, not that it was written.
+`ruff check src tests` and `mypy --strict` are clean over 64 source files as of this row set, and
+`pytest` collects and passes 65 tests.
+
+| Area | State | How it was checked |
+| --- | --- | --- |
+| API verification (§2) | done | probe graph, output quoted in §2 |
+| Project scaffold, pyproject, Makefile, README | done | `pip install -e ".[dev]"` succeeds |
+| `config` (settings, clock, scan windows) | done | write-permission matrix, 4/4 combinations |
+| `domain` (34 required models + 6 supporting) | done | 40 exports import; model set parsed from the specification and compared |
+| `graph/state.py` contract + reducers | done | imports; reducer behaviour not yet exercised by the graph |
+| `security` (redaction, injection, RBAC) | done | nested-dict masking with a verified positive control |
+| `observability` (logging, tracing, KPIs) | done | 17 trace attributes; 26/28 KPI members derived, 2 declared non-derivable |
+| `integrations` Protocols + `WriteGate` | done | `isinstance` **and** parameter-name match against the Protocols |
+| ten fixture-backed simulators + 41-service network | done | 78-assertion smoke run; 21 HFC / 20 PON topologies resolve |
+| `policies` engine + pack | done | 175-assertion scratch run: fail-closed on a missing pack, every threshold read from YAML |
+| `detectors` (13) | done | 65 committed tests; fire/clean sweep over all 41 services; 4 defects found by execution, each now a named regression test |
+| `decision_services`, `dispatch` | **pending** | — |
+| `graph` parent + subgraphs + interrupts | **pending** | — |
+| `persistence` + migrations | **pending** | — |
+| `api` | **pending** | — |
+| model provider + deterministic fake | **pending** | — |
+| tests | detectors only | `tests/unit/test_detectors.py`, 65 passing; every other row above still rests on a scratch script |
+| docs + diagrams | 1 of 9 | `docs/vendor-integration-gaps.md` only |
+| demo | **pending** | — |
 
 ## 6. Known gaps
 
-Filled in as the work proceeds — a gap named here is a gap acknowledged, and an empty section at the
-end of a pass this large would be the least believable part of the document.
+A gap named here is a gap acknowledged. An empty section at the end of a pass this large would be the
+least believable part of the document.
+
+1. **The committed test suite covers the detectors and nothing else.** `tests/unit/test_detectors.py`
+   is real; every other row in §5 still rests on a throwaway script run outside the repository, which
+   is enough to know that code works and not enough to know it keeps working. The policy pack's
+   175 assertions are the largest such debt. The coverage gate is unmet.
+
+   Each of the four detector regression tests was checked by reinstating the defect it names and
+   confirming the suite goes red — and that check earned its keep immediately. The test written for
+   the non-accumulating classifier pass **passed with the defect reinstated**: it asserted
+   `physical_evidence > 0` on the first service with a localised delimiter fault, and that service
+   already carried 1.54 of physical evidence from the telemetry detectors. The localiser's
+   contribution is only observable on the 17 services where it is the *sole* source, so the
+   invariant had to become the exact sum rather than its sign. A regression test never seen to fail
+   is a regression test that has not been tested, and the rest of this suite should be held to the
+   same standard rather than to a passing run.
+2. **The specification's model list has 34 entries, not 33.** Counted from its own bullet list. Two
+   earlier docstrings in this repository said 33 and were wrong; the count is now asserted by a test
+   that parses the specification rather than restated in prose.
+3. **`simulated: True` is returned even when the gate permits the write.** This is deliberate — a
+   fixture-backed adapter never opens a TR-069 session, and claiming otherwise would be the defect —
+   but it means "did this write really happen?" must be read from `result["gate"]["permitted"]`, not
+   from `result["simulated"]`. A real adapter would return `simulated: False`.
+4. **`stream_events(version="v3")` is unverified.** See the end of §2. Nothing depends on it.
+5. **Postgres is untested against a live server.** The lazy-import path is exercised; `setup()` and
+   the resume-after-restart scenario are not, and will be marked `@pytest.mark.postgres`.
+6. **Vendor field names are invented.** 47 of them, listed in `docs/vendor-integration-gaps.md`.
+   That file is the falsifiable part of assumption A1.

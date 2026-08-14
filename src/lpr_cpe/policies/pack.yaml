@@ -1,0 +1,523 @@
+# =================================================================================================
+# LPR CPE service assurance -- policy pack
+# =================================================================================================
+#
+# This file is the only place an operational threshold is written down. No detector, node, decision
+# service or adapter holds a tunable literal of its own; each reads from here through
+# `PolicyEngine`, passing the default it would use if the pack were silent. That arrangement is what
+# makes "change the at-risk band from 55 to 60" a reviewable one-line diff rather than a code search.
+#
+# ---- On the numbers -----------------------------------------------------------------------------
+#
+# The specification names the fifteen policy areas that must be covered but supplies no values for
+# them, and no LPR-supplied tuning data was available (IMPLEMENTATION_PLAN.md A1). **Every number
+# below is therefore our own choice, not a Liberty Puerto Rico standard.** Each carries a comment
+# saying what it is protecting against, because a threshold whose reasoning is not written down is a
+# threshold nobody will ever dare change. When real operational data arrives these are the rows to
+# re-fit; the structure should not need to move.
+#
+# ---- On `version` -------------------------------------------------------------------------------
+#
+# The string below is the human-readable half only. `PolicyEngine.policy_version` appends a short
+# hash of this file's parsed content, giving e.g. `2026.08.1+3f9a1c7d5e02`. A hand-maintained version
+# alone would let someone edit a threshold and forget to bump it, and every `PolicyDecision` written
+# afterwards would carry a version that no longer describes the rules that produced it -- which
+# quietly destroys the audit trail's only means of reconstructing a past decision.
+#
+# ---- On failing closed --------------------------------------------------------------------------
+#
+# Absence is never permission. An action type missing from `remote_actions` is blocked, not allowed;
+# an approval kind missing from `approvals` requires the most senior role rather than none. See
+# `engine.py`.
+# =================================================================================================
+
+version: "2026.08.1"
+description: >-
+  Baseline policy pack for HFC and PON predictive service assurance in Puerto Rico. Values are
+  initial engineering judgement, not measured operating points.
+
+# -------------------------------------------------------------------------------------------------
+# 1-2. Evidence minimums and freshness
+# -------------------------------------------------------------------------------------------------
+#
+# D05 asks whether the evidence is complete and fresh enough for the *next* decision, which is why
+# the minimums are graded by what is about to be decided rather than being one global bar. Refusing
+# to reboot a modem needs less proof than refusing to send a technician 90 minutes into the
+# mountains, and one bar set high enough for the second would stall the first.
+evidence:
+  # Minimum number of independent adapter reads that must have succeeded. Two rather than one: a
+  # single source that agrees with itself is not corroboration, and the most common real failure is
+  # one stale system read confidently.
+  min_sources_for_diagnosis: 2
+  min_sources_for_remote_action: 2
+  min_sources_for_dispatch: 3
+  min_sources_for_closure: 2
+
+  # Maximum age of a telemetry read, in minutes, before it is treated as stale. 15 minutes matches a
+  # typical DOCSIS/PON polling interval -- anything older may predate the fault entirely, and acting
+  # on it is how a modem gets rebooted for a problem that cleared an hour ago.
+  max_telemetry_age_minutes: 15
+  # Topology and inventory change on a work-order timescale, not a polling one, so a much longer
+  # window is honest. A day-old tap record is almost certainly still correct; a day-old RF reading
+  # is worthless.
+  max_topology_age_minutes: 1440
+  max_sla_age_minutes: 1440
+  # Dispatch is the expensive, hard-to-reverse decision, so it gets the tightest freshness bar of
+  # all: a truck sent on 30-minute-old data may arrive at a fault that has already self-cleared.
+  max_age_for_dispatch_minutes: 30
+
+  # Blocking data-quality flags. If an assessment carries any of these, no action proceeds without
+  # a human. Every entry must be a `DataQualityFlag` member and the set must be a *superset* of
+  # `DataQualityAssessment.BLOCKING_FLAGS`, which is the code-side floor -- the loader enforces both,
+  # so this row can tighten the rule without a deployment and cannot loosen it below the code.
+  #
+  # The floor is the three below. `stale_data` is deliberately NOT blocking: staleness is handled by
+  # the freshness windows above, which say how stale is too stale per decision, and duplicating it
+  # here as a hard block would stop every action on data 16 minutes old.
+  blocking_flags:
+    - adapter_unavailable
+    - conflicting_sources
+    - inconsistent_topology
+
+# -------------------------------------------------------------------------------------------------
+# 3. RCA confidence thresholds
+# -------------------------------------------------------------------------------------------------
+#
+# D06 asks whether root-cause confidence is sufficient *for the proposed action*, so these are
+# graded by action consequence too. The gap between `min_for_remote_action` and `min_for_dispatch`
+# is the whole point: being wrong about a reboot costs a customer two minutes; being wrong about a
+# dispatch costs a crew half a day and the customer their appointment window.
+rca:
+  min_for_autonomous_action: 0.75
+  min_for_remote_action: 0.65
+  min_for_dispatch: 0.70
+  min_for_mr: 0.75
+  # Below this, the incident goes to the low-confidence RCA review interrupt rather than guessing.
+  # 0.45 rather than 0.5 so that a genuinely ambiguous case (two hypotheses near 0.5) still reaches
+  # a human instead of the marginally-higher one being treated as a finding.
+  review_below: 0.45
+  # Two hypotheses within this distance of each other are "conflicting", not "ranked". Ranking them
+  # anyway is how a confident-looking RCAResult gets built out of a coin flip.
+  ambiguity_margin: 0.10
+
+# -------------------------------------------------------------------------------------------------
+# 4-5. Remote-action allowlist and risk classes
+# -------------------------------------------------------------------------------------------------
+#
+# This is an allowlist, and its most important property is that it is exhaustive by construction:
+# an action type absent from it is blocked. Adding a new `ActionType` to the enum without adding a
+# row here makes it unusable rather than unrestricted, which is the correct direction to fail.
+#
+# `risk` names a class defined in `risk_classes` below; per-action rows may not invent thresholds,
+# they may only pick a class. That keeps "what does high risk mean" in one place instead of
+# twenty-one.
+risk_classes:
+  read_only:
+    requires_approval: false
+    max_blast_radius: 100000       # a read cannot break anything, so the cap is nominal
+    reversible: true
+  low:
+    requires_approval: false
+    max_blast_radius: 1
+    reversible: true
+  medium:
+    requires_approval: false
+    max_blast_radius: 8            # one tap leg / one ODP: see blast_radius.delimiter_default
+    reversible: true
+  high:
+    requires_approval: true
+    approval_kind: high_risk_remote_action
+    max_blast_radius: 64
+    reversible: false
+  network:
+    requires_approval: true
+    approval_kind: high_blast_radius_action
+    max_blast_radius: 2000
+    reversible: false
+
+remote_actions:
+  # -- reads: always allowed, and listed explicitly so the allowlist stays exhaustive -------------
+  read_status:          { allowed: true,  risk: read_only }
+  run_diagnostic:       { allowed: true,  risk: read_only }
+
+  # -- single-subscriber repairs -----------------------------------------------------------------
+  # A reboot is the cheapest useful action and the one most likely to be attempted reflexively,
+  # which is why it is capped at one subscriber: "reboot everything behind the node" is a different
+  # action with a different risk class, not a bulk version of this one.
+  cpe_reboot:           { allowed: true,  risk: low,    max_attempts_key: remote }
+  cpe_resync:           { allowed: true,  risk: low,    max_attempts_key: remote }
+  wifi_channel_change:  { allowed: true,  risk: low,    max_attempts_key: remote }
+  wifi_power_change:    { allowed: true,  risk: low,    max_attempts_key: remote }
+
+  # Reprovisioning and profile changes touch the provisioning system, so a failed one can leave a
+  # service in a worse state than it started. Still automatic, but medium: they count against the
+  # tighter blast-radius cap and require corroborated evidence.
+  profile_change:       { allowed: true,  risk: medium, max_attempts_key: remote }
+  reprovision:          { allowed: true,  risk: medium, max_attempts_key: remote }
+
+  # Firmware is the classic irreversible remote action: a failed flash turns a degraded modem into a
+  # dead one and a remote fix into a truck roll. Approval required, always.
+  cpe_firmware_update:  { allowed: true,  risk: high,   max_attempts_key: remote }
+  # A factory reset destroys the customer's own Wi-Fi name and password. Even with approval it is
+  # rarely the right answer, and it is listed to make that judgement explicit rather than absent.
+  cpe_factory_reset:    { allowed: true,  risk: high,   max_attempts_key: remote }
+
+  # -- shared-infrastructure actions -------------------------------------------------------------
+  # These take out every subscriber behind the element. Approval is not a formality here: the
+  # difference between resetting one OLT port and the wrong OLT port is 32 households.
+  node_level_reset:     { allowed: true,  risk: network }
+  olt_port_reset:       { allowed: true,  risk: network }
+  # Deliberately NOT allowed. A bulk config push is the action most capable of turning one incident
+  # into an outage, and nothing in this workflow needs it: the per-service path already covers every
+  # case we can diagnose. Left present-and-false rather than omitted so the refusal is visible.
+  bulk_config_push:     { allowed: false, risk: network }
+
+  # -- workflow actions (not device writes, but still typed and gated) ---------------------------
+  send_self_help:       { allowed: true,  risk: low,    max_attempts_key: self_help }
+  notify_customer:      { allowed: true,  risk: low }
+  create_work_order:    { allowed: true,  risk: medium, max_attempts_key: work_order,
+                          approval_kind: dispatch }
+  cancel_work_order:    { allowed: true,  risk: low }
+  raise_mr:             { allowed: true,  risk: medium, max_attempts_key: mr,
+                          approval_kind: clean_to_dirty_handover }
+  update_mr:            { allowed: true,  risk: low }
+  create_pm_case:       { allowed: true,  risk: low }
+  close_incident:       { allowed: true,  risk: medium }
+
+# -------------------------------------------------------------------------------------------------
+# 6. Blast-radius limits
+# -------------------------------------------------------------------------------------------------
+#
+# Blast radius is counted in services, and the defaults below are how many services sit behind an
+# element when topology cannot tell us. Guessing low would understate risk and let an action through
+# that should have been approved, so these are deliberately at the upper end of plausible.
+blast_radius:
+  # An HFC tap leg and a PON ODP both commonly serve 4-8; 8 is the pessimistic default.
+  delimiter_default: 8
+  tap_default: 8
+  odp_default: 8
+  # A distribution amplifier leg, a fibre node service group, an OLT PON port, an OLT.
+  distribution_default: 120
+  node_default: 500
+  pon_port_default: 32
+  olt_default: 2000
+
+  # Above this many affected services, an action is a network event whatever its risk class, and it
+  # takes the high-blast-radius approval interrupt. 25 is set just above a single distribution leg's
+  # worth of *customers actually complaining* -- past that point it is a plant problem being treated
+  # as a customer problem.
+  network_action_threshold: 25
+  # Above this, the incident is a common-cause cluster and individual truck rolls are actively
+  # wrong: five separate technicians will each find nothing at five separate houses.
+  common_cause_threshold: 3
+  # Fraction of a delimiter's peers that must be affected before the fault is placed *at* the
+  # delimiter rather than in one drop. 0.5 rather than a count so the rule works for a 4-way tap and
+  # a 12-way ODP without a second threshold.
+  common_cause_peer_fraction: 0.5
+
+# -------------------------------------------------------------------------------------------------
+# 7. Approval requirements
+# -------------------------------------------------------------------------------------------------
+#
+# The six kinds here are exactly the six LangGraph interrupt points the specification requires. They
+# are listed in one place so that "which decisions need a human" is answerable without reading the
+# graph.
+#
+# `expires_after_minutes` is not a timeout that proceeds anyway -- an expired approval escalates. An
+# approval gate that defaults to yes after four hours is not an approval gate.
+#
+# `required_role` is the *minimum* role, and it must be a `security.rbac.Role` member that
+# `rbac.approvers_for(kind)` actually contains. The loader enforces both. This is not pedantry: an
+# earlier draft of this file said `senior_engineer`, `dispatch_supervisor`, `field_supervisor` and
+# `assurance_manager`, none of which `Role` defines -- so every one of those gates would have named a
+# role no principal can hold and no `can_approve()` call could ever satisfy. The full approver set
+# per kind lives in `rbac._APPROVERS` (one owner); this row only names the floor that the operator
+# sees in the interrupt payload.
+approvals:
+  low_confidence_rca:
+    required_role: noc_operator
+    expires_after_minutes: 240
+    escalate_on_expiry: true
+  high_risk_remote_action:
+    required_role: noc_operator
+    expires_after_minutes: 120
+    escalate_on_expiry: true
+  dispatch:
+    required_role: noc_operator
+    expires_after_minutes: 240
+    escalate_on_expiry: true
+  clean_to_dirty_handover:
+    # The receiving side must be the one to accept: an OSP engineer rejecting an incomplete packet
+    # here is the control that prevents a wasted second visit. A technician may also answer (they are
+    # party to the handover) -- see `rbac._APPROVERS` -- but the floor is the engineer who inherits
+    # the work.
+    required_role: osp_engineer
+    expires_after_minutes: 480
+    escalate_on_expiry: true
+  high_blast_radius_action:
+    required_role: noc_supervisor
+    expires_after_minutes: 60
+    escalate_on_expiry: true
+  exceptional_closure:
+    # Closing without proof is the one approval that cannot be delegated downward: it is the
+    # override on "proof before closure", so it costs a supervisor's name.
+    required_role: noc_supervisor
+    expires_after_minutes: 1440
+    escalate_on_expiry: false
+
+# -------------------------------------------------------------------------------------------------
+# 8-11. Attempt limits
+# -------------------------------------------------------------------------------------------------
+#
+# "Do not blindly repeat the same action." Each limit is small on purpose. A third reboot that fixes
+# nothing is not persistence, it is the workflow refusing to admit the fault is physical -- and each
+# retry costs the customer another service interruption while it happens.
+attempt_limits:
+  # Two remote attempts, then stop guessing and look at the plant. The second attempt exists because
+  # the first can legitimately fail on a transient (a modem mid-registration); a third would be
+  # hoping.
+  remote: 2
+  # Self-help is bounded by customer patience, not by system capability. Two guided attempts is
+  # already a lot to ask of someone whose internet is broken.
+  self_help: 2
+  # Two truck rolls for one incident is the KPI everyone watches. A third requires an explicit
+  # reason and an escalation, which is what `require_reason_beyond` below encodes.
+  work_order: 2
+  mr: 2
+  plant: 2
+  # Total nodes executed for one incident, across all loops. This is the bounded-loop guard: past
+  # this the graph escalates rather than continuing, so a routing cycle cannot spin forever burning
+  # adapter calls. 200 is generous for the longest legitimate path (roughly 60 nodes) while still
+  # catching a loop within a few minutes.
+  total_steps: 200
+  # Times the same subgraph may be re-entered before the guard fires. A legitimate re-diagnose
+  # happens two or three times; six is a loop.
+  max_subgraph_reentries: 6
+  # Beyond these counts an action needs a stated reason and a fresh diagnosis, never a repeat.
+  require_reason_beyond:
+    work_order: 1
+    mr: 1
+
+# -------------------------------------------------------------------------------------------------
+# 12-13. Stability window and closure requirements
+# -------------------------------------------------------------------------------------------------
+#
+# "Proof before closure." The specification lists six things closure requires and explicitly forbids
+# closing because a command succeeded or an alarm went quiet. These rows are the configurable part
+# of that rule; `ClosureRecord`'s validators are the non-configurable part, and the pack cannot
+# lower them.
+validation:
+  # How long service must be observed *good* before it counts as restored. 30 minutes is the
+  # smallest window in which a marginal fault (a cracked connector that fails when the sun warms
+  # the drop) has a realistic chance of reappearing. Anything shorter mostly proves the reboot
+  # completed, which the specification says is not proof.
+  stability_window_minutes: 30
+  # A plant repair affects many services, so it earns a longer observation window -- and the cost of
+  # a premature all-clear is multiplied by everyone behind the element.
+  stability_window_plant_minutes: 60
+  # Minimum successful post-fix telemetry samples inside the window. One sample is a moment, not a
+  # window.
+  min_post_fix_samples: 3
+  # The original anomaly must be absent, not merely improved. Expressed as the fraction of the
+  # original anomaly score that must have disappeared.
+  min_anomaly_reduction: 0.70
+  # Customer confirmation is required when telemetry cannot speak to user experience -- a Wi-Fi
+  # coverage complaint is the standard case: every RF and optical reading can be perfect while the
+  # customer still cannot use the far bedroom.
+  require_customer_confirmation_for_domains:
+    - customer_environment
+    - inside_home_wiring
+    - no_fault_found
+
+closure:
+  require_validation_passed: true
+  require_reconciliation: true
+  require_linked_records_consistent: true
+  # Closing without a passed validation is possible only through the exceptional path, and only with
+  # the approval named in `approvals.exceptional_closure`.
+  allow_exceptional_closure: true
+  exceptional_closure_requires_approval: true
+  # Re-opening never rewinds a closed incident's clock; it creates a linked incident. This row is
+  # here so the rule is visible in the policy pack an operator reads, not only in the lifecycle
+  # table an engineer reads.
+  reopen_creates_linked_incident: true
+
+# -------------------------------------------------------------------------------------------------
+# 14. Reconciliation retries
+# -------------------------------------------------------------------------------------------------
+reconciliation:
+  # Linked records live in five systems that fail independently, so a first mismatch is usually a
+  # timing artefact rather than a real disagreement.
+  max_retries: 3
+  retry_backoff_seconds: [30, 120, 600]
+  # After the retries, a persisting mismatch is a data-integrity finding and goes to a human. It is
+  # never resolved by closing the incident and hoping.
+  escalate_on_persistent_mismatch: true
+  systems:
+    - tmf
+    - wfm
+    - jtrack
+    - inventory
+    - service_platform
+
+# -------------------------------------------------------------------------------------------------
+# 15. Escalation rules
+# -------------------------------------------------------------------------------------------------
+escalation:
+  on_loop_limit: true
+  on_adapter_unavailable: true
+  on_approval_expiry: true
+  on_persistent_reconciliation_mismatch: true
+  on_conflicting_evidence: true
+  # An SLA breach that is merely *approaching* still escalates: escalating after the breach is
+  # reporting, not assurance.
+  sla_breach_warning_fraction: 0.75
+  # Must be a `security.rbac.Role` member; the loader checks. The supervisor is the most senior role
+  # in that enum below `admin`, and escalating to `admin` would route operational judgement to
+  # whoever holds the deployment credentials.
+  target_role: noc_supervisor
+
+# -------------------------------------------------------------------------------------------------
+# Customer contact controls
+# -------------------------------------------------------------------------------------------------
+#
+# Not in the specification's list of fifteen, but `ReasonCode` has POLICY_QUIET_HOURS and
+# POLICY_VULNERABLE_CUSTOMER_PROTECTION members, and a reason code with no rule behind it is a
+# reason code that will never be returned. These are the rules behind them.
+customer_contact:
+  # Local time, America/Puerto_Rico. Outbound contact outside this window is blocked unless the
+  # incident is critical -- waking someone at 03:00 to tell them their Wi-Fi is slow is a worse
+  # customer outcome than telling them at 08:00.
+  quiet_hours_start: "21:00"
+  quiet_hours_end: "07:00"
+  quiet_hours_override_severity: critical
+  # Three contacts per incident per day. Past that the workflow is talking to itself.
+  max_contacts_per_incident_per_day: 3
+  min_minutes_between_contacts: 60
+  # A customer flagged as vulnerable (medical dependency on the connection, accessibility needs) is
+  # never routed to guided self-help and never left to a timeout: their case escalates to a human
+  # instead. Self-help assumes a customer who can climb behind furniture and read a label.
+  vulnerable_customer_skip_self_help: true
+  vulnerable_customer_priority_boost: 1
+
+# -------------------------------------------------------------------------------------------------
+# Health bands (deterministic scorer output; D6 in IMPLEMENTATION_PLAN.md)
+# -------------------------------------------------------------------------------------------------
+#
+# The Wi-Fi/CPE health score is computed deterministically and banded here. The language model is
+# handed a schema with `wifi_health_score` and `verdict` **removed**, and these values are merged in
+# afterwards, so the bands below are the sole owner of the verdict. Keeping them in the pack means a
+# band change is a versioned config change that every affected `PolicyDecision` records.
+health_bands:
+  # Score is 0-100, higher is better. Read as: healthy at 80 and above, critical below 40.
+  healthy_at_or_above: 80
+  degraded_at_or_above: 60
+  at_risk_at_or_above: 40
+  # Below `at_risk_at_or_above` is critical.
+  # A predictive scan result at or below this band produces an AssuranceEvent that enters the
+  # workflow; anything better is recorded for KPI purposes only and creates nothing. This is the
+  # line between "we are watching" and "we are acting".
+  event_threshold_band: at_risk
+  dispatch_threshold_band: critical
+
+# -------------------------------------------------------------------------------------------------
+# Predictive scan cadence
+# -------------------------------------------------------------------------------------------------
+#
+# Authoritative per the specification, which overrides the reference implementation's single
+# arbitrary daily cron. The scan is a batch job driven by an external scheduler, never a sleep
+# inside a graph thread.
+scan:
+  windows_local: ["07:00", "21:00"]
+  timezone: "America/Puerto_Rico"
+  # A post-install baseline scan runs once, this long after the install work order closes -- long
+  # enough for the customer to have connected their own devices, short enough that a cabling
+  # mistake is still traceable to the install.
+  post_install_baseline_delay_hours: 72
+  max_devices_per_run: 5000
+
+# -------------------------------------------------------------------------------------------------
+# Detector threshold overrides
+# -------------------------------------------------------------------------------------------------
+#
+# Detectors call `context.threshold(name, default)` and state their own default at the call site, so
+# this section is *sparse by design*: it holds only the values we chose to move away from the
+# detector's own default. An empty subsection means "the detector's default stands", which is a
+# meaningful thing to be able to say. Anything listed here overrides.
+detector_thresholds: {}
+
+# -------------------------------------------------------------------------------------------------
+# Dispatch
+# -------------------------------------------------------------------------------------------------
+#
+# Puerto Rico specifics: four area archetypes with genuinely different travel economics, and a
+# mountainous interior where a 20 km trip can take an hour. Travel is per-archetype rather than a
+# single average speed because averaging metro San Juan with the central mountains produces a number
+# that is wrong for both.
+dispatch:
+  archetype_speed_kph:
+    metro_mdu: 22
+    coastal_city_suburb: 38
+    central_mountain_rural: 24
+    remote_island: 12          # includes the ferry, which is why it is this low
+  # Fixed overhead per visit, in minutes: parking, gaining access, and finding the right unit. The
+  # MDU number is high because the walk from the street to a 12th-floor apartment is real work that
+  # a straight-line travel estimate misses entirely.
+  archetype_access_overhead_minutes:
+    metro_mdu: 25
+    coastal_city_suburb: 10
+    central_mountain_rural: 15
+    remote_island: 20
+  default_visit_minutes: 60
+  clean_boots_visit_minutes: 60
+  dirty_boots_visit_minutes: 120
+  joint_visit_minutes: 150
+  # Objective weights for the deterministic optimizer. They are here rather than in the optimizer so
+  # that "we now care more about SLA than travel" is a config change with a version number attached.
+  objective_weights:
+    sla_risk: 100
+    blast_radius: 40
+    travel_minutes: 1
+    crew_skill_match: 25
+    appointment_window: 60
+    vulnerable_customer: 50
+  # Hard constraints. A schedule violating any of these is infeasible, not merely poor -- the
+  # optimizer must report which one, because "no feasible schedule" with no reason is unactionable
+  # for the dispatcher who has to fix it.
+  max_jobs_per_crew_per_shift: 6
+  shift_minutes: 480
+  max_overtime_minutes: 60
+  require_crew_type_match: true
+  respect_appointment_windows: true
+  # Weather stand-down: aerial plant work stops above this sustained wind. Puerto Rico's storm
+  # season makes this a routine constraint, not an exception.
+  aerial_work_max_wind_kph: 45
+  # Remote-island and mountain work needs a same-day return margin; stranding a crew overnight is a
+  # different kind of failure from being late.
+  remote_island_latest_start_local: "13:00"
+
+# -------------------------------------------------------------------------------------------------
+# SLA
+# -------------------------------------------------------------------------------------------------
+#
+# One clock per incident, started at intake and never reset (see the `write_once` reducer). Every
+# deadline below is *derived* from that instant rather than stored, so there is no way for a stored
+# deadline to disagree with the clock it came from.
+sla:
+  response_minutes:
+    critical: 30
+    high: 60
+    medium: 240
+    low: 480
+    info: 1440
+  restore_minutes:
+    critical: 240
+    high: 480
+    medium: 1440
+    low: 2880
+    info: 5760
+  # Business-hours-only clocks are a common source of dispute; this pack runs a wall-clock SLA and
+  # says so, rather than implementing a calendar nobody agreed on.
+  clock: wall_clock
+  # A vulnerable customer's incident is treated one severity band tighter.
+  vulnerable_customer_tighten_bands: 1

@@ -21,6 +21,7 @@ missing optical reading, and the graph would lose the twelve findings that did w
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
@@ -54,19 +55,32 @@ class DetectionContext:
     # Raw-ish reads, keyed by the adapter that produced them. Dicts rather than models because each
     # vendor payload shape is ours to define (A2) and freezing it into a model would imply a
     # confirmed contract.
-    nxt: dict[str, Any] = field(default_factory=dict)
-    plant: dict[str, Any] = field(default_factory=dict)
-    cpe_raw: dict[str, Any] = field(default_factory=dict)
-    wifi: dict[str, Any] = field(default_factory=dict)
-    service_platform: dict[str, Any] = field(default_factory=dict)
-    recent_changes: list[dict[str, Any]] = field(default_factory=list)
-    power_outages: list[dict[str, Any]] = field(default_factory=list)
-    weather: dict[str, Any] = field(default_factory=dict)
+    #
+    # `None` and an empty collection say different things, and the difference is load-bearing.
+    # `None` is "never fetched, or the fetch failed"; an empty dict or list is "fetched, and there
+    # was nothing there". For `power_outages` the empty list is the *healthy* answer -- no outage
+    # near this customer -- so a contract that called it missing data would make the power
+    # correlation detector report itself unavailable on nearly every incident it ran on, and the
+    # predictive-scan KPIs would count those as data-quality defects rather than clean results.
+    nxt: dict[str, Any] | None = None
+    plant: dict[str, Any] | None = None
+    cpe_raw: dict[str, Any] | None = None
+    wifi: dict[str, Any] | None = None
+    service_platform: dict[str, Any] | None = None
+    recent_changes: list[dict[str, Any]] | None = None
+    power_outages: list[dict[str, Any]] | None = None
+    weather: dict[str, Any] | None = None
 
-    peers: list[dict[str, Any]] = field(default_factory=list)
-    baseline: dict[str, float] = field(default_factory=dict)
-    history: dict[str, Any] = field(default_factory=dict)
+    peers: list[dict[str, Any]] | None = None
+    baseline: dict[str, float] | None = None
+    history: dict[str, Any] | None = None
     evidence: list[EvidenceItem] = field(default_factory=list)
+
+    #: What the detectors that already ran this pass produced, for the five that classify over the
+    #: others' output rather than over telemetry. `None` means those detectors have not run, which
+    #: is not the same as their having run and found nothing -- and the difference decides whether
+    #: "no fault found" is a conclusion or a statement that nobody looked.
+    prior: list[DetectorResult] | None = None
 
     # Thresholds come from the policy pack so a detector holds no tunable literal of its own.
     thresholds: dict[str, float] = field(default_factory=dict)
@@ -80,17 +94,53 @@ class DetectionContext:
         return float(self.thresholds.get(name, default))
 
     def missing(self, *names: str) -> list[str]:
-        """Which of these context attributes are absent or empty.
+        """Which of these context attributes were never supplied.
 
-        Detectors call this instead of writing their own `if not ctx.cpe` chains, so the resulting
-        `data_quality_warnings` are phrased identically across all thirteen.
+        `None` only, per the note on the fields above: an empty dict or list is a read that came
+        back with nothing, which is a result the detector should interpret rather than a defect
+        that should stop it running. Detectors call this instead of writing their own
+        `if not ctx.cpe` chains, so the resulting `data_quality_warnings` are phrased identically
+        across all thirteen.
         """
-        out: list[str] = []
-        for name in names:
-            value = getattr(self, name, None)
-            if value is None or (isinstance(value, dict | list) and not value):
-                out.append(name)
-        return out
+        return [name for name in names if getattr(self, name, None) is None]
+
+    def payload(self, name: str) -> dict[str, Any]:
+        """A dict read the `requires` gate has already proven present; `{}` is a valid answer."""
+        value = getattr(self, name, None)
+        if not isinstance(value, dict):
+            raise LookupError(f"{name} is not an available dict payload on the context")
+        return value
+
+    def rows(self, name: str) -> list[dict[str, Any]]:
+        """A list read the `requires` gate has already proven present; `[]` is a valid answer."""
+        value = getattr(self, name, None)
+        if not isinstance(value, list):
+            raise LookupError(f"{name} is not an available list payload on the context")
+        return value
+
+    def findings_from(
+        self, *detector_names: str, include_derived: bool = False
+    ) -> list[AnomalyFinding]:
+        """Findings from earlier detectors this pass; empty when they ran and were clean.
+
+        Reads only results whose `ran` is True, so a detector that could not look contributes
+        nothing here rather than contributing a silent absence of findings.
+
+        Derived results are excluded by default. A derived finding restates other findings rather
+        than adding evidence -- the domain classifier's output *is* the telemetry detectors'
+        output, folded -- so counting both would weigh the same observation twice and hand whichever
+        side the classifier picked a second vote it did not earn. Ask for them explicitly when the
+        summary is what you want.
+        """
+        wanted = set(detector_names)
+        return [
+            finding
+            for result in (self.prior or ())
+            if result.ran
+            and (include_derived or not result.derived)
+            and (not wanted or result.detector_name in wanted)
+            for finding in result.findings
+        ]
 
 
 @dataclass(slots=True)
@@ -111,6 +161,8 @@ class DetectorResult:
     data_quality_warnings: list[DataQualityFlag] = field(default_factory=list)
     evidence: list[EvidenceItem] = field(default_factory=list)
     duration_ms: float = 0.0
+    #: These findings restate earlier findings rather than adding evidence. See `findings_from`.
+    derived: bool = False
 
     @property
     def clean(self) -> bool:
@@ -130,13 +182,33 @@ class DetectorResult:
         *,
         flags: list[DataQualityFlag] | None = None,
     ) -> DetectorResult:
+        """Could not look. `flags=[]` is distinct from `flags=None` and means "and that is fine".
+
+        The default applies only when the caller says nothing at all. Passing an explicit empty
+        list is how a detector says the data quality is sound despite its not having run -- see
+        `not_applicable`, which is the case that needs it.
+        """
         return cls(
             detector_name=name,
             detector_version=version,
             ran=False,
             unavailable_reason=reason,
-            data_quality_warnings=flags or [DataQualityFlag.MISSING_FIELD],
+            data_quality_warnings=(
+                [DataQualityFlag.MISSING_FIELD] if flags is None else list(flags)
+            ),
         )
+
+    @classmethod
+    def not_applicable(cls, name: str, version: str, reason: str) -> DetectorResult:
+        """Does not apply to this subject, and nothing is wrong with the data.
+
+        A DOCSIS RF detector handed a PON service is the case: the reading it wants does not exist
+        for this technology, and the adapter says so by design. Reporting that as `MISSING_FIELD`
+        would make every PON incident accumulate phantom quality defects from the HFC-only
+        detectors and every HFC incident accumulate them from the PON-only ones, which would in
+        turn drag the evidence checks in the policy pack towards blocking on healthy services.
+        """
+        return cls.unavailable(name, version, reason, flags=[])
 
 
 @runtime_checkable
@@ -166,10 +238,35 @@ class BaseDetector:
     version: str = "0.0.0"
     #: Context attributes this detector cannot work without.
     requires: tuple[str, ...] = ()
+    #: Technologies this detector applies to at all. Empty means every technology.
+    applies_to: tuple[Technology, ...] = ()
+    #: True when this detector's findings summarise other detectors' findings rather than adding
+    #: evidence of their own. Declared on the class rather than passed at each return, so a detector
+    #: cannot be derived on one code path and not on another.
+    derives_from_prior: bool = False
 
     async def detect(self, context: DetectionContext) -> DetectorResult:
-        import time
-
+        # Technology first, `requires` second, and the order is the whole point. A DOCSIS detector
+        # handed a PON service has no `nxt` payload, so a `requires` check running first would
+        # report MISSING_FIELD -- a data-quality defect -- for a reading that does not exist and was
+        # never meant to. Every PON incident would then carry a phantom defect from the HFC
+        # detectors and vice versa, which is exactly what `not_applicable` was added to prevent.
+        #
+        # UNKNOWN is deliberately not excluded. "Not applicable" is a claim about the plant, and it
+        # can only be made when the plant's technology is known; skipping both physical detectors on
+        # a metadata gap would leave zero physical evidence, which the no-fault-found scorer reads
+        # as an argument against dispatch. A missing label must not become a diagnosis.
+        if (
+            self.applies_to
+            and context.technology is not Technology.UNKNOWN
+            and context.technology not in self.applies_to
+        ):
+            return DetectorResult.not_applicable(
+                self.name,
+                self.version,
+                f"service is {context.technology.value}; this detector applies to "
+                f"{', '.join(t.value for t in self.applies_to)}",
+            )
         missing = context.missing(*self.requires)
         if missing:
             return DetectorResult.unavailable(
@@ -209,9 +306,10 @@ class BaseDetector:
             detector_name=self.name,
             detector_version=self.version,
             ran=True,
-            findings=findings or [],
-            data_quality_warnings=flags or [],
-            evidence=evidence or [],
+            findings=list(findings) if findings is not None else [],
+            data_quality_warnings=list(flags) if flags is not None else [],
+            evidence=list(evidence) if evidence is not None else [],
+            derived=self.derives_from_prior,
         )
 
     def finding(
