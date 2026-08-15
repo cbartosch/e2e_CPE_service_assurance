@@ -22,6 +22,13 @@ the pack; the gate answers "may this deployment at all?" from configuration. An 
 policy first. Duplicating the two-switch check here would create a second owner for the most
 safety-critical boolean in the system, and the copy would be the one that goes stale.
 
+**Reads are exempt from the evidence and confidence bars, and from nothing else.** `read_status` and
+`run_diagnostic` are how evidence and confidence are *obtained*, so gating them on either is a
+closed loop that deadlocks the diagnosis stage on its opening call. The exemption is an explicit set
+(`_READ_ONLY_ACTIONS`) rather than a property inferred from the risk class, and the reasoning is at
+each of the two checks. Everything else -- the allowlist, the role, duplicate suppression -- still
+applies to a read.
+
 **Low RCA confidence requires approval; it does not block.** Blocking would leave the incident with
 nowhere to go, and the specification's `low_confidence_rca` interrupt exists precisely so a human
 can look at an ambiguous hypothesis set and decide. A confidence below `rca.review_below` and one
@@ -46,7 +53,12 @@ from lpr_cpe.domain.enums import (
     Severity,
 )
 from lpr_cpe.domain.governance import PolicyDecision
-from lpr_cpe.policies.loader import PolicyPackError, load_pack, policy_version
+from lpr_cpe.policies.loader import (
+    PolicyPackError,
+    canonical_digest,
+    load_pack,
+    policy_version,
+)
 from lpr_cpe.policies.models import PolicyPack
 from lpr_cpe.security.rbac import Role, ToolAllowlist, approvers_for
 
@@ -233,9 +245,15 @@ class PolicyEngine:
         audit trail that records `unavailable` for a block is telling the reviewer the truth,
         whereas recording the last known good version would attribute the block to rules that were
         not consulted.
+
+        The reason is *digested* rather than appended raw for two reasons. A pack validation error
+        is a multi-line pydantic report and a version string has to fit in a column; and two
+        distinct failures -- a missing file and a malformed threshold -- must not collapse into one
+        indistinguishable `unavailable`, or a reviewer reading a month of blocked decisions cannot
+        tell whether they had one cause or twenty. `unavailable_reason` carries the prose.
         """
         if self._pack is None:
-            return "unavailable"
+            return f"unavailable+{canonical_digest(self._unavailable_reason)[:12]}"
         return policy_version(self._pack)
 
     @property
@@ -387,9 +405,7 @@ class PolicyEngine:
                 if isinstance(request.actor_role, Role)
                 else str(request.actor_role)
             )
-            permitted = sorted(
-                r.value for r in ToolAllowlist.roles_permitting(request.action_type)
-            )
+            permitted = sorted(r.value for r in ToolAllowlist.roles_permitting(request.action_type))
             return [
                 _Finding(
                     reason_code=ReasonCode.POLICY_ACTION_NOT_PERMITTED_FOR_ROLE,
@@ -420,6 +436,23 @@ class PolicyEngine:
         return []
 
     def _check_evidence(self, request: PolicyInput, pack: PolicyPack) -> list[_Finding]:
+        # Reads are exempt, for the same reason they are exempt from the confidence bar below and
+        # stated here rather than assumed: a read is how evidence is *obtained*. Requiring two
+        # corroborating sources before permitting the action that produces the first one is a closed
+        # loop, and the diagnosis stage would deadlock on its opening call with
+        # `evidence_source_count=None` -- which is not a hypothetical, it is what the first
+        # `read_status` of every incident looks like.
+        #
+        # The freshness window and the blocking flags are exempt for the same reason and it is worth
+        # spelling out, because those two look safe to keep. They are not: refusing to re-read
+        # because the evidence we hold is stale, or because an adapter was unavailable last time,
+        # blocks the only action that could fix either condition. Evidence gates the decisions that
+        # *consume* evidence. `_READ_ONLY_ACTIONS` consume none -- they change no record, take no
+        # approval and are separately gated by `rbac.ToolAllowlist` and the write gate, so the
+        # exemption widens no write path.
+        if request.action_type in _READ_ONLY_ACTIONS:
+            return []
+
         out: list[_Finding] = []
         cls_ = request.effective_decision_class()
         required = pack.evidence.min_sources_for(cls_)
