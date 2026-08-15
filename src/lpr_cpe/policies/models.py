@@ -494,10 +494,19 @@ class HealthBandPolicy(PackSection):
         return self
 
     def band_for(self, score: float) -> HealthBand:
-        """Score to band. The sole owner of the mapping (IMPLEMENTATION_PLAN.md D6).
+        """Score (0-100) to band, for a score with no breach list attached.
 
         The language model never produces a `HealthBand`; the field is stripped from its schema and
-        this method's output is merged in afterwards, so a verdict is reproducible from the score.
+        this method's output is merged in afterwards, so a verdict is reproducible from the score
+        (IMPLEMENTATION_PLAN.md D6).
+
+        This is not the owner of the *Wi-Fi* band. `detectors.cpe_wifi.wifi_health_verdict` is, and
+        it applies one extra rule this method cannot: a breached metric denies `HEALTHY` whatever
+        the score. The cheapest breach costs 0.10, so a score of 0.90 with a coverage breach reaches
+        this method's healthy floor and is not healthy. The three boundaries below are the ones that
+        function reads, passed to it through its threshold mapping, so the numbers have one owner
+        even though the rule has two callers -- and `wifi_health_verdict` never returns a *better*
+        band than this method would for the same score.
         """
         if score >= self.healthy_at_or_above:
             return HealthBand.HEALTHY

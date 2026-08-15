@@ -35,17 +35,43 @@ DEFAULT_WIFI_THRESHOLDS: dict[str, float] = {
     "wifi.error_rate_max_pct": 5.0,
     "wifi.noise_floor_max_dbm": -85.0,
     "wifi.throughput_min_mbps": 80.0,
+    # Band boundaries, on this function's 0-1 scale. These are the same three numbers as
+    # `health_bands` in the policy pack, which states them on a 0-100 scale, and
+    # `tests/unit/test_decision_services.py` holds the two to each other. They are stated twice
+    # because neither side can import the other -- a detector takes a threshold mapping, not a pack
+    # -- and the alternative to a test is the pack and the detector disagreeing about the band on a
+    # score of 0.62, which is the band that decides whether a crew is sent.
+    "wifi.band_healthy_at_or_above": 0.80,
+    "wifi.band_degraded_at_or_above": 0.60,
+    "wifi.band_at_risk_at_or_above": 0.40,
 }
 
 
 @dataclass(frozen=True, slots=True)
 class WifiVerdict:
-    """The deterministic half of the Wi-Fi assessment: a score, a band, and why."""
+    """The deterministic half of the Wi-Fi assessment: a score, a band, and why.
+
+    The "why" is carried twice on purpose, in two vocabularies that must not be confused:
+
+    * `breaches` is prose, for the customer narrative and the operator's first read. It contains the
+      measured value, so it changes wording as freely as the reading changes.
+    * `breached_metrics` names the *metric* that breached, using the same keys as `features`. It is
+      the machine-readable half, and it exists because `decision_services.forecast` maps a breach to
+      the remote action that addresses it. That map was first written against the prose and matched
+      nothing -- "utilization" never appears in "airtime utilisation 82%" -- so it silently
+      recommended no action at all. A parallel tuple of stable keys is what makes such a map
+      checkable, and `test_decision_services.py` asserts every key in it is a metric this function
+      can actually emit.
+
+    Every entry in `breached_metrics` is a key of `features`; the reverse does not hold, because a
+    metric can be read and be fine.
+    """
 
     score: float
     band: HealthBand
     breaches: tuple[str, ...]
     features: dict[str, float]
+    breached_metrics: tuple[str, ...] = ()
 
     @property
     def healthy(self) -> bool:
@@ -62,6 +88,19 @@ _BREACH_BASE = 0.5
 #: TR-181 band labels as the CPE adapter emits them, mapped to the suffix used in the flat metric
 #: names. Anything else is ignored rather than guessed at.
 _BAND_SUFFIX = {"2.4GHz": "2g", "5GHz": "5g"}
+
+#: How bad a health band is, as an incident severity. Public and complete over the four bands
+#: because `decision_services.forecast` sets `PredictionResult.severity` from a band and the
+#: detector below sets a finding's severity from the same band -- the two are answering one question
+#: and would otherwise answer it in two places. `HEALTHY` maps to `INFO` rather than being omitted:
+#: a predictive scan that finds nothing still produces a record, and a record with no severity would
+#: have to be given one by whoever read it.
+SEVERITY_BY_BAND: dict[HealthBand, Severity] = {
+    HealthBand.HEALTHY: Severity.INFO,
+    HealthBand.DEGRADED: Severity.MEDIUM,
+    HealthBand.AT_RISK: Severity.HIGH,
+    HealthBand.CRITICAL: Severity.CRITICAL,
+}
 
 
 def _num(payload: dict[str, Any], key: str) -> float | None:
@@ -157,7 +196,10 @@ def wifi_health_verdict(
     wifi = normalise_wifi_snapshot(wifi)
     bar = {**DEFAULT_WIFI_THRESHOLDS, **(thresholds or {})}
     features: dict[str, float] = {}
-    breaches: list[str] = []
+    # Metric key and prose kept in one list so they cannot drift apart. Two lists appended to at ten
+    # sites is two chances per breach for one to be forgotten, and the failure is silent in exactly
+    # the direction that matters: a prose breach with no metric key is a breach no action maps to.
+    flagged: list[tuple[str, str]] = []
     penalties = 0.0
 
     # The worse of the two bands, not their mean. A congested 2.4 GHz radio is a real customer
@@ -188,43 +230,51 @@ def wifi_health_verdict(
     if util is not None:
         features["utilization_pct"] = util
         if util > bar["wifi.utilization_max_pct"]:
-            breaches.append(f"airtime utilisation {util:g}%")
+            flagged.append(("utilization_pct", f"airtime utilisation {util:g}%"))
             penalties += _breach(0.30, util - bar["wifi.utilization_max_pct"], 30.0)
     if rssi is not None:
         features["worst_rssi_dbm"] = rssi
         if rssi < bar["wifi.worst_rssi_min_dbm"]:
-            breaches.append(f"worst client RSSI {rssi:g} dBm")
+            flagged.append(("worst_rssi_dbm", f"worst client RSSI {rssi:g} dBm"))
             penalties += _breach(0.30, bar["wifi.worst_rssi_min_dbm"] - rssi, 12.0)
     if err is not None:
         features["error_rate_pct"] = err
         if err > bar["wifi.error_rate_max_pct"]:
-            breaches.append(f"error rate {err:g}%")
+            flagged.append(("error_rate_pct", f"error rate {err:g}%"))
             penalties += _breach(0.20, err - bar["wifi.error_rate_max_pct"], 8.0)
     if noise is not None:
         features["noise_floor_dbm"] = noise
         if noise > bar["wifi.noise_floor_max_dbm"]:
-            breaches.append(f"noise floor {noise:g} dBm")
+            flagged.append(("noise_floor_dbm", f"noise floor {noise:g} dBm"))
             penalties += _breach(0.20, noise - bar["wifi.noise_floor_max_dbm"], 10.0)
     if tput is not None:
         features["throughput_mbps"] = tput
         if tput < bar["wifi.throughput_min_mbps"]:
-            breaches.append(f"throughput {tput:g} Mbps")
+            flagged.append(("throughput_mbps", f"throughput {tput:g} Mbps"))
             penalties += _breach(0.20, bar["wifi.throughput_min_mbps"] - tput, 60.0)
 
     score = max(0.0, min(1.0, 1.0 - penalties))
-    # HEALTHY is defined by nothing having been breached, not by a score boundary. Grading it off
-    # the score alone allowed a verdict that called the Wi-Fi healthy while listing the breaches
-    # that made it not -- two halves of the same object contradicting each other, and the half the
-    # customer narrative reads is the band. Below that, the score grades how bad the breach is.
-    if not breaches:
+    # HEALTHY requires *both* a healthy score and nothing breached. The score alone is not enough:
+    # the cheapest single breach costs 0.10, so a client 6 dB below the coverage floor scored 0.90
+    # and was called healthy while the same verdict listed the RSSI breach that made it not -- two
+    # halves of one object contradicting each other, and the half the customer narrative reads is
+    # the band. The breach test is this function's own; the three boundaries belong to the policy
+    # pack and arrive through `thresholds`.
+    if not flagged and score >= bar["wifi.band_healthy_at_or_above"]:
         band = HealthBand.HEALTHY
-    elif score >= 0.65:
+    elif score >= bar["wifi.band_degraded_at_or_above"]:
         band = HealthBand.DEGRADED
-    elif score >= 0.40:
+    elif score >= bar["wifi.band_at_risk_at_or_above"]:
         band = HealthBand.AT_RISK
     else:
         band = HealthBand.CRITICAL
-    return WifiVerdict(score=score, band=band, breaches=tuple(breaches), features=features)
+    return WifiVerdict(
+        score=score,
+        band=band,
+        breaches=tuple(prose for _, prose in flagged),
+        features=features,
+        breached_metrics=tuple(metric for metric, _ in flagged),
+    )
 
 
 class CPEWiFiAnomalyDetector(BaseDetector):
@@ -287,11 +337,7 @@ class CPEWiFiAnomalyDetector(BaseDetector):
         if verdict.healthy:
             return self.ok(flags=flags)
 
-        severity = {
-            HealthBand.DEGRADED: Severity.MEDIUM,
-            HealthBand.AT_RISK: Severity.HIGH,
-            HealthBand.CRITICAL: Severity.CRITICAL,
-        }[verdict.band]
+        severity = SEVERITY_BY_BAND[verdict.band]
         return self.ok(
             [
                 self.finding(

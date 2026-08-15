@@ -72,10 +72,16 @@ class AnomalyFinding(FrozenDomainModel):
 class PredictionResult(FrozenDomainModel):
     """A forward-looking assessment, produced deterministically.
 
-    `wifi_health_score` and `band` are computed by `decision_services.scoring` and are the fields
-    the model is *not* allowed to author (IMPLEMENTATION_PLAN.md D6). `narrative` is the model's
-    only contribution and is optional -- a prediction with no narrative is still a usable
-    prediction, whereas a prediction whose score came from a model would not be.
+    `wifi_health_score` and `band` are the fields the language model is *not* allowed to author
+    (IMPLEMENTATION_PLAN.md D6). Both come from `detectors.cpe_wifi.wifi_health_verdict`, which is
+    their single owner; `decision_services.forecast` assembles this record around that verdict and
+    does not recompute either. An earlier draft of this docstring named a
+    `decision_services.scoring` module as the owner. There is no such module and there must not be
+    one: a second implementation of the score would be a second answer to "is this customer's Wi-Fi
+    healthy", and the two would be discovered to disagree by a customer.
+
+    `narrative` is the model's only contribution and is optional -- a prediction with no narrative
+    is still a usable prediction, whereas a prediction whose score came from a model would not be.
     """
 
     model_name: str
@@ -353,3 +359,124 @@ class RCAResult(DomainModel):
 
     def needs_human_review(self, threshold: float) -> bool:
         return self.confidence < threshold or self.fault_domain is FaultDomain.UNKNOWN
+
+    @model_validator(mode="after")
+    def _primary_is_a_live_hypothesis_in_the_stated_domain(self) -> Self:
+        """The named primary must exist, be live, and agree with `fault_domain`.
+
+        Without this the two fields drift: a re-diagnosis cycle that rejects the leading hypothesis
+        and updates `fault_domain` but leaves `primary_hypothesis_id` pointing at the rejected one
+        produces a result whose summary says `tap_or_odp` and whose cited hypothesis says `cpe`.
+        Both are read -- the summary by the operator, the id by the resolution planner -- so the
+        crew and the plan would be working from different diagnoses.
+        """
+        if self.primary_hypothesis_id is None:
+            return self
+        primary = next(
+            (h for h in self.hypotheses if h.hypothesis_id == self.primary_hypothesis_id), None
+        )
+        if primary is None:
+            raise ValueError(
+                f"primary_hypothesis_id {self.primary_hypothesis_id!r} names no hypothesis in "
+                f"this result; known: {[h.hypothesis_id for h in self.hypotheses]}"
+            )
+        if primary.rejected:
+            raise ValueError(
+                f"primary_hypothesis_id {self.primary_hypothesis_id!r} names a rejected "
+                f"hypothesis (reason: {primary.rejection_reason!r})"
+            )
+        if primary.fault_domain is not self.fault_domain:
+            raise ValueError(
+                f"fault_domain is {self.fault_domain.value} but the primary hypothesis "
+                f"{primary.hypothesis_id} is about {primary.fault_domain.value}"
+            )
+        return self
+
+    @classmethod
+    def derive(
+        cls,
+        *,
+        concluded_at: datetime,
+        fault_domain: FaultDomain,
+        hypotheses: list[RCAHypothesis],
+        delimiter_kind: DelimiterKind = DelimiterKind.UNKNOWN,
+        delimiter_ref: str | None = None,
+        evidence_refs: list[str] | None = None,
+        summary: str = "",
+        cycles_used: int = 1,
+        confident_at: float = 0.7,
+        ambiguity_margin: float = 0.1,
+    ) -> RCAResult:
+        """Build a result whose `confidence` is computed from the hypotheses rather than asserted.
+
+        `fault_domain` is supplied rather than chosen here, because which domain leads is
+        `detectors.localisation.FaultDomainClassifier`'s answer and this would be a second one. What
+        is computed here is how much the hypothesis set *supports* that domain, which is a different
+        question and the one the specification calls fault-domain confidence.
+
+        The formula is the leading in-domain posterior weighted by its share against the best rival
+        in another domain:
+
+            confidence = leader / (leader + rival) * leader
+
+        Two hypotheses at 0.45 in different domains therefore yield 0.225 rather than 0.45 -- the
+        case the class docstring describes, where each hypothesis is individually unremarkable and
+        the diagnosis as a whole is nonetheless a coin toss. A lone hypothesis at 0.45 yields 0.45,
+        because nothing competes with it.
+
+        A `fault_domain` that no live hypothesis supports is downgraded to `UNKNOWN` rather than
+        kept at zero confidence. Routing reads the domain, not the confidence: keeping the name
+        would send a crew to a plant element that nothing in the evidence implicates, and the
+        reviewer would see a confident-looking domain beside a zero.
+        """
+        live = sorted(
+            (h for h in hypotheses if not h.rejected), key=lambda h: h.posterior, reverse=True
+        )
+        in_domain = [h for h in live if h.fault_domain is fault_domain]
+        notes = summary
+
+        if not in_domain:
+            if fault_domain is not FaultDomain.UNKNOWN:
+                notes = (
+                    f"{summary} No live hypothesis supports {fault_domain.value}, so the domain is "
+                    "reported as unknown rather than asserted."
+                ).strip()
+            return cls(
+                concluded_at=concluded_at,
+                fault_domain=FaultDomain.UNKNOWN,
+                delimiter_kind=delimiter_kind,
+                delimiter_ref=delimiter_ref,
+                confidence=0.0,
+                primary_hypothesis_id=None,
+                hypotheses=list(hypotheses),
+                evidence_refs=list(evidence_refs or []),
+                summary=notes,
+                reason_code=ReasonCode.RCA_LOW_CONFIDENCE,
+                cycles_used=cycles_used,
+            )
+
+        leader = in_domain[0]
+        rival = next((h.posterior for h in live if h.fault_domain is not fault_domain), 0.0)
+        total = leader.posterior + rival
+        confidence = (leader.posterior / total) * leader.posterior if total > 0 else 0.0
+
+        if rival > 0 and (leader.posterior - rival) < ambiguity_margin:
+            reason = ReasonCode.RCA_CONFLICTING_EVIDENCE
+        elif confidence >= confident_at:
+            reason = ReasonCode.RCA_CONFIDENT
+        else:
+            reason = ReasonCode.RCA_LOW_CONFIDENCE
+
+        return cls(
+            concluded_at=concluded_at,
+            fault_domain=fault_domain,
+            delimiter_kind=delimiter_kind,
+            delimiter_ref=delimiter_ref or leader.suspected_delimiter_ref,
+            confidence=round(min(1.0, confidence), 4),
+            primary_hypothesis_id=leader.hypothesis_id,
+            hypotheses=list(hypotheses),
+            evidence_refs=list(evidence_refs or []),
+            summary=notes,
+            reason_code=reason,
+            cycles_used=cycles_used,
+        )

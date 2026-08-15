@@ -8,7 +8,10 @@ examined -- and `NO_FAULT_FOUND` is a closure reason, so that confusion closes l
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from lpr_cpe.detectors.base import BaseDetector, DetectionContext, DetectorResult
+from lpr_cpe.domain.diagnosis import AnomalyFinding
 from lpr_cpe.domain.enums import (
     DataQualityFlag,
     FaultDomain,
@@ -33,6 +36,28 @@ _DOMAIN_REACH: dict[FaultDomain, int] = {
     FaultDomain.HEADEND_OR_CO: 10,
     FaultDomain.POWER: 11,
 }
+
+
+def domain_weights(findings: Iterable[AnomalyFinding]) -> dict[FaultDomain, float]:
+    """How strongly the evidence points at each domain: sum of `score * confidence` per suspicion.
+
+    Module-level and public because `decision_services.rca` needs the same numbers to set hypothesis
+    posteriors, and the alternative -- multiplying score by confidence again over there -- would be
+    a second formula for the strength of the evidence. The two would agree today and diverge the
+    first time either was tuned, and the symptom would be an RCA whose leading hypothesis is not the
+    domain the classifier chose. `RCAResult._primary_is_a_live_hypothesis_in_the_stated_domain`
+    would turn that into a validation error inside an incident.
+
+    A plain dict rather than a `Counter`: `Counter` is `dict[T, int]` and these weights are products
+    of two floats, so accumulating into it would truncate every suspicion below 1.0 to zero.
+    """
+    weights: dict[FaultDomain, float] = {}
+    for finding in findings:
+        domain = finding.suspected_domain
+        if domain is None:
+            continue
+        weights[domain] = weights.get(domain, 0.0) + finding.score * finding.confidence
+    return weights
 
 
 class FaultDomainClassifier(BaseDetector):
@@ -92,16 +117,8 @@ class FaultDomainClassifier(BaseDetector):
             )
 
         # Weight each suspicion by the strength of the finding that raised it, so a confident
-        # optical breach outranks a speculative one rather than each counting as one vote. A plain
-        # dict rather than a `Counter`, because `Counter` is `dict[T, int]` and these weights are
-        # products of two floats -- accumulating them into an int-typed mapping would truncate every
-        # suspicion below 1.0 to zero.
-        weights: dict[FaultDomain, float] = {}
-        for finding in findings:
-            domain = finding.suspected_domain
-            if domain is None:
-                continue
-            weights[domain] = weights.get(domain, 0.0) + finding.score * finding.confidence
+        # optical breach outranks a speculative one rather than each counting as one vote.
+        weights = domain_weights(findings)
 
         if not weights:
             return self.ok(
