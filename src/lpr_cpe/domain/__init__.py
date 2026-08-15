@@ -24,6 +24,16 @@ from lpr_cpe.domain.base import (
     new_incident_id,
     object_reference,
 )
+from lpr_cpe.domain.boundaries import (
+    BACK_OFFICE_DOMAINS,
+    PLANT_DOMAINS,
+    PREMISES_DOMAINS,
+    UNDISPATCHABLE_DOMAINS,
+    crew_for,
+    is_classified,
+    is_plant_side,
+    is_premises_side,
+)
 from lpr_cpe.domain.closure import ClosureRecord, ReconciliationResult, ValidationResult
 from lpr_cpe.domain.diagnosis import (
     AnomalyFinding,
@@ -147,6 +157,16 @@ __all__ = [
     "TRANSITIONS",
     "can_transition",
     "require_transition",
+    # boundaries -- the Clean/Dirty Boots split, exported for the same reason as `lifecycle`:
+    # several call sites need it and none of them may hold their own copy
+    "BACK_OFFICE_DOMAINS",
+    "PLANT_DOMAINS",
+    "PREMISES_DOMAINS",
+    "UNDISPATCHABLE_DOMAINS",
+    "crew_for",
+    "is_classified",
+    "is_plant_side",
+    "is_premises_side",
     # the 34 models the specification requires by name, alphabetical
     "AnomalyFinding",
     "ApprovalDecision",

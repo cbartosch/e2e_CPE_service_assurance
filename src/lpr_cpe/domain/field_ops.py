@@ -15,6 +15,7 @@ from typing import Any, ClassVar, Self
 from pydantic import Field, model_validator
 
 from lpr_cpe.domain.base import DomainModel, FrozenDomainModel
+from lpr_cpe.domain.boundaries import PLANT_DOMAINS
 from lpr_cpe.domain.enums import (
     AreaArchetype,
     CrewType,
@@ -254,15 +255,13 @@ class FieldFinding(FrozenDomainModel):
     def _plant_work_names_a_domain(self) -> Self:
         # A "send it to OSP" finding that does not say which plant object is the problem is the
         # single commonest cause of an MR rejection.
-        plant_domains = {
-            FaultDomain.TAP_OR_ODP,
-            FaultDomain.DISTRIBUTION,
-            FaultDomain.FEEDER,
-            FaultDomain.NODE_OR_OLT,
-            FaultDomain.HEADEND_OR_CO,
-            FaultDomain.POWER,
-        }
-        if self.requires_plant_work and self.fault_domain not in plant_domains:
+        #
+        # `PLANT_DOMAINS` is imported rather than spelled out again. This set was written here
+        # first; the moment crew selection and the handover routers needed the same fact,
+        # `domain.boundaries` became its owner and this became a reader. Two copies of the
+        # boundary would disagree about `TAP_OR_ODP` first, and a finding at the tap accepted
+        # here but routed to Clean Boots there is the disagreement doing damage.
+        if self.requires_plant_work and self.fault_domain not in PLANT_DOMAINS:
             raise ValueError(
                 f"requires_plant_work=True but fault_domain={self.fault_domain} is not a plant "
                 f"domain; OSP cannot action this"

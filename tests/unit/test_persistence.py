@@ -36,7 +36,7 @@ from lpr_cpe.domain.enums import (
 )
 from lpr_cpe.domain.governance import ApprovalDecision, ApprovalRequest, AuditEvent
 from lpr_cpe.graph.state import IncidentState
-from lpr_cpe.persistence.checkpointer import build_checkpointer, build_memory_checkpointer
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer, checkpointer_scope
 from lpr_cpe.persistence.serde import allowlisted_types, build_serde
 
 AT = datetime(2026, 8, 15, 7, 0, tzinfo=UTC)
@@ -190,11 +190,164 @@ def test_both_backends_are_built_with_the_same_serde() -> None:
     )  # type: ignore[attr-defined]
 
 
-def test_no_dsn_selects_the_in_memory_backend() -> None:
-    assert isinstance(build_checkpointer(Settings(postgres_dsn="")), InMemorySaver)
+async def test_no_dsn_selects_the_in_memory_backend() -> None:
+    async with checkpointer_scope(Settings(postgres_dsn="")) as saver:
+        assert isinstance(saver, InMemorySaver)
 
 
-def test_importing_the_factory_does_not_import_the_postgres_driver() -> None:
+async def test_whatever_the_scope_yields_can_actually_checkpoint() -> None:
+    """The assertion that would have caught the bug this scope was written to fix.
+
+    `isinstance(..., InMemorySaver)` -- the only check this file used to make -- passes on the one
+    branch that was never broken. The Postgres branch returned an *unentered* async context manager
+    where a saver belonged, which has no `aget_tuple` and would have failed on the first checkpoint
+    write in production while every test stayed green.
+
+    So the claim here is not "the right class came back", it is "the thing that came back can store
+    and return a checkpoint". That is backend-agnostic: point `LPR_POSTGRES_DSN` at a live database
+    and the same assertion tests the branch that was broken.
+    """
+
+    def bump(state: dict[str, Any]) -> dict[str, Any]:
+        return {"n": state["n"] + 1}
+
+    builder: StateGraph[Any, Any, Any] = StateGraph(dict)
+    builder.add_node("bump", bump)
+    builder.add_edge(START, "bump")
+    builder.add_edge("bump", END)
+
+    async with checkpointer_scope(Settings(postgres_dsn="")) as saver:
+        graph = builder.compile(checkpointer=saver)
+        config = {"configurable": {"thread_id": "scope-round-trip"}}
+        assert (await graph.ainvoke({"n": 1}, config))["n"] == 2
+
+        # Read it back through the saver rather than trusting the return value: a checkpointer that
+        # accepted writes and stored nothing would satisfy the line above.
+        assert (await graph.aget_state(config)).values["n"] == 2
+
+
+async def test_the_postgres_branch_enters_the_saver_and_closes_it_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Postgres branch, exercised with no Postgres.
+
+    The round-trip test above cannot reach this branch -- it needs a DSN, and a DSN needs a
+    database -- so the branch that was actually broken would still be the untested one. A stand-in
+    module is injected under the name the deferred import uses, which lets the *sequence* be
+    asserted: open, setup, hand over the entered saver, close. The original defect returned the
+    unentered helper, so `saver` would be the context manager itself and `close` would never appear.
+
+    The stand-in mirrors the real `from_conn_string`, and
+    `test_the_postgres_saver_has_a_lifecycle_a_plain_factory_could_not_have` is what stops that
+    mirror from drifting: it asserts the same shape against the installed library. A fake nobody
+    checks against the real thing is a test of the fake.
+    """
+    import sys
+    import types
+    from contextlib import asynccontextmanager
+
+    events: list[Any] = []
+
+    class FakeSaver:
+        def __init__(self, serde: Any) -> None:
+            self.serde = serde
+
+        async def setup(self) -> None:
+            events.append("setup")
+
+    @asynccontextmanager
+    async def from_conn_string(conn_string: str, *, serde: Any = None) -> Any:
+        events.append(("open", conn_string))
+        try:
+            yield FakeSaver(serde)
+        finally:
+            events.append("close")
+
+    module = types.ModuleType("langgraph.checkpoint.postgres.aio")
+    module.AsyncPostgresSaver = types.SimpleNamespace(  # type: ignore[attr-defined]
+        from_conn_string=from_conn_string
+    )
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", module)
+
+    dsn = "postgresql://user@example.invalid/lpr"
+    async with checkpointer_scope(Settings(postgres_dsn=dsn)) as saver:
+        assert isinstance(saver, FakeSaver), (
+            "the scope handed back the connection helper instead of the saver inside it"
+        )
+        assert saver.serde is not None, "the Postgres saver was built without the shared serde"
+        assert events == [("open", dsn), "setup"]
+
+    assert events == [("open", dsn), "setup", "close"], (
+        "the connection was not closed when the scope exited"
+    )
+
+
+async def test_setup_can_be_left_to_a_separate_migration_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`setup=False` exists for a role with no DDL right, so it must really skip the DDL.
+
+    Paired with the test above rather than merged into it: together they show the flag has both of
+    its effects, which a single test of the default would not.
+    """
+    import sys
+    import types
+    from contextlib import asynccontextmanager
+
+    events: list[str] = []
+
+    class FakeSaver:
+        def __init__(self, serde: Any) -> None:
+            self.serde = serde
+
+        async def setup(self) -> None:
+            events.append("setup")
+
+    @asynccontextmanager
+    async def from_conn_string(conn_string: str, *, serde: Any = None) -> Any:
+        yield FakeSaver(serde)
+
+    module = types.ModuleType("langgraph.checkpoint.postgres.aio")
+    module.AsyncPostgresSaver = types.SimpleNamespace(  # type: ignore[attr-defined]
+        from_conn_string=from_conn_string
+    )
+    monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres.aio", module)
+
+    settings = Settings(postgres_dsn="postgresql://user@example.invalid/lpr")
+    async with checkpointer_scope(settings, setup=False) as saver:
+        assert isinstance(saver, FakeSaver)
+    assert events == [], "setup() ran despite setup=False"
+
+
+def test_the_postgres_saver_has_a_lifecycle_a_plain_factory_could_not_have() -> None:
+    """Pins the library shape this module's design depends on, without needing a database.
+
+    `from_conn_string` is an `@asynccontextmanager`: it returns a helper that opens the connection
+    on `__aenter__` and closes it on `__aexit__`, and is not a saver itself. That is the whole
+    reason `checkpointer_scope` is a scope. If a future release of the extra returned the saver
+    directly, `async with` would stop being correct -- and this test would say so, rather than the
+    failure surfacing as a production incident with no checkpoints.
+
+    Skipped rather than failed where the optional extra is absent, which is the normal case: the
+    in-memory path is designed to work on a machine with no libpq at all.
+    """
+    aio = pytest.importorskip(
+        "langgraph.checkpoint.postgres.aio",
+        reason="the postgres extra is optional; install .[postgres] to check this contract",
+    )
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
+    # No connection is opened: the body of an async generator context manager does not run until
+    # it is entered, so an unreachable DSN is safe here.
+    handle = aio.AsyncPostgresSaver.from_conn_string("postgresql://unused:unused@127.0.0.1:1/none")
+    assert not isinstance(handle, BaseCheckpointSaver), (
+        "from_conn_string now returns a saver directly; checkpointer_scope's `async with` is no "
+        "longer the right shape and the connection would be opened and closed by nobody"
+    )
+    assert hasattr(handle, "__aenter__") and hasattr(handle, "__aexit__")
+
+
+def test_importing_the_module_does_not_import_the_postgres_driver() -> None:
     """The measured reason the Postgres import is deferred, checked in a clean interpreter.
 
     `langgraph.checkpoint.postgres` raises `ImportError: no pq wrapper available` unless `libpq` is
@@ -226,11 +379,11 @@ def test_importing_the_factory_does_not_import_the_postgres_driver() -> None:
         check=False,
     )
     assert result.returncode == 0, (
-        f"importing the checkpointer factory alone failed, which is itself the bug this test is "
+        f"importing the checkpointer module alone failed, which is itself the bug this test is "
         f"about:\n{result.stderr}"
     )
     assert result.stdout.strip() == "[]", (
         f"importing lpr_cpe.persistence.checkpointer pulled in {result.stdout.strip()}. The "
-        "Postgres import must stay inside build_checkpointer, or the in-memory path stops working "
+        "Postgres import must stay inside checkpointer_scope, or the in-memory path stops working "
         "on machines without libpq."
     )

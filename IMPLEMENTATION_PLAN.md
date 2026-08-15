@@ -133,7 +133,47 @@ Observed signatures and behaviours that the design depends on:
 `ImportError: no pq wrapper available` unless `libpq` is present — the bare `psycopg` wheel is not
 enough, `psycopg[binary]` is. A top-level import would therefore make the in-memory path
 un-runnable on any machine without Postgres client libraries, including CI. **The Postgres
-checkpointer is imported lazily inside the factory**, and the in-memory path never touches it.
+checkpointer is imported lazily inside the function**, and the in-memory path never touches it.
+
+**Finding that changed the design, and a defect it exposed:** `AsyncPostgresSaver.from_conn_string`
+is an `@asynccontextmanager` — it does not return a saver. Measured on
+langgraph-checkpoint-postgres **3.1.2**, with the optional extra installed on 2026-08-15:
+
+| Expression | Result |
+| --- | --- |
+| `type(AsyncPostgresSaver.from_conn_string(dsn))` | `contextlib._AsyncGeneratorContextManager` |
+| `isinstance(that, AsyncPostgresSaver)` | `False` |
+| `isinstance(that, BaseCheckpointSaver)` | `False` |
+| `AsyncPostgresSaver.__init__` | `(conn, pipe=None, serde=None)` — wants a live connection |
+| `AsyncPostgresSaver.setup` | coroutine; version-tracked DDL; "MUST be called … the first time" |
+
+The version committed in `a38fdd1` was a **synchronous** `build_checkpointer()` that returned that
+unentered helper with `# type: ignore[return-value]` on it. It could never have worked: the
+connection is opened on `__aenter__`, so `StateGraph.compile(checkpointer=…)` would have been handed
+an object with no `aget_tuple`, and every incident in production would have failed to checkpoint
+while the whole suite stayed green on the in-memory branch. It is now
+`persistence.checkpointer.checkpointer_scope`, an async context manager, and the lifespan owner
+holds the connection.
+
+Three things let a non-working branch ship, and each is worth naming:
+
+1. **The only test of the selector asserted the class of the branch that worked**
+   (`isinstance(build_checkpointer(Settings(postgres_dsn="")), InMemorySaver)`). The broken branch
+   needed a database, so it was never exercised. It is now exercised without one, by injecting a
+   stand-in under the name the deferred import uses and asserting the *sequence* — open, setup, hand
+   over the entered saver, close. Reinstating the shipped defect fails those two tests with
+   "the scope handed back the connection helper instead of the saver inside it".
+2. **`ignore_missing_imports` turned the library into `Any`.** The extra is optional and was not
+   installed, so `AsyncPostgresSaver` had no type and mypy could not see the mismatch. The extra is
+   now installed locally; strict mode is clean **both** with it and with
+   `follow_imports = skip` forced on `langgraph.checkpoint.postgres.*`, which is how a machine
+   without it resolves. A green that depends on which optional packages happen to be present is not
+   a green.
+3. **A `type: ignore` was treated as noise rather than as a claim.** mypy reported
+   `Unused "type: ignore" comment` *and* `Returning Any …` on that very line, i.e. the suppression
+   named a different error code from the one being emitted. A suppression whose code does not match
+   the reported error is pointed at a bug the author has not identified. `unused-ignore` is the only
+   signal a checker can give for that, and the run in which it appeared was reported as clean.
 
 **Finding that changed the design:** the checkpoint serialiser **degrades unknown types silently**.
 `JsonPlusSerializer` takes an `allowed_msgpack_modules` allowlist, and anything outside it is
@@ -241,7 +281,14 @@ implementation sits behind the same Protocol and is exercised only when a key is
 
 "Done" below means the code exists **and** something ran against it, not that it was written.
 Measured on **2026-08-15**: `ruff check src tests` passes, `mypy --strict src/lpr_cpe` reports no
-issues in **86** source files, and `pytest` collects and passes **390** tests.
+issues in **87** source files, and `pytest` collects and passes **446** tests.
+
+The previous revision of this section claimed the same for 86 files, and it was **wrong**: mypy was
+reporting two errors in `persistence/checkpointer.py` at the moment `a38fdd1` was committed, and
+they were the visible end of a Postgres branch that could not work (§2). The claim was made from a
+run that was not re-read after the last edit. Every number in this section is now taken from a
+command run *after* the final state of the tree, which is the only version of the claim worth
+making.
 
 Where a row says *mutation-checked*, it means every regression assertion was verified by reinstating
 the defect it names and watching that test — not merely some test — fail. A green suite is not
@@ -269,6 +316,7 @@ separate test built from a verdict whose three numbers are deliberately distinct
 | Project scaffold, pyproject, Makefile, README | done | `pip install -e ".[dev]"` succeeds |
 | `config` (settings, clock, scan windows) | done | write-permission matrix, 4/4 combinations |
 | `domain` (34 required models + 6 supporting) | done | 40 exports import; model set parsed from the specification and compared |
+| `domain/boundaries.py` — the Clean/Dirty crew split | done | 52 committed tests, mutation-checked 9/9; the expected-crew table is written out by hand rather than derived from the sets it checks |
 | `graph/state.py` contract + reducers | done | all 7 reducers driven through a real replaying LangGraph, 8 tests, mutation-checked 8/8 |
 | `security` (redaction, injection, RBAC) | done | nested-dict masking with a verified positive control |
 | `observability` (logging, tracing, KPIs) | done | 17 trace attributes; 26/28 KPI members derived, 2 declared non-derivable |
@@ -281,11 +329,11 @@ separate test built from a verdict whose three numbers are deliberately distinct
 | LangGraph replay semantics (§2) | done | 8 committed tests with a positive control, mutation-checked 8/8 |
 | `graph` context, loop guard, approval gates, paused-state reads | done | 29 committed tests, mutation-checked 42/42; 2 of the 42 survived the first sweep and both were real gaps, now closed |
 | `graph` parent + 8 subgraphs + routing | **in progress** | foundations above are in place; no parent graph yet |
-| `persistence` checkpointer + serde | done | 10 committed tests, each paired with a control that fails; lazy Postgres import checked in a clean subprocess |
+| `persistence` checkpointer + serde | done | 14 committed tests, each paired with a control that fails; lazy Postgres import checked in a clean subprocess; the Postgres branch driven without a database and the shipped defect reinstated to watch it fail |
 | `persistence` outbox + migrations | **pending** | — |
 | `api` | **pending** | — |
 | model provider + deterministic fake | **pending** | — |
-| tests | 390 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
+| tests | 446 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
 | docs + diagrams | 1 of 9 | `docs/vendor-integration-gaps.md` only |
 | demo | **pending** | — |
 
@@ -295,7 +343,7 @@ A gap named here is a gap acknowledged. An empty section at the end of a pass th
 least believable part of the document.
 
 1. **The committed suite is unit-only, and the coverage gate is unmet.** Every row marked *done* in
-   §5 now rests on committed tests rather than on a throwaway script, but all 390 are unit tests.
+   §5 now rests on committed tests rather than on a throwaway script, but all 446 are unit tests.
    There are no integration, contract or scenario tests, none of the 17 required scenarios exist,
    and coverage has not been measured against the 85% bar. Nothing here has been run end to end,
    because there is no end to end yet.
@@ -325,7 +373,18 @@ least believable part of the document.
    but it means "did this write really happen?" must be read from `result["gate"]["permitted"]`, not
    from `result["simulated"]`. A real adapter would return `simulated: False`.
 4. **`stream_events(version="v3")` is unverified.** See the end of §2. Nothing depends on it.
-5. **Postgres is untested against a live server.** The lazy-import path is exercised; `setup()` and
-   the resume-after-restart scenario are not, and will be marked `@pytest.mark.postgres`.
+5. **Postgres is untested against a live server.** The lazy import, the open/setup/close sequence
+   and the `setup=False` path are all exercised now — the last two against an injected stand-in
+   rather than a database — but no checkpoint has ever been written to Postgres. `setup()`'s DDL and
+   the resume-after-restart scenario are the two things a stand-in cannot prove, and they are what
+   `@pytest.mark.postgres` will cover.
+
+   This is the gap that hid the defect in §2, so it is worth being precise about what closed and
+   what did not. What closed: the branch is no longer *unreachable* from the suite, and reinstating
+   the shipped defect now turns two tests red. What did not: the stand-in was written from a
+   measurement of the real `from_conn_string`, and it is only as good as that measurement stays.
+   `test_the_postgres_saver_has_a_lifecycle_a_plain_factory_could_not_have` is the guard on that —
+   it asserts the same shape against the installed library, and skips where the optional extra is
+   absent. A fake nobody checks against the real thing is a test of the fake.
 6. **Vendor field names are invented.** 47 of them, listed in `docs/vendor-integration-gaps.md`.
    That file is the falsifiable part of assumption A1.
