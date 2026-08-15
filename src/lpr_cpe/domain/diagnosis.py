@@ -224,6 +224,12 @@ class TestRequest(FrozenDomainModel):
     service, so the planner has to say what this one would tell us.
     """
 
+    # A test on the line, not a pytest test. Any test module importing this name has it under
+    # pytest's `Test*` collection prefix and emits a PytestCollectionWarning without this opt-out.
+    # Declared where the name is chosen rather than aliased at every import site. Unannotated
+    # dunders are not pydantic fields, so this stays a plain class attribute.
+    __test__ = False
+
     request_id: str
     kind: TestKind
     target_ref: str
@@ -243,6 +249,8 @@ class TestPlan(DomainModel):
     non-disruptive before disruptive and no-customer-needed before customer-needed, so a node that
     iterates the plan cannot accidentally run the intrusive test first.
     """
+
+    __test__ = False  # See TestRequest: a diagnostic test, not a pytest one.
 
     plan_id: str
     created_at: datetime
@@ -269,6 +277,8 @@ class TestResult(FrozenDomainModel):
     test, the second means we ran it and learned nothing. They lead to different routing -- an
     unavailable adapter is a data-quality problem, an inconclusive result is a diagnosis problem.
     """
+
+    __test__ = False  # See TestRequest: a diagnostic test, not a pytest one.
 
     result_id: str
     request_id: str

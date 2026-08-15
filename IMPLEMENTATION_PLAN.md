@@ -281,7 +281,7 @@ implementation sits behind the same Protocol and is exercised only when a key is
 
 "Done" below means the code exists **and** something ran against it, not that it was written.
 Measured on **2026-08-15**: `ruff check src tests` passes, `mypy --strict src/lpr_cpe` reports no
-issues in **87** source files, and `pytest` collects and passes **446** tests.
+issues in **88** source files, and `pytest` collects and passes **679** tests.
 
 The previous revision of this section claimed the same for 86 files, and it was **wrong**: mypy was
 reporting two errors in `persistence/checkpointer.py` at the moment `a38fdd1` was committed, and
@@ -310,6 +310,32 @@ naming: at a boundary `observed == limit`, so an assertion that the reason "cont
 satisfied by the observed count even after the limit was dropped from the message. That is now a
 separate test built from a verdict whose three numbers are deliberately distinct.
 
+The routing sweep (48 mutations, 42 caught on the first pass) continued the pattern. Six survived
+and all six were informative:
+
+- **Four were genuine gaps.** D05 re-deriving `completeness_score >= 0.5` instead of asking
+  `sufficient_for_action` was invisible because no test held an assessment that was *complete and
+  contradictory*. D11's policy filter could be deleted whole, because the only state reaching
+  `self_help` carried no policy decision to filter. D19's `max(..., key=updated_at)` could be
+  replaced by the dict head, because every multi-record state held revisions of *one* MR, which
+  `latest_by_id` collapses to a single entry. And `latest_decision_of` could take the list tail
+  instead of the newest timestamp, because no state had write order and decision order disagreeing —
+  which matters because it is read immediately after `approval_outstanding`, which *does* order by
+  timestamp, so the pair could have closed a gate on one decision and acted on another. Each now has
+  a named test, and each of those tests was watched to fail against its mutant.
+- **One was dead code.** D17 checked `is_plant_side(finding.fault_domain)` before handing over.
+  Removing it killed nothing, and the reason is that `FieldFinding` refuses to construct with
+  `requires_plant_work=True` and a premises-side domain — so the clause was unreachable by
+  construction. It was removed rather than propped up with a test that would have had to build an
+  object the model forbids. A branch no state can enter is a branch no test can hold to account.
+- **One was a provably equivalent mutant.** D20's `status is not PASSED` in place of
+  `status is FAILED` cannot differ, because `latest_conclusive_test` only ever returns results whose
+  status is one of those two. The equivalence rests on `TestResult.conclusive`, and that is pinned
+  by the `UNAVAILABLE` case in `test_a_test_that_could_not_run_does_not_send_a_second_truck`:
+  widening `conclusive` breaks a test rather than silently changing what D20 means.
+
+The re-run after those changes caught 46 of 46.
+
 | Area | State | How it was checked |
 | --- | --- | --- |
 | API verification (§2) | done | probe graph, output quoted in §2 |
@@ -328,12 +354,13 @@ separate test built from a verdict whose three numbers are deliberately distinct
 | `dispatch` (OR-Tools + greedy fallback) | done | 55 committed tests |
 | LangGraph replay semantics (§2) | done | 8 committed tests with a positive control, mutation-checked 8/8 |
 | `graph` context, loop guard, approval gates, paused-state reads | done | 29 committed tests, mutation-checked 42/42; 2 of the 42 survived the first sweep and both were real gaps, now closed |
-| `graph` parent + 8 subgraphs + routing | **in progress** | foundations above are in place; no parent graph yet |
+| `graph/routing.py` — the 24 decision points | done | 233 committed tests, mutation-checked 46/46; 6 of the first sweep's 48 survived — 4 real gaps, 1 dead branch since removed, 1 provably equivalent; every question string is parsed out of `docs/specification.md` rather than copied, and each router's `Literal` return type is compared against its declared `branches` |
+| `graph` parent + 8 subgraphs | **in progress** | routing is in place and the foundations above; no parent graph yet |
 | `persistence` checkpointer + serde | done | 14 committed tests, each paired with a control that fails; lazy Postgres import checked in a clean subprocess; the Postgres branch driven without a database and the shipped defect reinstated to watch it fail |
 | `persistence` outbox + migrations | **pending** | — |
 | `api` | **pending** | — |
 | model provider + deterministic fake | **pending** | — |
-| tests | 446 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
+| tests | 679 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
 | docs + diagrams | 1 of 9 | `docs/vendor-integration-gaps.md` only |
 | demo | **pending** | — |
 

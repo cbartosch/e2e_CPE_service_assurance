@@ -301,6 +301,13 @@ class EvidenceKind(StrEnum):
 
 
 class TestKind(StrEnum):
+    # A diagnostic test on the line, not a pytest test. Any test module that imports this name has
+    # it in its namespace under a `Test*` prefix, which is pytest's collection pattern -- without
+    # this opt-out every such module emits a PytestCollectionWarning. Declared here, at the one
+    # place the name is chosen, rather than aliased at each of the import sites. Enum leaves dunder
+    # attributes as plain class attributes, so this does not become a member.
+    __test__ = False
+
     HFC_RF_LEVELS = "hfc_rf_levels"
     HFC_PNM_SWEEP = "hfc_pnm_sweep"
     PON_OPTICAL_POWER = "pon_optical_power"
@@ -315,6 +322,8 @@ class TestKind(StrEnum):
 
 
 class TestStatus(StrEnum):
+    __test__ = False  # See TestKind: a diagnostic test, not a pytest one.
+
     PLANNED = "planned"
     RUNNING = "running"
     PASSED = "passed"
