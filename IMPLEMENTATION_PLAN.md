@@ -104,6 +104,27 @@ Observed signatures and behaviours that the design depends on:
   `lifecycle.can_transition` special-cases `current is requested` as always legal. `DIAGNOSING →
   DIAGNOSING` is absent from the transition table, so without that case a replayed status write
   would raise and **every** gate downstream of a status write would be fatal.
+- **A paused subgraph's writes are not visible in the parent's state.** Measured on 2026-08-15 with
+  the two-node approval gate nested one level and the incident paused at the interrupt:
+
+  | Read | `status` | `pending_approval` |
+  | --- | --- | --- |
+  | `(await app.aget_state(config)).values` | `dispatch_planning` | `None` |
+  | `.tasks[0].state.values` via `subgraphs=True` | `awaiting_approval` | set |
+
+  A subgraph's writes reach the parent when the subgraph node *completes*, and a paused one has not.
+  So for exactly as long as a human is being waited on, the parent understates what is happening.
+  This matters because the obvious implementation of the specification's state-inspection endpoint
+  is `(await app.aget_state(config)).values`, and that implementation would report an incident as
+  `dispatch_planning` while it had been sitting on someone's approval queue since Tuesday — the most
+  misleading answer this system could give. It is a property of nesting, and **all six approval
+  gates are nested**.
+
+  `graph/inspect.py` is the response: every reader there takes the compiled app rather than a state
+  mapping, because the information is not in the mapping. `effective_state` merges parent-first so
+  the paused child's newer values win. The test asserts the naive read is *wrong* as well as the
+  corrected read being right, so that a future LangGraph which propagated eagerly would not leave
+  `inspect` looking necessary after it had become redundant.
 - `from langgraph.checkpoint.memory import InMemorySaver`.
 - `from langgraph.checkpoint.postgres import PostgresSaver` and
   `from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver`, `await saver.setup()`.
@@ -113,6 +134,24 @@ Observed signatures and behaviours that the design depends on:
 enough, `psycopg[binary]` is. A top-level import would therefore make the in-memory path
 un-runnable on any machine without Postgres client libraries, including CI. **The Postgres
 checkpointer is imported lazily inside the factory**, and the in-memory path never touches it.
+
+**Finding that changed the design:** the checkpoint serialiser **degrades unknown types silently**.
+`JsonPlusSerializer` takes an `allowed_msgpack_modules` allowlist, and anything outside it is
+restored as a plain container rather than rejected. Measured on 2026-08-15 across a real pause and
+resume: an `ApprovalRequest` came back a `dict`, an `IncidentStatus` came back a `str`, and nothing
+raised — the graph resumed and kept running on values whose methods no longer existed.
+
+The trap is that the allowlist accepts `(module, name)` tuples as well as classes, so `["lpr_cpe"]`
+*looks* like "trust everything under lpr_cpe". It matches nothing. `persistence/serde.py` therefore
+passes **classes**, derived from `domain.__all__` rather than listed by hand, so a new model cannot
+be forgotten. Both backends are built from the same `build_serde()`; a laxer serde in the in-memory
+saver would hide exactly the bugs that only appear against Postgres.
+
+Because a permissive default satisfies "the value survived" without the allowlist doing any work,
+`tests/unit/test_persistence.py` pairs the claim with a **control that fails**: three plausibly-wrong
+allowlists (empty, unrelated types, the package-name form above), each asserted to degrade every
+field *without raising*. A green run of the real test then means the allowlist worked, rather than
+that nothing was ever at risk.
 
 **Deliberately not relied upon:** a `graph.stream_events(..., version="v3")` form with
 `stream.interrupted` / `stream.interrupts` attributes appeared in a documentation summary during
@@ -202,12 +241,27 @@ implementation sits behind the same Protocol and is exercised only when a key is
 
 "Done" below means the code exists **and** something ran against it, not that it was written.
 Measured on **2026-08-15**: `ruff check src tests` passes, `mypy --strict src/lpr_cpe` reports no
-issues in **79** source files, and `pytest` collects and passes **351** tests.
+issues in **86** source files, and `pytest` collects and passes **390** tests.
 
 Where a row says *mutation-checked*, it means every regression assertion was verified by reinstating
 the defect it names and watching that test — not merely some test — fail. A green suite is not
-evidence that its assertions are load-bearing; two of the policy assertions turned out to be
-tautologies that only a mutation sweep exposed.
+evidence that its assertions are load-bearing, and every sweep so far has found at least one that
+was not: two of the policy assertions were tautologies, and the graph-foundations sweep surfaced two
+more. Both of the latter are worth recording, because neither was visible by reading the tests.
+
+- The total-step bound was driven to **65** against a limit of 60. That fires under `>=` and under
+  `>` alike, so the off-by-one the test was named for passed straight through. Every bound is now
+  checked at `limit - 1` and at `limit`, parametrised over `list(BudgetKind)` so a new bound cannot
+  quietly skip the boundary question.
+- Nothing read the **interrupt payload**. That the RBAC table permits a *set* of roles was asserted,
+  but not that the set reaches the operator — so narrowing `permitted_roles` back to the pack's
+  single `required_role` passed every test in the file, while an operator UI built on that payload
+  would have told a supervisor they could not answer a question they could.
+
+Tightening the first of these created the second-order version of the same problem, which is worth
+naming: at a boundary `observed == limit`, so an assertion that the reason "contains the limit" was
+satisfied by the observed count even after the limit was dropped from the message. That is now a
+separate test built from a verdict whose three numbers are deliberately distinct.
 
 | Area | State | How it was checked |
 | --- | --- | --- |
@@ -225,11 +279,13 @@ tautologies that only a mutation sweep exposed.
 | `decision_services` | done | 79 committed tests |
 | `dispatch` (OR-Tools + greedy fallback) | done | 55 committed tests |
 | LangGraph replay semantics (§2) | done | 8 committed tests with a positive control, mutation-checked 8/8 |
-| `graph` parent + subgraphs + interrupts | **in progress** | — |
-| `persistence` + migrations | **pending** | — |
+| `graph` context, loop guard, approval gates, paused-state reads | done | 29 committed tests, mutation-checked 42/42; 2 of the 42 survived the first sweep and both were real gaps, now closed |
+| `graph` parent + 8 subgraphs + routing | **in progress** | foundations above are in place; no parent graph yet |
+| `persistence` checkpointer + serde | done | 10 committed tests, each paired with a control that fails; lazy Postgres import checked in a clean subprocess |
+| `persistence` outbox + migrations | **pending** | — |
 | `api` | **pending** | — |
 | model provider + deterministic fake | **pending** | — |
-| tests | 351 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
+| tests | 390 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
 | docs + diagrams | 1 of 9 | `docs/vendor-integration-gaps.md` only |
 | demo | **pending** | — |
 
@@ -238,20 +294,21 @@ tautologies that only a mutation sweep exposed.
 A gap named here is a gap acknowledged. An empty section at the end of a pass this large would be the
 least believable part of the document.
 
-1. **The committed test suite covers the detectors and nothing else.** `tests/unit/test_detectors.py`
-   is real; every other row in §5 still rests on a throwaway script run outside the repository, which
-   is enough to know that code works and not enough to know it keeps working. The policy pack's
-   175 assertions are the largest such debt. The coverage gate is unmet.
+1. **The committed suite is unit-only, and the coverage gate is unmet.** Every row marked *done* in
+   §5 now rests on committed tests rather than on a throwaway script, but all 390 are unit tests.
+   There are no integration, contract or scenario tests, none of the 17 required scenarios exist,
+   and coverage has not been measured against the 85% bar. Nothing here has been run end to end,
+   because there is no end to end yet.
 
-   Each of the four detector regression tests was checked by reinstating the defect it names and
-   confirming the suite goes red — and that check earned its keep immediately. The test written for
-   the non-accumulating classifier pass **passed with the defect reinstated**: it asserted
+   The standard those tests are held to is worth stating, because it was learned by being caught out.
+   The first detector regression test **passed with the defect reinstated**: it asserted
    `physical_evidence > 0` on the first service with a localised delimiter fault, and that service
    already carried 1.54 of physical evidence from the telemetry detectors. The localiser's
-   contribution is only observable on the 17 services where it is the *sole* source, so the
-   invariant had to become the exact sum rather than its sign. A regression test never seen to fail
-   is a regression test that has not been tested, and the rest of this suite should be held to the
-   same standard rather than to a passing run.
+   contribution is only observable on the 17 services where it is the *sole* source, so the invariant
+   had to become the exact sum rather than its sign. A regression test never seen to fail is a
+   regression test that has not been tested — which is why every *mutation-checked* row in §5 means
+   exactly that, and why the two survivors described above were treated as defects in the tests
+   rather than as noise.
 2. **The specification's model list has 34 entries, not 33.** Counted from its own bullet list. Two
    earlier docstrings in this repository said 33 and were wrong.
 
