@@ -79,6 +79,31 @@ Observed signatures and behaviours that the design depends on:
 - A **compiled subgraph added as a node inherits the parent's checkpointer** and an `interrupt()`
   raised inside it surfaces on the parent's `__interrupt__`; `Command(resume=...)` at the parent
   resumes it. This is what lets the approval gates live inside subgraphs.
+- **Resuming an interrupt raised inside a subgraph re-applies the parent's already-committed
+  write.** Measured on 2026-08-15 with a two-node parent (`upstream → gate`) whose fields carry
+  different reducers. At the pause, `upstream`'s write is committed once. After
+  `Command(resume=...)`, an `operator.add` field holds **2** while `upstream` has been invoked
+  **once** — the node did not re-run; its recorded write was replayed. The interrupted node itself
+  runs twice, as expected.
+
+  | Arrangement | `upstream` invocations | `operator.add` field after resume |
+  | --- | --- | --- |
+  | gate inside a subgraph | 1 | **2** — write replayed |
+  | same graph, gate flat in the parent | 1 | 1 — no replay |
+
+  The asymmetry is the load-bearing part. Remembering this as "LangGraph replays parent writes"
+  would be false and would justify defensive code in the flat case where none is needed. **This is
+  why `graph/state.py` uses de-duplicating and absolute-valued reducers rather than the obvious
+  `operator.add`** — the reducer cannot tell where the interrupt was raised, so it must be immune
+  either way. All seven are driven through a real replaying graph in
+  `tests/unit/test_langgraph_replay_contract.py`, with `operator.add` alongside them as a positive
+  control: if a future LangGraph stopped replaying, the control fails and the reducer assertions
+  stop passing for the wrong reason.
+
+  One consequence was already latent in the code and is now pinned by a test:
+  `lifecycle.can_transition` special-cases `current is requested` as always legal. `DIAGNOSING →
+  DIAGNOSING` is absent from the transition table, so without that case a replayed status write
+  would raise and **every** gate downstream of a status write would be fatal.
 - `from langgraph.checkpoint.memory import InMemorySaver`.
 - `from langgraph.checkpoint.postgres import PostgresSaver` and
   `from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver`, `await saver.setup()`.
@@ -143,8 +168,14 @@ threads through the approval machinery for no reason.
 **D3 — Approval interrupts are separated from non-idempotent writes.** The gate node asks and
 returns; a *separate downstream* node performs the write, carrying an idempotency key derived from
 `(incident_id, action_type, target, attempt)`. This follows directly from the measured replay
-semantics: LangGraph re-runs a node from its start on resume, so anything before an `interrupt()` in
-the same node happens twice.
+semantics in §2, which bite in two distinct places:
+
+- *Inside* the interrupted node, everything before `interrupt()` executes on both passes. So a gate
+  must not perform the action it is asking about.
+- *Upstream* of it, a committed write is re-applied when the gate is nested — and every gate here
+  is nested. So no node anywhere may express state as an increment.
+
+The second is the one that would have been missed by reasoning alone; it was found by probe.
 
 **D4 — Every production action is typed and carries six fields.** Incident id, idempotency key,
 actor, reason code, approval ref, correlation id. This is enforced by the `ActionRequest` model, so
@@ -170,8 +201,13 @@ implementation sits behind the same Protocol and is exercised only when a key is
 ## 5. Status
 
 "Done" below means the code exists **and** something ran against it, not that it was written.
-`ruff check src tests` and `mypy --strict` are clean over 64 source files as of this row set, and
-`pytest` collects and passes 65 tests.
+Measured on **2026-08-15**: `ruff check src tests` passes, `mypy --strict src/lpr_cpe` reports no
+issues in **79** source files, and `pytest` collects and passes **351** tests.
+
+Where a row says *mutation-checked*, it means every regression assertion was verified by reinstating
+the defect it names and watching that test — not merely some test — fail. A green suite is not
+evidence that its assertions are load-bearing; two of the policy assertions turned out to be
+tautologies that only a mutation sweep exposed.
 
 | Area | State | How it was checked |
 | --- | --- | --- |
@@ -179,19 +215,21 @@ implementation sits behind the same Protocol and is exercised only when a key is
 | Project scaffold, pyproject, Makefile, README | done | `pip install -e ".[dev]"` succeeds |
 | `config` (settings, clock, scan windows) | done | write-permission matrix, 4/4 combinations |
 | `domain` (34 required models + 6 supporting) | done | 40 exports import; model set parsed from the specification and compared |
-| `graph/state.py` contract + reducers | done | imports; reducer behaviour not yet exercised by the graph |
+| `graph/state.py` contract + reducers | done | all 7 reducers driven through a real replaying LangGraph, 8 tests, mutation-checked 8/8 |
 | `security` (redaction, injection, RBAC) | done | nested-dict masking with a verified positive control |
 | `observability` (logging, tracing, KPIs) | done | 17 trace attributes; 26/28 KPI members derived, 2 declared non-derivable |
 | `integrations` Protocols + `WriteGate` | done | `isinstance` **and** parameter-name match against the Protocols |
 | ten fixture-backed simulators + 41-service network | done | 78-assertion smoke run; 21 HFC / 20 PON topologies resolve |
-| `policies` engine + pack | done | 175-assertion scratch run: fail-closed on a missing pack, every threshold read from YAML |
+| `policies` engine + pack | done | 139 committed tests, mutation-checked 24/24; 2 defects found by execution, both now named regression tests |
 | `detectors` (13) | done | 65 committed tests; fire/clean sweep over all 41 services; 4 defects found by execution, each now a named regression test |
-| `decision_services`, `dispatch` | **pending** | — |
-| `graph` parent + subgraphs + interrupts | **pending** | — |
+| `decision_services` | done | 79 committed tests |
+| `dispatch` (OR-Tools + greedy fallback) | done | 55 committed tests |
+| LangGraph replay semantics (§2) | done | 8 committed tests with a positive control, mutation-checked 8/8 |
+| `graph` parent + subgraphs + interrupts | **in progress** | — |
 | `persistence` + migrations | **pending** | — |
 | `api` | **pending** | — |
 | model provider + deterministic fake | **pending** | — |
-| tests | detectors only | `tests/unit/test_detectors.py`, 65 passing; every other row above still rests on a scratch script |
+| tests | 351 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
 | docs + diagrams | 1 of 9 | `docs/vendor-integration-gaps.md` only |
 | demo | **pending** | — |
 
