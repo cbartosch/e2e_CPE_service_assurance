@@ -37,8 +37,9 @@ postgres = [
     "langgraph-checkpoint-postgres>=3.1.2,<4",
     "psycopg[binary,pool]>=3.2",
 ]
-# OR-Tools carries a large native wheel and is not needed for the greedy fallback path, so the
-# dispatch optimizer degrades rather than failing to import.
+# OR-Tools carries a large native wheel and **nothing imports it yet**. `dispatch/` ships the greedy
+# optimizer only; this extra reserves the name for the CP-SAT path behind `select_optimizer`, which
+# is a seam and not an implementation -- gap DISPATCH-1. Installing it today changes nothing.
 optimizer = ["ortools>=9.11"]
 anthropic = ["anthropic>=0.40"]
 otel = [

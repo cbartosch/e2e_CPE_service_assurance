@@ -93,7 +93,11 @@ class CrewSlot(DomainModel):
     base_longitude: float | None = Field(default=None, ge=-180, le=180)
     area_archetypes: list[AreaArchetype] = Field(default_factory=list)
     max_jobs: int = Field(default=6, ge=1)
+    # Parts are consumed and equipment is not, which is why they are two lists rather than one:
+    # a splice trailer is still on the van after the third job, a drop cable is not. The dispatch
+    # optimizer checks them with the same subset test but the resupply question differs.
     carried_parts: list[str] = Field(default_factory=list)
+    carried_equipment: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _shift_is_positive(self) -> Self:

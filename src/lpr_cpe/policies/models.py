@@ -570,8 +570,17 @@ class DispatchObjectiveWeights(PackSection):
 
 
 class DispatchPolicy(PackSection):
+    """The planning travel model and the optimizer's hard limits.
+
+    Travel is three separate terms -- driving speed, fixed per-visit overhead, and the ferry --
+    because they behave differently and a single number hides that. A crossing is not slow driving:
+    it does not shrink when the job is closer, and it is what makes `remote_island` a different
+    decision rather than a more expensive one.
+    """
+
     archetype_speed_kph: dict[AreaArchetype, float]
     archetype_access_overhead_minutes: dict[AreaArchetype, int]
+    archetype_ferry_minutes: dict[AreaArchetype, int]
     default_visit_minutes: Minutes
     clean_boots_visit_minutes: Minutes
     dirty_boots_visit_minutes: Minutes
@@ -593,6 +602,7 @@ class DispatchPolicy(PackSection):
         for label, mapping in (
             ("archetype_speed_kph", self.archetype_speed_kph),
             ("archetype_access_overhead_minutes", self.archetype_access_overhead_minutes),
+            ("archetype_ferry_minutes", self.archetype_ferry_minutes),
         ):
             missing = set(AreaArchetype) - set(mapping)
             if missing:
@@ -602,6 +612,8 @@ class DispatchPolicy(PackSection):
                 )
         if any(v <= 0 for v in self.archetype_speed_kph.values()):
             raise ValueError("dispatch.archetype_speed_kph must all be positive")
+        if any(v < 0 for v in self.archetype_ferry_minutes.values()):
+            raise ValueError("dispatch.archetype_ferry_minutes must not be negative")
         return self
 
     @model_validator(mode="after")
@@ -625,6 +637,10 @@ class DispatchPolicy(PackSection):
 
     def access_overhead_minutes(self, archetype: AreaArchetype) -> int:
         return self.archetype_access_overhead_minutes[archetype]
+
+    def ferry_minutes(self, archetype: AreaArchetype) -> int:
+        """Crossing time each way. Zero where there is no crossing, which is most places."""
+        return self.archetype_ferry_minutes[archetype]
 
 
 # -------------------------------------------------------------------------------------------------

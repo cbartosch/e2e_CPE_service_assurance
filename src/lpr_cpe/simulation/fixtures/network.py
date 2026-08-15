@@ -81,9 +81,13 @@ AREAS: dict[str, dict[str, Any]] = {
         "latitude": 18.1500,
         "longitude": -65.4400,
         "travel_minutes_per_km": 3.0,
-        # The ferry is the overhead. A same-day second visit to Vieques does not exist, which is
-        # why joint dispatch matters most here.
-        "fixed_overhead_minutes": 165.0,
+        # Island-side overhead only: parking, the yard, finding the site. It is deliberately in
+        # line with the other archetypes, because the crossing is NOT counted here. The ferry has
+        # one owner -- `gis.simulator._FERRY_MINUTES`, added when `ferry_required` -- and folding
+        # it in here as well made a zero-kilometre trip on Vieques cost 260 minutes.
+        "fixed_overhead_minutes": 20.0,
+        # A same-day second visit to Vieques does not exist, which is why joint dispatch matters
+        # most here; that follows from the crossing, not from this number.
         "ferry_required": True,
         "ferry_windows_local": ["06:30", "11:00", "16:30"],
         "access_constraints": ["ferry_dependent", "limited_van_stock", "generator_dependent_sites"],

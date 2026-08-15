@@ -454,20 +454,41 @@ detector_thresholds: {}
 # mountainous interior where a 20 km trip can take an hour. Travel is per-archetype rather than a
 # single average speed because averaging metro San Juan with the central mountains produces a number
 # that is wrong for both.
+#
+# These numbers are the *planning fallback*. `integrations.base.GISAdapter.travel_minutes` is the
+# other half: given two real coordinates it returns a door-to-door estimate, and in production it is
+# a routing engine (gap GIS-2). The optimizer prefers the adapter and falls back to this section,
+# recording on the plan which one it used -- an estimate and a lookup are not interchangeable.
+#
+# The two models must therefore have the same *shape*: per-km rate, fixed overhead, ferry allowance.
+# They did not. This section had no ferry term at all and claimed the crossing was folded into
+# `remote_island`'s speed, which a speed cannot express: at 12 kph a 5 km Vieques job costs 25
+# minutes of driving against a crossing of 95. `tests/unit/test_dispatch.py` now asserts the two
+# models agree within 5%, so editing one without the other goes red.
 dispatch:
+  # Driving speed only. The ferry is `archetype_ferry_minutes`; the fixed per-visit cost is
+  # `archetype_access_overhead_minutes`. Each of the three is one term with one owner.
   archetype_speed_kph:
-    metro_mdu: 22
-    coastal_city_suburb: 38
-    central_mountain_rural: 24
-    remote_island: 12          # includes the ferry, which is why it is this low
+    metro_mdu: 18
+    coastal_city_suburb: 29
+    central_mountain_rural: 12.5   # a 12 km job is a 45-minute drive, and that is the point
+    remote_island: 20              # island roads are fine; it is the crossing that is not
   # Fixed overhead per visit, in minutes: parking, gaining access, and finding the right unit. The
   # MDU number is high because the walk from the street to a 12th-floor apartment is real work that
   # a straight-line travel estimate misses entirely.
   archetype_access_overhead_minutes:
-    metro_mdu: 25
-    coastal_city_suburb: 10
-    central_mountain_rural: 15
+    metro_mdu: 22
+    coastal_city_suburb: 12
+    central_mountain_rural: 18
     remote_island: 20
+  # The crossing, each way, including the wait. Zero for the three mainland archetypes, and they are
+  # listed rather than defaulted so that adding a second island means adding a number here rather
+  # than silently inheriting a mainland zero.
+  archetype_ferry_minutes:
+    metro_mdu: 0
+    coastal_city_suburb: 0
+    central_mountain_rural: 0
+    remote_island: 95
   default_visit_minutes: 60
   clean_boots_visit_minutes: 60
   dirty_boots_visit_minutes: 120

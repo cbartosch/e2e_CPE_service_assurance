@@ -250,3 +250,43 @@ Not implemented in the communications adapter, on purpose. They are policy, they
 refused to send at 03:00 would be a second owner of a rule the policy engine owns, and the two would
 disagree the first time one of them changed — most likely by the adapter quietly suppressing a
 message that policy had deliberately allowed for a P1 outage.
+
+---
+
+## Dispatch optimisation (`dispatch/`)
+
+Not an adapter, and listed here anyway. `dispatch/` is ours end to end — no external system is
+consulted and P15 forbids a model choosing a schedule — so nothing about it is a *vendor* unknown.
+But the gap IDs are cited from source the same way the adapter ones are, and a reader who hits
+`-- gap DISPATCH-1` in `optimizer.py` needs somewhere to land. The distinction worth keeping is that
+these are things we **have not built**, not things we **do not know**.
+
+* **DISPATCH-1** — **There is no CP-SAT implementation.** `DispatchOptimizer` is a `Protocol` and
+  `select_optimizer(prefer_solver=...)` is a factory, but both settings return
+  `GreedyDispatchOptimizer` today and `test_the_solver_seam_returns_greedy_either_way` asserts
+  exactly that, so the seam cannot quietly look implemented. The greedy pass places one requirement
+  at a time and never revisits an earlier placement, which means it cannot trade a cheap first
+  assignment for a cheaper total — the classic case being two crews and two island jobs, where
+  taking the nearer job first strands the second behind its own ferry crossing. **What batch size
+  does a real dispatch run at?** At a dozen jobs the optimality gap is not worth an `ortools`
+  dependency; at two hundred it is the whole problem.
+* **DISPATCH-2** — The pack's `dispatch.archetype_speed_kph`, `archetype_access_overhead_minutes`
+  and `archetype_ferry_minutes` are **ours**, and they are the *fallback* used when the GIS adapter
+  is unavailable or a coordinate is missing (the routed path is GIS-2). Two travel models exist
+  deliberately, are held to the same three-term shape, and
+  `test_regression_pack_and_gis_fixture_price_the_same_geography` fails if either is edited alone.
+  `TravelEstimate.basis` records which one answered. **Is a fallback estimate ever acceptable in
+  production, or should an unroutable job be a refusal?** A schedule costed on straight lines and one
+  costed on a road network are indistinguishable in a plan, and only one is a reason to promise a
+  customer an arrival time.
+* **DISPATCH-3** — All twelve constraints are enforced as **hard**. Two can be relaxed by policy —
+  `respect_appointment_windows` and `require_crew_type_match` — and the other ten cannot be relaxed
+  at all. The specification names the twelve; it does not say which a real dispatcher overrides at
+  16:00 on a Friday. **Which are genuinely inviolable?** An aerial wind limit and an appointment
+  window are the same kind of object in this code, and they should not be: one is a safety rule and
+  the other is a promise, and only one of them is a manager's call.
+* **DISPATCH-4** — Skills, equipment and parts are free-text strings compared by set membership,
+  inheriting WFM-3. No certification expiry, no skill hierarchy (a crew qualified for fusion
+  splicing is not automatically credited with mechanical splicing), and no notion of a part being
+  reserved for another job. **How does the WFM really encode capability, and does it expose expiry?**
+  A lapsed confined-space certificate reads as a held skill here.
