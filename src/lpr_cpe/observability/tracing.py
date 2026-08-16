@@ -511,10 +511,12 @@ def selected_lane(state: Mapping[str, Any]) -> str | None:
 
 
 def attempt_counts(state: Mapping[str, Any]) -> dict[str, int] | None:
-    """The five attempt counters, as one attribute.
+    """Every attempt counter, as one attribute.
 
-    One JSON attribute rather than five keys: they are read together (the bounded-loop guard reads
-    all five) and a span with five near-identical attribute names is harder to scan, not easier.
+    One JSON attribute rather than a key each: they are read together, and a span with seven
+    near-identical attribute names is harder to scan, not easier. The last two are the pair the
+    bounded-loop guard bounds, and both are here for that reason -- an operator reading a
+    `resolution_cycles` escalation needs to see the number the guard saw.
     """
     counts = {
         "remote": int(state.get("remote_attempt_count", 0) or 0),
@@ -523,6 +525,7 @@ def attempt_counts(state: Mapping[str, Any]) -> dict[str, int] | None:
         "mr": int(state.get("mr_attempt_count", 0) or 0),
         "plant": int(state.get("plant_attempt_count", 0) or 0),
         "diagnostic_cycles": int(state.get("diagnostic_cycles", 0) or 0),
+        "resolution_cycles": int(state.get("resolution_cycles", 0) or 0),
     }
     return counts if any(counts.values()) else None
 

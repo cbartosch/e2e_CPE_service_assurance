@@ -71,6 +71,7 @@ def _state(**overrides: Any) -> IncidentState:
         "correlation_id": "COR-1",
         "node_visits": {},
         "diagnostic_cycles": 0,
+        "resolution_cycles": 0,
     }
     base.update(overrides)
     return IncidentState(**base)  # type: ignore[typeddict-item]
@@ -128,7 +129,7 @@ def test_a_healthy_incident_passes_every_budget(ctx: GraphContext) -> None:
 
 
 def _counter_at(kind: BudgetKind, n: int) -> IncidentState:
-    """A state whose `kind` counter reads exactly `n`, with the other two left clear.
+    """A state whose `kind` counter reads exactly `n`, with the other three left clear.
 
     `TOTAL_STEPS` piles its visits on a node the guard is not asked about, so the re-entry bound --
     which reads the same `node_visits` dict -- stays well clear and cannot fire first and mask it.
@@ -139,6 +140,8 @@ def _counter_at(kind: BudgetKind, n: int) -> IncidentState:
         return _state(node_visits={"triage": n})
     if kind is BudgetKind.DIAGNOSTIC_CYCLES:
         return _state(diagnostic_cycles=n)
+    if kind is BudgetKind.RESOLUTION_CYCLES:
+        return _state(resolution_cycles=n)
     raise AssertionError(f"no way to drive {kind} to its limit, so it is an untested bound")
 
 
@@ -150,6 +153,8 @@ def _limit_of(kind: BudgetKind, ctx: GraphContext) -> int:
         return reentry_budget(ctx, "triage")[0]
     if kind is BudgetKind.DIAGNOSTIC_CYCLES:
         return ctx.max_diagnostic_cycles
+    if kind is BudgetKind.RESOLUTION_CYCLES:
+        return ctx.max_resolution_cycles
     raise AssertionError(f"no way to read {kind}'s limit, so it is an untested bound")
 
 
@@ -168,7 +173,9 @@ def test_every_budget_fires_exactly_at_its_limit_and_not_one_entry_late(
     Reachability matters because the first draft of `guards.py` had two ceilings on one counter with
     the looser checked first, so the tighter could never fire -- a bound that reads like protection
     and provides none. Parametrising over `list(BudgetKind)` rather than a written-out list is what
-    keeps that closed: a fourth member with no way to drive it raises in `_counter_at`.
+    keeps that closed: a new member with no way to drive it raises in `_counter_at`. That is not a
+    hypothetical guard -- adding `RESOLUTION_CYCLES` failed here, and only here, before its two
+    helpers learned it.
     """
     limit = _limit_of(kind, ctx)
 

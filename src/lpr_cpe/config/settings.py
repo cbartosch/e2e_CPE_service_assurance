@@ -111,15 +111,23 @@ class Settings(BaseSettings):
     # tests can lower it to prove the protection fires instead of waiting for 60 real iterations.
     max_graph_steps: int = Field(default=60, ge=4)
     # One pass through P07 is one cycle, counted on entry, and the guard refuses the pass that
-    # would *reach* the limit -- so N permits N-1 complete cycles. That arithmetic became
-    # load-bearing when the resolution fork was wired, because D10 and D12 spend a whole cycle to
-    # reach the next resolution option: a plan of k options needs k complete passes to be worked
-    # through. At 3 nothing could be tried twice, and measured over all 41 simulation services the
-    # self-help branch was unreachable end to end -- the one service that offers a script spends
-    # two cycles on the Wi-Fi settings options that are offered ahead of it. The largest plan any
-    # fixture produces holds five options, so 6 is the first value that lets a plan be exhausted
-    # rather than truncated. Higher buys nothing and costs the bound.
+    # would *reach* the limit -- so N permits N-1 complete cycles. The number is 6 rather than the
+    # 3 it started at because D10's `retry_diagnosis` returns to P07: a remote repair that did not
+    # hold spends a whole diagnostic cycle reaching the next option, so a plan of k options needs k
+    # complete passes. At 3 nothing could be tried twice, and measured over all 41 simulation
+    # services the self-help branch was unreachable end to end -- the one service that offers a
+    # script spends two cycles on the Wi-Fi settings options offered ahead of it. The largest plan
+    # any fixture produces holds five options (SVC-UT-001-B-01), so 6 is the first value that lets
+    # a plan be exhausted rather than truncated.
     max_diagnostic_cycles: int = Field(default=6, ge=1)
+    # The same arithmetic on the other loop. These are two numbers and not one because they bound
+    # two quantities: P07 counts evidence being re-gathered, P11 counts options being worked
+    # through, and D12's `retry_diagnosis` goes back to P10 -- so the self-help loop consumes an
+    # option per lap while `diagnostic_cycles` does not move at all. Equal at the shipped defaults
+    # only because both are sized to the same five-option plan; they are free to diverge, and
+    # lowering this one alone is how "stop trying options" is expressed without also forbidding a
+    # second opinion on the evidence.
+    max_resolution_cycles: int = Field(default=6, ge=1)
 
     @field_validator("log_level")
     @classmethod

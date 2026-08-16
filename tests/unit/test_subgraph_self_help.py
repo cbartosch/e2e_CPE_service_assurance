@@ -68,10 +68,10 @@ from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.domain.resolution import SelfHelpSession
 from lpr_cpe.graph.builder import build_parent_graph, compile_parent_graph
 from lpr_cpe.graph.context import build_context
-from lpr_cpe.graph.guards import ESCALATED
+from lpr_cpe.graph.guards import ESCALATED, BudgetKind, check_budgets
 from lpr_cpe.graph.nodes._runtime import derive_id
 from lpr_cpe.graph.routing import first_actionable_option, is_self_help_option
-from lpr_cpe.graph.state import make_initial_state
+from lpr_cpe.graph.state import make_initial_state, total_steps
 from lpr_cpe.graph.subgraphs._shared import reachability_verdict
 from lpr_cpe.graph.subgraphs.self_help import (
     ANSWER_TARGETS,
@@ -282,6 +282,113 @@ async def test_the_shipped_cycle_budget_admits_the_self_help_branch(fixtures: An
     assert "remote_resolution" in entered, (
         "the remote branch is supposed to be tried and exhausted before the customer is asked to "
         "do anything; reaching self-help without it means D09 stopped preferring a remote repair"
+    )
+
+
+#: One lap of D12's loop, in the order the edges run it: back to P10, forward through P11, then the
+#: five subgraph nodes a complying customer's pass actually costs. Measured by resuming `_drive`
+#: past the interrupt -- the approval gate is not on it, because this service's RCA confidence of
+#: 0.95 clears the pack's threshold and the send goes straight out.
+D12_LAP = (
+    "determine_root_cause",
+    "generate_resolution_options",
+    "select_self_help_script",
+    "send_self_help_instructions",
+    "mark_awaiting_customer",
+    "await_customer_response",
+    "verify_self_help",
+)
+
+
+async def test_the_resolution_bound_is_what_stops_the_self_help_loop_and_stops_it_first(
+    fixtures: Any,
+) -> None:
+    """`resolution_cycles` must be reachable on this loop before any other bound fires, or it is
+    decoration.
+
+    `guards.py` refuses a bound that cannot fire -- "worse than no bound, because it reads like
+    protection" -- and a fourth check has already been deleted from that module once for sitting
+    behind a tighter one on the same counter. `resolution_cycles` was added as a *fourth* bound on
+    the argument that D12's loop moves it and moves nothing else, so the argument owes exactly this:
+    walk that loop and show which of the four actually stops it.
+
+    `test_every_budget_fires_exactly_at_its_limit_and_not_one_entry_late` does not answer it. That
+    one drives each counter on a synthetic state with the other three at zero, which proves the
+    check is wired and proves nothing about whether a real trajectory can reach it -- the state this
+    loop produces has 27 steps and three diagnostic cycles already spent before the first lap.
+
+    So the start state is the real one: the parent run to the customer interrupt, on the shipped
+    settings, exactly as the test above drives it. Only the laps are modelled, because no fixture
+    traverses D12's retry edge -- this service arrives there with `exhausted` already true, so
+    driving it would walk to `field_planning` rather than round the loop. `D12_LAP` is the measured
+    shape and is checked against what the real run visited, so a branch that changes shape fails
+    here rather than silently modelling a loop that no longer exists.
+
+    Measured at the shipped settings, the loop stops on lap 3 with room to spare on every other
+    bound: `resolution_cycles` 6 of 6, `total_steps` 48 of 60, `diagnostic_cycles` 3 of 6, and 4
+    visits to the self-help node being entered against a re-entry ceiling of 6. The margin is the
+    point -- it is what makes this a live bound rather than a formality, and it is what would
+    disappear first if `max_graph_steps` were tightened or `max_resolution_cycles` raised.
+
+    Seen red under `LPR_MAX_RESOLUTION_CYCLES=12`, which is the shape of the failure this test
+    exists to catch -- the bound stops being the one that fires and the loop runs two steps past
+    the circuit breaker instead::
+
+        AssertionError: the self-help loop is not bounded by resolution_cycles at the shipped
+        settings; total_steps stopped it first, which makes the resolution bound decoration
+        assert <BudgetKind.TOTAL_STEPS: 'total_steps'> is <BudgetKind.RESOLUTION_CYCLES:
+        'resolution_cycles'>
+         +  where <BudgetKind.TOTAL_STEPS: 'total_steps'> = BudgetVerdict(within_budget=False,
+        kind=<BudgetKind.TOTAL_STEPS: 'total_steps'>, observed=62, limit=60,
+        owner='settings.max_graph_steps').kind
+    """
+    ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+    reached: dict[str, int] = {}
+    final: Any = None
+    async for _namespace, update in compile_parent_graph().astream(
+        _initial(fixtures.services[SELF_HELP_SERVICE], COMPLIED),
+        context=ctx,
+        stream_mode="values",
+        subgraphs=True,
+    ):
+        if isinstance(update, dict) and "node_visits" in update:
+            for name, count in update["node_visits"].items():
+                reached[name] = max(reached.get(name, 0), count)
+            final = update
+
+    subgraph_names = {name for name, _ in SELF_HELP_NODES}
+    on_the_lap = {name for name in reached if name in subgraph_names}
+    assert on_the_lap and on_the_lap <= set(D12_LAP), (
+        f"the branch visited {sorted(on_the_lap - set(D12_LAP))}, which D12_LAP does not model, so "
+        "the lap below is not the lap this service actually walks"
+    )
+
+    state = dict(final)
+    state["node_visits"] = dict(state["node_visits"])
+    verdict = check_budgets(state, ctx, node="select_self_help_script")
+    assert verdict.within_budget, "the parent escalated before the loop was even entered"
+
+    laps = 0
+    while verdict.within_budget:
+        laps += 1
+        assert laps <= 20, "the loop ran away, so none of the four bounds is holding it"
+        for name in D12_LAP:
+            state["node_visits"][name] = state["node_visits"].get(name, 0) + 1
+        state["resolution_cycles"] += 1
+        verdict = check_budgets(state, ctx, node="select_self_help_script")
+
+    assert verdict.kind is BudgetKind.RESOLUTION_CYCLES, (
+        f"the self-help loop is not bounded by resolution_cycles at the shipped settings; "
+        f"{verdict.kind} stopped it first, which makes the resolution bound decoration"
+    )
+    assert verdict.owner == "settings.max_resolution_cycles"
+
+    # And the margin. Each of these is a bound that did *not* fire, so each is a way this test
+    # would stop meaning anything if it quietly closed up.
+    assert total_steps(state) < ctx.max_graph_steps, "no headroom left under the step budget"
+    assert state["diagnostic_cycles"] < ctx.max_diagnostic_cycles, (
+        "the diagnostic bound was one lap from firing too, so this loop is no longer showing that "
+        "the two counters come apart"
     )
 
 

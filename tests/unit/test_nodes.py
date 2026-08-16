@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 
 from lpr_cpe.domain.enums import (
+    ActionOutcome,
     ActionType,
     CaseType,
     EventSource,
@@ -37,10 +38,12 @@ from lpr_cpe.domain.enums import (
     Severity,
     Technology,
 )
+from lpr_cpe.domain.governance import ActionRecord
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.nodes import PARENT_NODES
 from lpr_cpe.graph.nodes._runtime import preview
+from lpr_cpe.graph.nodes.diagnosis import determine_root_cause, generate_resolution_options
 from lpr_cpe.graph.routing import (
     route_remote_eligibility,
     route_self_help_suitability,
@@ -242,6 +245,96 @@ async def test_every_offered_option_carries_the_packs_risk_and_approval(fixtures
         by_action[ActionType.RAISE_MR].required_approval
         != by_action[ActionType.CREATE_WORK_ORDER].required_approval
     )
+
+
+# ------------------------------------------------------------------------------------------------
+# The second pass through P11
+# ------------------------------------------------------------------------------------------------
+
+
+async def test_a_second_lap_of_the_self_help_loop_records_two_of_everything(fixtures: Any) -> None:
+    """P10 and P11 re-run on D12's loop must each leave a second record, not overwrite the first.
+
+    This is the lap D12's `retry_diagnosis` produces and it is the reason `resolution_cycles`
+    exists. The loop is P10 -> P11 -> self_help -> P10, so it never passes through P07 and
+    `diagnostic_cycles` does not move -- asserted first, because everything after it is vacuous if
+    it does. Both nodes on the lap are run, in the order the edges run them, rather than P11 alone:
+    the collision is a property of the lap and testing half of it would have missed P10's.
+
+    The lap is constructed rather than driven. No simulator fixture reaches D12 with an unexhausted
+    plan -- the one service offering a self-help script arrives there with `exhausted` already true
+    -- so there is no fixture whose real edge traversal would exercise a second pass. What is
+    faithful here is the shape: an option attempted and failed, then the two nodes asked again on
+    the same diagnostic cycle.
+
+    Both nodes keyed their `derive_id` discriminator on `diagnostic_cycles`, which does not move on
+    this lap, so both derived their first pass's ids again. `append_unique` is first-write-wins, so
+    each second record was dropped on the floor: the re-diagnosis left no trace at all, and the
+    surviving plan record said `already_attempted: []` for an incident that had just failed a
+    repair -- an audit trail positively asserting the opposite of what happened, which is worse
+    than a missing record.
+
+    Shown red against the pre-split nodes, one failure for each half. P11's:
+
+        E       AssertionError: two passes through P11 minted one plan id
+        E       assert 'RPLAN-228a28c9ba86d6de6d43' != 'RPLAN-228a28c9ba86d6de6d43'
+
+    and P10's, with P11's discriminator fixed and P10's still on `diagnostic_cycles`:
+
+        E       AssertionError: the re-diagnosis on this lap left no audit record
+        E       assert 1 == 2
+    """
+    state, ctx = await _run_parent(_service(fixtures, "hfc_degraded_upstream"))
+    first_plan = state["resolution_plan"]
+    diagnostic_cycles = state["diagnostic_cycles"]
+    assert first_plan.options, "this fixture must offer something for a second lap to mean anything"
+
+    attempted = first_plan.options[0]
+    state = preview(
+        state,
+        {
+            "action_history": [
+                ActionRecord(
+                    action_id=f"ACT-{attempted.option_id}",
+                    incident_id=state["incident_id"],
+                    action_type=attempted.action_type,
+                    target_ref=attempted.target_ref,
+                    idempotency_key=f"IDK-{attempted.option_id}",
+                    outcome=ActionOutcome.FAILED,
+                    started_at=NOW,
+                )
+            ]
+        },
+    )
+    for step in (determine_root_cause, generate_resolution_options):
+        state = preview(state, await step.__wrapped__(state, ctx))
+    second_plan = state["resolution_plan"]
+
+    assert state["diagnostic_cycles"] == diagnostic_cycles, (
+        "the self-help loop does not pass through P07, so if this moved then the lap being "
+        "modelled is not D12's and this test is asserting nothing about it"
+    )
+    assert second_plan.plan_id != first_plan.plan_id, "two passes through P11 minted one plan id"
+
+    def records(node: str) -> list[Any]:
+        return [e for e in state["audit_events"] if e.node == node]
+
+    # `append_unique` keeps the first write per event id, so a repeated id shows up here as a lost
+    # record rather than as a duplicate one -- which is why these count rather than compare.
+    assert len(records("determine_root_cause")) == 2, (
+        "the re-diagnosis on this lap left no audit record"
+    )
+    assert len(records("generate_resolution_options")) == 2
+
+    plans = records("generate_resolution_options")
+    assert plans[0].detail["already_attempted"] == []
+    assert plans[1].detail["already_attempted"] == [
+        f"{second_plan.plan_id}-{attempted.action_type.value}"
+    ], "the second record is what carries the failure forward, and it is in this plan's id space"
+
+    # And the counter that made every one of them distinct is the one that moved, which is the
+    # whole point of its being a separate field: two laps on one diagnostic cycle.
+    assert state["resolution_cycles"] == 2
 
 
 # ------------------------------------------------------------------------------------------------

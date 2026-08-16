@@ -74,6 +74,10 @@ class GraphContext:
     def max_diagnostic_cycles(self) -> int:
         return self.settings.max_diagnostic_cycles
 
+    @property
+    def max_resolution_cycles(self) -> int:
+        return self.settings.max_resolution_cycles
+
 
 def build_context(
     *,

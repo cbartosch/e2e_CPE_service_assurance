@@ -22,6 +22,7 @@ from langgraph.graph import END
 
 import lpr_cpe.graph.builder as builder_module
 from lpr_cpe.config.clock import FrozenClock
+from lpr_cpe.config.settings import Settings
 from lpr_cpe.domain.enums import (
     ActionType,
     CaseType,
@@ -455,6 +456,68 @@ async def test_an_escalation_is_recorded_before_the_edge_acts_on_it() -> None:
     assert escalations[0].node == "create_or_attach_incident"
     assert escalations[0].detail["limit"] == 5
     assert escalations[0].detail["owner"] == "GraphContext.step_budget_override"
+
+
+#: The one service that reaches the resolution fork with both loops live. Named by ref rather than
+#: found by health label, because its label is `hfc_healthy` -- healthy plant behind a Wi-Fi
+#: complaint -- and fourteen other services share it.
+BOTH_LOOPS_SERVICE = "SVC-SJ-011-B-01"
+
+
+@pytest.mark.parametrize(
+    ("field", "kind", "escalating_node", "steps", "diagnostic", "resolution"),
+    [
+        ("max_diagnostic_cycles", "diagnostic_cycles", "create_diagnostic_test_plan", 16, 2, 1),
+        ("max_resolution_cycles", "resolution_cycles", "select_remote_action", 20, 2, 2),
+    ],
+)
+async def test_each_cycle_budget_stops_the_same_run_at_its_own_point(
+    fixtures: Any,
+    field: str,
+    kind: str,
+    escalating_node: str,
+    steps: int,
+    diagnostic: int,
+    resolution: int,
+) -> None:
+    """Two counters, one service, two different stopping points -- which is what makes them two.
+
+    `guards.py` resolves two owners of *one* quantity into a single check and refuses to carry them
+    as two, so a pair of bounds that always fired together would be a pair that should have been
+    collapsed. This is the measurement that says they do not: the same fixture, run twice on the
+    same graph with one budget lowered each time, escalates at a different node after a different
+    number of steps and with a different counter spent. Set to 2 and not to 1 because 1 stops the
+    run before the loops it is supposed to bound have started.
+
+    Both are asserted on the same parametrisation so that neither can be quietly weakened alone,
+    and every number below is read off a real run rather than computed here. The pairs are the
+    point: `diagnostic_cycles` stops at P08 with the resolution counter still at 1, having never
+    reached the fork; `resolution_cycles` carries four steps further, into the remote subgraph,
+    with the *same* two diagnostic cycles spent. A single counter cannot produce both rows.
+
+    Shown red by collapsing them back into one -- pointing `check_budgets`'s resolution arm at
+    `diagnostic_cycles`, which is the state the split undid. The diagnostic row stays green and
+    only the resolution one moves, which is the whole claim::
+
+        AssertionError: assert ['create_diag...ic_test_plan'] == ['select_remote_action']
+          At index 0 diff: 'create_diagnostic_test_plan' != 'select_remote_action'
+    """
+    final, _ = await _run(fixtures.services[BOTH_LOOPS_SERVICE], settings=Settings(**{field: 2}))
+
+    assert final["escalated"] is True
+    assert final["status"] is IncidentStatus.ESCALATED
+    assert final["escalation_reason"] == (
+        f"{kind} budget exhausted: observed 2, limit 2 (from settings.{field})"
+    )
+
+    escalations = [e for e in final["audit_events"] if e.outcome == "escalated"]
+    assert [e.node for e in escalations] == [escalating_node]
+    assert escalations[0].detail["budget"] == kind
+    assert escalations[0].detail["owner"] == f"settings.{field}"
+
+    assert total_steps(final) == steps
+    assert final["diagnostic_cycles"] == diagnostic
+    assert final["resolution_cycles"] == resolution
 
 
 # ------------------------------------------------------------------------------------------------

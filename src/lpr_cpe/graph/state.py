@@ -291,6 +291,12 @@ class IncidentState(TypedDict, total=False):
     diagnostic_cycles: Annotated[int, take_max]
 
     # -- resolution ----------------------------------------------------------------------------
+    # `resolution_cycles` is to P11 what `diagnostic_cycles` is to P07, and it is a separate number
+    # because the two stages are re-entered by separate loops. D12's `retry_diagnosis` goes back to
+    # P10, so the self-help loop reaches P11 again without passing through P07 at all -- measured,
+    # by walking the tables: of the five cycles in the parent graph, that one contains P11 and not
+    # P07. One counter therefore cannot serve both.
+    resolution_cycles: Annotated[int, take_max]
     resolution_options: list[ResolutionOption]
     resolution_plan: ResolutionPlan | None
     selected_action: ActionRequest | None
@@ -389,6 +395,7 @@ def make_initial_state(
         delimiter=DelimiterKind.UNKNOWN,
         delimiter_ref=None,
         diagnostic_cycles=0,
+        resolution_cycles=0,
         resolution_options=[],
         resolution_plan=None,
         selected_action=None,

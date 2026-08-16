@@ -3,19 +3,29 @@
 The specification requires "a bounded loop and escalation strategy". This module is the whole of it,
 kept in one file because a budget enforced in three places is a budget with three different numbers.
 
-Three bounds are checked, each on a **different quantity**:
+Four bounds are checked, each on a **different quantity**:
 
 | Bound | Quantity | Question |
 | --- | --- | --- |
 | total steps | `total_steps(state)` | Is this incident consuming an unreasonable amount of work? |
 | node re-entries | `visit_count(state, node)` | Is one node being re-entered in a cycle? |
-| diagnostic cycles | `state["diagnostic_cycles"]` | Has diagnosis re-run past the point of use? |
+| diagnostic cycles | `state["diagnostic_cycles"]` | Is evidence being re-gathered pointlessly? |
+| resolution cycles | `state["resolution_cycles"]` | Are we still working through the option list? |
 
-"Different quantity" is the load-bearing word. The first draft of this module had *four* checks,
-because `settings` and the policy pack each name a limit for two of them. Measured against a real
-sweep, the extra check was dead: the per-node ceiling of 8 sat behind a re-entry ceiling of 6 on the
+"Different quantity" is the load-bearing word. An earlier draft of this module had a fourth check
+too, because `settings` and the policy pack each name a limit for two of them. Measured against a
+real sweep, that one was dead: the per-node ceiling of 8 sat behind a re-entry ceiling of 6 on the
 same counter, so the graph always stopped at 6 and the 8 could never be reached. A bound that cannot
 fire is worse than no bound, because it reads like protection.
+
+The last two are the same shape and are still two bounds, which is the one place that claim has to
+be earned rather than asserted. It was earned by walking the tables: the parent graph has five
+cycles, and **`D12:retry_diagnosis` -- P10 -> P11 -> self_help -> P10 -- contains P11 and not P07**.
+`diagnostic_cycles` is bumped at P07, so on that loop it does not move at all, and a single counter
+was not bounding the option list on the self-help side; it was blind to it. `node_reentries` is not
+that bound either: it stops a node on *re-entry*, one super-step later than a stage bound stops the
+incident wherever it currently is, and it fires at the same 6 for reasons that have nothing to do
+with how many options a plan holds.
 
 So where two owners bound one quantity, they are resolved into a single check that takes the
 **tighter** limit and records **which owner supplied it** -- never into two checks:
@@ -62,6 +72,7 @@ class BudgetKind(StrEnum):
     TOTAL_STEPS = "total_steps"
     NODE_REENTRIES = "node_reentries"
     DIAGNOSTIC_CYCLES = "diagnostic_cycles"
+    RESOLUTION_CYCLES = "resolution_cycles"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +137,11 @@ def check_budgets(state: IncidentState, ctx: GraphContext, *, node: str) -> Budg
     than after a further external call. The comparison is `>=` and not `>`: `node_visits` records
     visits already completed, so a node entering for the (limit + 1)th time sees `limit` recorded
     and must be stopped now.
+
+    The order is widest first, and it decides which bound is *named* when two are spent at once.
+    That is not arbitrary: on the remote loop -- P07 through P11 and back via `D10:retry_diagnosis`
+    -- both cycle counters advance once per lap, but P07 runs earlier in the lap, so the diagnostic
+    bound is the one the incident actually reached first and naming it is the true answer.
     """
     steps_limit, steps_owner = step_budget(ctx)
     steps_seen = total_steps(state)
@@ -139,14 +155,24 @@ def check_budgets(state: IncidentState, ctx: GraphContext, *, node: str) -> Budg
             False, BudgetKind.NODE_REENTRIES, visits_seen, reentry_limit, reentry_owner
         )
 
-    cycles_seen = state.get("diagnostic_cycles", 0)
-    if cycles_seen >= ctx.max_diagnostic_cycles:
+    diagnostic_seen = state.get("diagnostic_cycles", 0)
+    if diagnostic_seen >= ctx.max_diagnostic_cycles:
         return BudgetVerdict(
             False,
             BudgetKind.DIAGNOSTIC_CYCLES,
-            cycles_seen,
+            diagnostic_seen,
             ctx.max_diagnostic_cycles,
             "settings.max_diagnostic_cycles",
+        )
+
+    resolution_seen = state.get("resolution_cycles", 0)
+    if resolution_seen >= ctx.max_resolution_cycles:
+        return BudgetVerdict(
+            False,
+            BudgetKind.RESOLUTION_CYCLES,
+            resolution_seen,
+            ctx.max_resolution_cycles,
+            "settings.max_resolution_cycles",
         )
 
     return BudgetVerdict(True)

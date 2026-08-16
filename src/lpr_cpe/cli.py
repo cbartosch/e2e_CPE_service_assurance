@@ -151,6 +151,7 @@ def report_config(out: TextIO) -> None:
     out.write(f"  scan_windows {windows}\n")
     out.write(f"  max_graph_steps {settings.max_graph_steps}\n")
     out.write(f"  max_diagnostic_cycles {settings.max_diagnostic_cycles}\n")
+    out.write(f"  max_resolution_cycles {settings.max_resolution_cycles}\n")
 
 
 #: The reports, in the order a bare `lpr-cpe` prints them. This mapping is the only list of command

@@ -176,12 +176,26 @@ async def determine_root_cause(state: IncidentState, ctx: GraphContext) -> NodeU
     `RCAResult.derive` downgrades a domain no live hypothesis supports to `UNKNOWN` and D08 routes
     on the domain. Writing the classifier's answer would send an incident down the plant path on a
     classification the hypothesis set does not back.
+
+    This node is on **three** of the parent graph's five cycles and neither counter separates its
+    runs alone, which is why the audit discriminator is the pair and `cycles_used` is not. Walked
+    from the tables: D06's and D10's `retry_diagnosis` both return to P07 and move
+    `diagnostic_cycles` while P11 may not run at all; D12's returns to P10 and moves only
+    `resolution_cycles`, because that lap is P10 -> P11 -> self_help -> P10 and never reaches P07.
+    Keyed on `diagnostic_cycles` alone, a re-diagnosis on the self-help lap derived the same
+    `event_id` as the first, and `append_unique` -- first-write-wins -- kept the first: the second
+    diagnosis left no trace at all. Measured on `SVC-SJ-011-A-01`, both `AUD-0dafcf9872465b830461`.
+
+    `cycles_used` stays the diagnostic count on purpose. It answers "how much evidence-gathering
+    did this conclusion take", which is a question about P07's loop; widening it to the pair would
+    make an RCA reached on the first cycle report two because a plan had been drawn up in between.
     """
     now = ctx.clock.now()
     findings = live_findings(state)
     topology = state.get("topology")
     technology = state.get("technology", Technology.UNKNOWN)
     cycle = state.get("diagnostic_cycles", 1)
+    lap = state.get("resolution_cycles", 0)
 
     context = DetectionContext(
         incident_id=state.get("incident_id") or "",
@@ -239,6 +253,9 @@ async def determine_root_cause(state: IncidentState, ctx: GraphContext) -> NodeU
                 reason_code=rca.reason_code,
                 detail={
                     "cycle": cycle,
+                    # Printed as well as hashed. Two records distinguished only by an opaque id
+                    # are two records a reader cannot order or tell apart.
+                    "resolution_lap": lap,
                     "confidence": rca.confidence,
                     "classified_as": domain.value,
                     "delimiter_kind": rca.delimiter_kind.value,
@@ -256,7 +273,7 @@ async def determine_root_cause(state: IncidentState, ctx: GraphContext) -> NodeU
                     "cause_appears": "common" if common else "individual",
                     "blast_radius_scope": scope.value,
                 },
-                discriminator=cycle,
+                discriminator=f"{cycle}.{lap}",
             )
         ],
         **mark(MetricTimestamp.DIAGNOSED_AT, now),
@@ -393,10 +410,18 @@ async def generate_resolution_options(state: IncidentState, ctx: GraphContext) -
     are stated in prose by `plan_resolution`, whose `notes` are passed through verbatim as
     `detail["withheld"]`. Labelling them with a code that means something else would be worse than
     leaving the code off, because a code is what a dashboard counts.
+
+    The cycle counter is this node's own and not `diagnostic_cycles`, because this node re-runs on a
+    loop that one does not count. D12's `retry_diagnosis` returns to P10, so the self-help loop is
+    P10 -> P11 -> self_help -> P10 and never touches P07, which is where `diagnostic_cycles` is
+    bumped. Keyed on that counter, a second lap derived the *same* `plan_id` and the same audit
+    `event_id`; `append_unique` is first-write-wins, so the second plan was dropped and the trail
+    kept a record reading `already_attempted: []` for an incident that had already tried and failed
+    a repair. Measured on `SVC-SJ-011-A-01`, both laps deriving `RPLAN-228a28c9ba86d6de6d43`.
     """
     now = ctx.clock.now()
     domain = state.get("fault_domain", FaultDomain.UNKNOWN)
-    cycle = state.get("diagnostic_cycles", 1)
+    cycle = state.get("resolution_cycles", 0) + 1
     scope = scope_for_fault_domain(domain)
     target_field, target_ref = _target_for(scope, state)
     plan_id = derive_id("RPLAN", state.get("incident_id") or "", cycle)
@@ -413,6 +438,7 @@ async def generate_resolution_options(state: IncidentState, ctx: GraphContext) -
     )
 
     return {
+        "resolution_cycles": cycle,
         "resolution_plan": plan,
         "resolution_options": list(plan.options),
         "audit_events": [
@@ -456,7 +482,7 @@ def _attempted(state: IncidentState, plan_id: str) -> list[str]:
     """Option ids already tried this incident, expressed in *this* plan's id space.
 
     `ResolutionOption.option_id` is `f"{plan_id}-{action_type.value}"` and `plan_id` carries the
-    diagnostic cycle, so the same action offered in cycle 1 and cycle 2 has two different ids.
+    resolution cycle, so the same action offered in cycle 1 and cycle 2 has two different ids.
     `ResolutionPlan.untried` matches on the id, so passing the ids recorded in cycle 1 would match
     nothing in cycle 2 and every loop would re-offer a reboot that has already failed twice --
     `exhausted` would never become true and the incident would circle instead of escalating. So
