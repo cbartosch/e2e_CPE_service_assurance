@@ -28,14 +28,20 @@ Three device conditions the detectors need, all of them fixture-driven rather th
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from lpr_cpe.domain.enums import ActionType
+from lpr_cpe.config.clock import Clock
+from lpr_cpe.domain.enums import ActionOutcome, ActionType
 from lpr_cpe.domain.governance import ActionRequest
-from lpr_cpe.integrations.base import AdapterError, AdapterUnavailableError
+from lpr_cpe.integrations.base import AdapterError, WriteGate
 from lpr_cpe.security.redaction import mask_mac
 from lpr_cpe.simulation.fixtures.determinism import jitter, pick, unit
 from lpr_cpe.simulation.simulated_base import SimulatedAdapterBase
+
+if TYPE_CHECKING:
+    # Type-checking only, for the same import cycle `simulated_base` documents: `loader` imports
+    # this module.
+    from lpr_cpe.simulation.loader import Fixtures
 
 #: Staleness at which a cached TR-181 tree stops being evidence about *now*. Twice the 07:00/21:00
 #: scan interval, so a device that missed a single scan window is not called stale. The policy pack
@@ -70,6 +76,35 @@ SUPPORTED_ACTIONS = frozenset(
     }
 )
 
+#: Actions that re-establish a device's management session, and so can clear a device-local fault.
+#:
+#: `WIFI_CHANNEL_CHANGE`, `WIFI_POWER_CHANGE`, `PROFILE_CHANGE` and `BULK_CONFIG_PUSH` are excluded
+#: deliberately: each reconfigures something on a device that is already talking, and none can bring
+#: back one that is not.
+_RECOVERING_ACTIONS = frozenset(
+    {
+        ActionType.CPE_REBOOT,
+        ActionType.CPE_RESYNC,
+        ActionType.CPE_FIRMWARE_UPDATE,
+        ActionType.CPE_FACTORY_RESET,
+        ActionType.REPROVISION,
+    }
+)
+
+#: Telemetry profiles in which the *plant* is healthy, so the only thing left to be wrong is the
+#: device itself.
+#:
+#: An allowlist rather than a list of physical faults, so that a health label added later defaults
+#: to "a CPE action does not fix this". That sends the incident to a field visit instead of closing
+#: it on a reboot that changed nothing -- wrong in the direction that costs a truck roll rather than
+#: the one that leaves a customer off service with a resolved incident.
+_PLANT_HEALTHY_PROFILES = frozenset({"hfc_healthy", "pon_healthy"})
+
+#: Uptime reported by a device that came back after a recovering action, in seconds. Two minutes:
+#: long enough to have informed, short enough that "this was rebooted recently" is the obvious read.
+#: The number is ours and arbitrary; a real device reports its own -- gap CPE-8.
+_UPTIME_AFTER_RECOVERY = 120
+
 _HOSTNAME_POOL = (
     "smart-tv",
     "laptop",
@@ -90,6 +125,37 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
     system_name = "cpe"
     external_ref_prefix = "ACS"
 
+    def __init__(self, fixtures: Fixtures, clock: Clock, gate: WriteGate) -> None:
+        super().__init__(fixtures, clock, gate)
+        # cpe_ref -> the action that brought it back. Held on the adapter, never written into the
+        # fixture dict: `load_fixtures()` is cached and shared process-wide, so mutating it would
+        # leak one incident's reboot into every later one.
+        self._recovered: dict[str, str] = {}
+
+    # -- the effect of an action on what a later read sees ---------------------------------------
+
+    def _is_offline(self, cpe_ref: str, device: dict[str, Any]) -> bool:
+        """Whether this device is unreachable *now*, counting any action already applied to it.
+
+        One owner for the fact, because three reads ask it -- `read_status`, `read_wifi_status` and
+        `run_diagnostic`. Evidence in which the status read says "online" while the diagnostic
+        refuses because the device is offline is evidence nobody can act on.
+        """
+        return bool(device["offline"]) and cpe_ref not in self._recovered
+
+    def _would_recover(self, request: ActionRequest, device: dict[str, Any]) -> bool:
+        """Whether this action, on this device, actually clears the fault.
+
+        A wedged device behind healthy plant comes back when it is rebooted. A device that is dark
+        because utility power is out, or because its fibre has gone lossy, does not -- and a
+        simulator that recovered it anyway would close the specification's Scenario 3 on the first
+        reboot and never dispatch anyone. A verification step is only a test if it can fail.
+        """
+        if request.action_type not in _RECOVERING_ACTIONS:
+            return False
+        service = self._fixtures.service(str(device["service_ref"]), system=self.system_name)
+        return str(service["health"]) in _PLANT_HEALTHY_PROFILES
+
     # -- reads -----------------------------------------------------------------------------------
 
     async def read_status(self, cpe_ref: str) -> dict[str, Any]:
@@ -104,11 +170,18 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
         device = self._fixtures.cpe(cpe_ref, system=self.system_name)
         service = self._fixtures.service(str(device["service_ref"]), system=self.system_name)
         profile = self._fixtures.telemetry(service)
-        offline = bool(device["offline"])
+        offline = self._is_offline(cpe_ref, device)
         inform_offset = float(device["last_inform_offset_hours"])
         stale = abs(inform_offset) >= STALE_AFTER_HOURS
 
         notes: list[str] = list(device["data_quality_notes"])
+        if (recovered_by := self._recovered.get(cpe_ref)) is not None:
+            # The fixture's own notes describe the device as it was found. Left alone they would
+            # contradict `online: True` and be read as current, so the recovery says so in band.
+            notes = [f"{note} (cleared by {recovered_by})" for note in notes]
+            notes.append(f"device re-established its session after {recovered_by}")
+            inform_offset = 0.0
+            stale = False
         if stale and not offline:
             notes.append(
                 f"last inform {abs(inform_offset):.0f}h ago, beyond the {STALE_AFTER_HOURS:.0f}h "
@@ -127,8 +200,16 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
             "online": not offline,
             "last_inform_at": self._offset_hours(inform_offset),
             # Withheld rather than zeroed when the device is down: an uptime of 0 is a number a
-            # detector would happily average.
-            "uptime_seconds": None if offline else int(device["uptime_seconds"]),
+            # detector would happily average. A device that has just been rebooted back reports the
+            # uptime that implies rather than the fixture's, which would have it up for days and
+            # would contradict the reboot that is in the same incident's action history.
+            "uptime_seconds": (
+                None
+                if offline
+                else _UPTIME_AFTER_RECOVERY
+                if recovered_by is not None
+                else int(device["uptime_seconds"])
+            ),
             "data_available": not offline,
             "data_quality_notes": notes,
             **self._provenance(cpe_ref),
@@ -198,8 +279,10 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
         """
         self._ensure_available()
         device = self._fixtures.cpe(cpe_ref, system=self.system_name)
-        offline = bool(device["offline"])
-        inform_offset = float(device["last_inform_offset_hours"])
+        offline = self._is_offline(cpe_ref, device)
+        inform_offset = (
+            0.0 if cpe_ref in self._recovered else float(device["last_inform_offset_hours"])
+        )
         stale = abs(inform_offset) >= STALE_AFTER_HOURS
         notes: list[str] = list(device["data_quality_notes"])
 
@@ -264,9 +347,7 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
             self._access_point(cpe_ref, device, wifi, band="5GHz", index=2),
         ]
         clients_key = "Device.WiFi.AccessPoint.AssociatedDeviceNumberOfEntries"
-        total_clients = (
-            None if empty_subtree else sum(int(ap[clients_key]) for ap in access_points)
-        )
+        total_clients = None if empty_subtree else sum(int(ap[clients_key]) for ap in access_points)
         return {
             "cpe_ref": cpe_ref,
             "service_ref": device["service_ref"],
@@ -478,9 +559,30 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
     async def run_diagnostic(self, cpe_ref: str, diagnostic: str) -> dict[str, Any]:
         """Run one service test. **Subject read**: unknown CPE raises.
 
-        An unsupported diagnostic name raises a **non-retryable** `AdapterError`. Retrying a
-        misspelled diagnostic three times is three ways to get the same answer, and `with_retry`
-        already honours `retryable=False` for exactly this.
+        Neither refusal here is `AdapterUnavailableError`, and the offline one used to be. Both are
+        **non-retryable** `AdapterError`s, for the same two reasons:
+
+        * *The ACS answered.* `AdapterUnavailableError` means "the system could not be reached at
+          all"; a definite "that device is offline" is a result, which is what its docstring
+          distinguishes it from. The difference is not cosmetic -- `ADAPTER_UNAVAILABLE` is one of
+          `DataQualityAssessment.BLOCKING_FLAGS`, so it makes `sufficient_for_action` false and D05
+          refuses to leave the evidence stage.
+        * *Retrying cannot change the answer.* A misspelled diagnostic is three ways to get the same
+          error; a speed test against an ONT with no mains power is three ways to get the same
+          silence. `with_retry` honours `retryable=False`, and `AdapterUnavailableError` cannot
+          express it -- its `__init__` hard-codes `retryable=True`.
+
+        Raising the blocking error here was measured, on the `pon_power_affected` fixture, to send
+        every commercial-power incident to manual review. `cpe.throughput` was the only blocking
+        flag in the case; D05 answered `gather_more` on all four passes, P07 re-ran until the
+        diagnostic-cycle budget escalated it, and P08 to P11 never ran -- while the evidence needed
+        to close the case was already in state: a dying gasp from the ONT, an open utility outage
+        correlated into `linked_records`, and `detectors.risk` saying "no utility power at the
+        premises, so there is nothing a network crew can fix".
+
+        Its sibling `read_status` had it right all along: the same offline device is reported there
+        as a payload with `data_available: False`, which `Gathered` records as `MISSING_FIELD`. That
+        row of `Gathered`'s own table uses "the CPE is offline" as its worked example.
         """
         self._ensure_available()
         device = self._fixtures.cpe(cpe_ref, system=self.system_name)
@@ -490,9 +592,11 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
                 f"unsupported diagnostic {diagnostic!r}; known: {', '.join(SUPPORTED_DIAGNOSTICS)}",
                 retryable=False,
             )
-        if bool(device["offline"]):
-            raise AdapterUnavailableError(
-                self.system_name, f"{cpe_ref} is offline; {diagnostic} cannot be run"
+        if self._is_offline(cpe_ref, device):
+            raise AdapterError(
+                self.system_name,
+                f"{cpe_ref} is offline; {diagnostic} cannot be run",
+                retryable=False,
             )
         service = self._fixtures.service(str(device["service_ref"]), system=self.system_name)
         impaired = str(service["health"]) not in {"hfc_healthy", "pon_healthy"}
@@ -572,8 +676,9 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
             )
         # Confirm the target exists before claiming an effect on it. A simulated reboot of a CPE
         # that is not in inventory is a successful-looking action against nothing.
-        self._fixtures.cpe(request.target_ref, system=self.system_name)
-        return self.simulate_write(
+        device = self._fixtures.cpe(request.target_ref, system=self.system_name)
+        recovers = self._would_recover(request, device)
+        result = self.simulate_write(
             request,
             detail=(
                 f"{request.action_type.value} recorded for {request.target_ref}; "
@@ -582,8 +687,24 @@ class SimulatedCPEAdapter(SimulatedAdapterBase):
             extra={
                 "intended_parameters": self._intended_parameters(request),
                 "reversible": request.reversible,
+                # Stated on the result so a reader can see what this action was expected to do
+                # *before* the verification read goes looking, rather than inferring it from
+                # whether the verification happened to pass.
+                "expected_to_restore_service": recovers,
             },
         )
+        # A blocked action had no effect, so it recovers nothing. Without this guard a reboot that
+        # policy refused to send would still mark the device restored, and the audit trail could
+        # not tell that case apart from one that worked.
+        #
+        # A replay needs no guard of its own: the first call set this same key to this same value,
+        # and the request that replays is by construction the request that set it. A condition
+        # that cannot change the outcome was tried here and removed -- it read as though replays
+        # were dangerous, and no test could distinguish its presence from its absence.
+        blocked = result["outcome"] == ActionOutcome.BLOCKED_BY_POLICY.value
+        if recovers and not blocked:
+            self._recovered[request.target_ref] = request.action_type.value
+        return result
 
     def _intended_parameters(self, request: ActionRequest) -> dict[str, Any]:
         """The TR-181 parameters or RPC this action would have set.

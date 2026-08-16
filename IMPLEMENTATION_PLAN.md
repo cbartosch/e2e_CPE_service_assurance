@@ -193,6 +193,22 @@ allowlists (empty, unrelated types, the package-name form above), each asserted 
 field *without raising*. A green run of the real test then means the allowlist worked, rather than
 that nothing was ever at risk.
 
+**`Command(resume={})` is a silent no-op, and the API must never send one.** Found on 2026-08-16
+while testing the self-help customer-response interrupt. `langgraph/pregel/_loop.py` decides whether
+a resume value is a map of interrupt-id → value with `isinstance(resume, dict) and
+all(is_xxh3_128_hexdigest(k) for k in resume)` — and `all()` over an empty dict is `True`. So `{}` is
+read as *a map that resumes nothing*: the pending interrupt is left unsatisfied and the graph
+re-pauses having executed no node.
+
+The danger is that it fails clean. An endpoint that forwarded an empty webhook body would return
+`200`, leave the incident exactly where it was, and write **no audit event to say so** — there is no
+exception and no state change to notice. `{"source": "scheduler_tick"}` and `""` both reach the node
+normally; only the empty mapping is swallowed. Pinned by
+`test_an_empty_resume_map_never_reaches_the_node`, which asserts the graph re-pauses at
+`await_customer_response` with the interrupt still pending *and* that the node left no audit trail —
+so the test tells "the resume was dropped before delivery" apart from "delivered and found
+unusable". Whatever validates resume payloads at the API boundary has to reject `{}` explicitly.
+
 **Deliberately not relied upon:** a `graph.stream_events(..., version="v3")` form with
 `stream.interrupted` / `stream.interrupts` attributes appeared in a documentation summary during
 research. It was not reproduced against 1.2.11 and nothing here uses it.
@@ -280,8 +296,8 @@ implementation sits behind the same Protocol and is exercised only when a key is
 ## 5. Status
 
 "Done" below means the code exists **and** something ran against it, not that it was written.
-Measured on **2026-08-15**: `ruff check src tests` passes, `mypy --strict src/lpr_cpe` reports no
-issues in **88** source files, and `pytest` collects and passes **679** tests.
+Measured on **2026-08-16**: `ruff check src tests` passes, `mypy --strict src/lpr_cpe` reports no
+issues in **98** source files, and `pytest` collects and passes **758** tests.
 
 The previous revision of this section claimed the same for 86 files, and it was **wrong**: mypy was
 reporting two errors in `persistence/checkpointer.py` at the moment `a38fdd1` was committed, and
@@ -336,6 +352,37 @@ and all six were informative:
 
 The re-run after those changes caught 46 of 46.
 
+The self-help sweep (13 mutations) found something different: not a weak test, but **a defect the
+whole existing suite was structurally unable to see**. Every KPI in both resolution subgraphs was
+emitted with `emit_kpi(state, ...)` — the node's *input* state. LangGraph reduces a node's update
+only after the node returns, so a KPI derived from a fact the node is itself writing measured the
+world as it was on the way in: `policy_block_rate` counted an empty `policy_decisions`,
+`automation_coverage_rate` an empty `action_history`, `self_help_success_rate` a session still
+reading `in_progress`. `emit_kpi` swallows `KPINotDerivableError` by design — a KPI state cannot yet
+support is normal at a stage boundary, not a fault — so all five call sites failed **perfectly
+silently**: no exception, no event, and a green suite. The fix is `preview(state, update)`, which
+applies the declared reducers; a plain `{**state, **update}` would have been wrong too, because
+`metrics_timestamps` reduces with `merge_dict`. Two further defects surfaced from the same reading:
+`customer_communications` had **no writer anywhere in `src`** while
+`customer_contacts_per_incident` counts exactly that list and never returns `None` — so an incident
+that had just texted its customer reported zero contacts, confidently — and
+`self_help_success_rate` was emitted only from `verify_self_help`, which only a compliant customer
+can reach, so every decline and every silence dropped out of the denominator and the rate would
+have climbed each time a customer refused.
+
+None of this was caught by a test because no test asserted on `kpi_events` at all in either
+subgraph module. That is the general lesson and it is worth stating plainly: **a swallowed exception
+converts a missing measurement into a silent one, and only a test that names the measurement can
+tell the two apart.** Both modules now assert on the KPIs they emit, and reverting each `preview`
+call turns one of those assertions red.
+
+Writing those assertions produced the sweep's second finding, in the new tests rather than the
+source. `KPIEvent.kpi_name` is declared `str`, so pydantic coerces the `KPIName` member to a plain
+`str` and `e.kpi_name is KPIName.X` is **never true** — every such filter matched nothing. The two
+*presence* assertions failed loudly and named the mistake; the *absence* assertion sitting beside
+them passed, and would have gone on passing forever while proving nothing. It now runs a positive
+control through the same comparison first, so a broken filter fails the test that depends on it.
+
 | Area | State | How it was checked |
 | --- | --- | --- |
 | API verification (§2) | done | probe graph, output quoted in §2 |
@@ -355,13 +402,16 @@ The re-run after those changes caught 46 of 46.
 | LangGraph replay semantics (§2) | done | 8 committed tests with a positive control, mutation-checked 8/8 |
 | `graph` context, loop guard, approval gates, paused-state reads | done | 29 committed tests, mutation-checked 42/42; 2 of the 42 survived the first sweep and both were real gaps, now closed |
 | `graph/routing.py` — the 24 decision points | done | 233 committed tests, mutation-checked 46/46; 6 of the first sweep's 48 survived — 4 real gaps, 1 dead branch since removed, 1 provably equivalent; every question string is parsed out of `docs/specification.md` rather than copied, and each router's `Literal` return type is compared against its declared `branches` |
-| `graph` parent + 8 subgraphs | **in progress** | routing is in place and the foundations above; no parent graph yet |
+| `graph/nodes/` P01–P11 + `graph/builder.py` — the parent to the resolution fork | done | 8 + 20 committed tests; a registry guard asserts every declared node is wired; the offline-CPE blocking-flag defect (CPE-7) was found by running it |
+| `graph/subgraphs/remote_resolution.py` — P12, D10, the high-risk approval interrupt | done | 18 committed tests; mutation-checked 9/9 in the original sweep and 2/2 again when the KPI assertions were added; driven through the real parent graph rather than a hand-built plan |
+| `graph/subgraphs/self_help.py` — P13–P15, D11/D12, the customer-response interrupt | done | 22 committed tests, mutation-checked 11/11; three KPI defects found by execution (below) |
+| `graph` parent past P11 + the remaining 6 subgraphs | **in progress** | field planning, dispatch, closure, escalation, comms and reconciliation are not written; D07/D08/D09/D11 are routed but not yet wired to subgraph nodes |
 | `persistence` checkpointer + serde | done | 14 committed tests, each paired with a control that fails; lazy Postgres import checked in a clean subprocess; the Postgres branch driven without a database and the shipped defect reinstated to watch it fail |
 | `persistence` outbox + migrations | **pending** | — |
 | `api` | **pending** | — |
 | model provider + deterministic fake | **pending** | — |
-| tests | 679 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
-| docs + diagrams | 1 of 9 | `docs/vendor-integration-gaps.md` only |
+| tests | 758 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
+| docs + diagrams | 1 of 9 | `docs/vendor-integration-gaps.md` only; **no Mermaid diagram exists yet** |
 | demo | **pending** | — |
 
 ## 6. Known gaps
@@ -370,10 +420,12 @@ A gap named here is a gap acknowledged. An empty section at the end of a pass th
 least believable part of the document.
 
 1. **The committed suite is unit-only, and the coverage gate is unmet.** Every row marked *done* in
-   §5 now rests on committed tests rather than on a throwaway script, but all 446 are unit tests.
+   §5 now rests on committed tests rather than on a throwaway script, but all 758 are unit tests.
    There are no integration, contract or scenario tests, none of the 17 required scenarios exist,
-   and coverage has not been measured against the 85% bar. Nothing here has been run end to end,
-   because there is no end to end yet.
+   and coverage has not been measured against the 85% bar. The two resolution subgraphs are driven
+   through the real parent graph from intake onwards, so those paths are end-to-end in everything
+   but name — but the graph still stops at the resolution fork, so there is no *incident* that runs
+   from event to closure.
 
    The standard those tests are held to is worth stating, because it was learned by being caught out.
    The first detector regression test **passed with the defect reinstated**: it asserted

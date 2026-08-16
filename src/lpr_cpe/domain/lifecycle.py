@@ -26,9 +26,7 @@ TERMINAL_STATUSES: frozenset[S] = frozenset({S.CLOSED, S.CANCELLED})
 #   yes or no to an action; it does not itself move the work forward.
 TRANSITIONS: dict[S, frozenset[S]] = {
     S.NEW: frozenset({S.TRIAGING, S.CANCELLED, S.CLOSED, S.ESCALATED}),
-    S.TRIAGING: frozenset(
-        {S.DIAGNOSING, S.AWAITING_APPROVAL, S.CLOSED, S.CANCELLED, S.ESCALATED}
-    ),
+    S.TRIAGING: frozenset({S.DIAGNOSING, S.AWAITING_APPROVAL, S.CLOSED, S.CANCELLED, S.ESCALATED}),
     S.DIAGNOSING: frozenset(
         {
             S.AWAITING_APPROVAL,

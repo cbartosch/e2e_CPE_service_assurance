@@ -153,6 +153,33 @@ def is_field_option(option: ResolutionOption) -> bool:
     return option.requires_truck_roll
 
 
+def first_actionable_option(
+    state: IncidentState, belongs_to: Callable[[ResolutionOption], bool]
+) -> ResolutionOption | None:
+    """The first untried option of a given class that policy has not blocked, or `None`.
+
+    Extracted because a router and the node behind its branch must agree on *which* option, not
+    merely that one exists. D09 answers "a remote repair is eligible" and P12 then has to execute
+    the repair D09 meant; two copies of this loop would drift the moment one of them learned about
+    a new exclusion, and the symptom would be a node executing an option the router had rejected.
+    Returning the option rather than a bool is what makes that agreement expressible.
+
+    Order is the plan's own, which `generate_resolution_options` has already ranked. Taking the
+    first is therefore taking the best available, not an arbitrary one.
+    """
+    plan = state.get("resolution_plan")
+    if plan is None:
+        return None
+    for option in plan.untried():
+        if not belongs_to(option):
+            continue
+        decision = latest_policy_decision(state, option.action_type)
+        if decision is not None and decision.blocked:
+            continue
+        return option
+    return None
+
+
 # --------------------------------------------------------------------------------------------
 # Readers over the recorded governance trail
 # --------------------------------------------------------------------------------------------
@@ -457,18 +484,14 @@ def route_remote_eligibility(state: IncidentState) -> Literal["remote", "self_he
     still the right resolution, and the subgraph behind this branch raises the interrupt. Skipping
     to self-help because a question would have to be asked is how an approval gate turns into a
     silent downgrade of the remedy.
+
+    The option itself is found by `first_actionable_option`, which P12 calls again to learn which
+    repair this branch was about. Answering with a bool here and re-deriving the option there is
+    what would let the two disagree.
     """
-    plan = state.get("resolution_plan")
-    if plan is None:
+    if first_actionable_option(state, is_remote_option) is None:
         return "self_help_check"
-    for option in plan.untried():
-        if not is_remote_option(option):
-            continue
-        decision = latest_policy_decision(state, option.action_type)
-        if decision is not None and decision.blocked:
-            continue
-        return "remote"
-    return "self_help_check"
+    return "remote"
 
 
 def route_remote_outcome(state: IncidentState) -> Literal["verify", "retry_diagnosis"]:
@@ -485,18 +508,13 @@ def route_self_help_suitability(state: IncidentState) -> Literal["self_help", "f
     Suitability's inputs -- language, complexity, safety, customer presence, likelihood of success
     -- belong to whoever built the option, which is why the question here is only whether such an
     option survived into the plan. A self-help option judged unsuitable is one never generated.
+
+    Same shape as D09, and the same reason: P13 calls `first_actionable_option` to learn which
+    instructions to send, so the choice is made in one place.
     """
-    plan = state.get("resolution_plan")
-    if plan is None:
+    if first_actionable_option(state, is_self_help_option) is None:
         return "field_planning"
-    for option in plan.untried():
-        if not is_self_help_option(option):
-            continue
-        decision = latest_policy_decision(state, option.action_type)
-        if decision is not None and decision.blocked:
-            continue
-        return "self_help"
-    return "field_planning"
+    return "self_help"
 
 
 def route_self_help_outcome(

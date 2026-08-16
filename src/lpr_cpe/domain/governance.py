@@ -21,6 +21,7 @@ from lpr_cpe.domain.enums import (
     ActionType,
     ApprovalKind,
     ApprovalStatus,
+    KPIName,
     PolicyOutcome,
     ReasonCode,
 )
@@ -250,6 +251,32 @@ class ActionRecord(FrozenDomainModel):
         """
         return self.outcome in (ActionOutcome.SUCCEEDED, ActionOutcome.PARTIAL)
 
+    @property
+    def was_attempted(self) -> bool:
+        """Whether this action reached the external system at all, whatever it then did.
+
+        A wider question than `changed_something` and a different one from "did it work". It is
+        what two separate readers need and must agree on: `generate_resolution_options` re-offers
+        only options that have *not* been attempted, and the policy engine's attempt limit counts
+        how many times this action type has already been sent. Two private copies of the set
+        drifted apart the moment one of them learned about a new outcome, and the symptom -- an
+        action re-offered after it had already failed twice, so `ResolutionPlan.exhausted` never
+        became true -- is a silent loop rather than an error.
+
+        `TIMED_OUT` counts, and it is the one worth arguing about: we sent it and never learned
+        the result, so repeating it is exactly the risk idempotency exists to bound.
+        `BLOCKED_BY_POLICY`, `AWAITING_APPROVAL` and `SKIPPED` do not, because nothing left the
+        process -- and re-offering one of those once the blocking condition clears is correct
+        behaviour, not a repeat.
+        """
+        return self.outcome in (
+            ActionOutcome.SUCCEEDED,
+            ActionOutcome.FAILED,
+            ActionOutcome.PARTIAL,
+            ActionOutcome.SIMULATED,
+            ActionOutcome.TIMED_OUT,
+        )
+
 
 class AuditEvent(FrozenDomainModel):
     """One line of the audit trail. Append-only, never edited, no PII.
@@ -278,10 +305,19 @@ class KPIEvent(FrozenDomainModel):
     `value` is always computed from state at emission time; nothing here is a target or a
     hard-coded rate. `dimensions` carries the slicing (technology, area archetype, crew type) so a
     single KPI name does not fork into a dozen near-duplicates.
+
+    `kpi_name` is the `KPIName` member and not a `str`. Declared as `str` it still *accepted* the
+    member -- pydantic coerced it down on validation -- and the coercion made
+    `e.kpi_name is KPIName.X` never true, because identity against an equal-but-distinct `str`
+    fails. A *presence* filter written that way fails loudly; the absence filter beside it
+    (`assert not [e for e in events if e.kpi_name is KPIName.X]`) passes vacuously and goes on
+    proving nothing forever. That happened, in the self-help subgraph tests. Typing the field keeps
+    the member intact so `is` holds, and puts a mistyped KPI name in front of mypy at the call site
+    instead of letting it survive as a string nothing compares equal to.
     """
 
     event_id: str
-    kpi_name: str
+    kpi_name: KPIName
     emitted_at: datetime
     value: float
     unit: str = ""

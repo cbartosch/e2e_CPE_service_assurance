@@ -36,7 +36,6 @@ from typing import Final
 from lpr_cpe.config.clock import Clock, SystemClock
 from lpr_cpe.domain.base import new_id
 from lpr_cpe.domain.enums import (
-    ActionOutcome,
     ApprovalStatus,
     CaseType,
     KPIName,
@@ -85,8 +84,12 @@ class KPIValue:
         """
         if denominator <= 0:
             return None
-        return cls(value=numerator / denominator, unit=UNIT_RATE, numerator=numerator,
-                   denominator=denominator)
+        return cls(
+            value=numerator / denominator,
+            unit=UNIT_RATE,
+            numerator=numerator,
+            denominator=denominator,
+        )
 
     @classmethod
     def seconds(cls, delta: timedelta | None) -> KPIValue | None:
@@ -200,9 +203,7 @@ SPEC_KPIS_WITHOUT_ENUM_MEMBER: Final[dict[str, str]] = {
         "derivable from this state (a truck roll following a successful remote fix) but has no "
         "KPIName member; needs one added to domain.enums.KPIName"
     ),
-    "truck_roll_after_self_help": (
-        "derivable from this state but has no KPIName member"
-    ),
+    "truck_roll_after_self_help": ("derivable from this state but has no KPIName member"),
     "operationally_avoidable_dispatch_rate": (
         "needs a policy definition of 'avoidable' (which reason codes count) plus a reviewer "
         "label; no KPIName member"
@@ -215,9 +216,7 @@ SPEC_KPIS_WITHOUT_ENUM_MEMBER: Final[dict[str, str]] = {
         "needs the ground-truth fault domain from the closed case review; the state holds the "
         "predicted domain only"
     ),
-    "correct_tap_odp_handover_rate": (
-        "needs the ground-truth delimiter, same as above"
-    ),
+    "correct_tap_odp_handover_rate": ("needs the ground-truth delimiter, same as above"),
     "repeat_mr_rate": (
         "needs the plant-object MR history across incidents; one incident cannot see the previous "
         "MR against the same tap"
@@ -512,9 +511,7 @@ class KPICalculator:
         `MRRecord.cycle_time()` returns `None` until the MR closes, so an incident with one closed
         and one open MR reports the closed one's cycle time rather than nothing.
         """
-        cycles = [
-            mr.cycle_time() for mr in current_mr_records(state).values() if mr.cycle_time()
-        ]
+        cycles = [mr.cycle_time() for mr in current_mr_records(state).values() if mr.cycle_time()]
         durations = [c for c in cycles if c is not None]
         if not durations:
             return None
@@ -634,14 +631,21 @@ class KPICalculator:
         "Needed no human" means no `approval_ref` on the record. Denominator excludes actions that
         were blocked, skipped or left awaiting approval: those did not happen, and counting them
         would let the rate rise as more work was refused.
+
+        `ActionRecord.was_attempted` is asked rather than re-spelled here. It owns "did this reach
+        the external system", and this method was the second private copy its docstring warns
+        about -- one that had already drifted, omitting `TIMED_OUT`.
+
+        `TIMED_OUT` belongs in the denominator, and the argument for dropping it -- that we cannot
+        confirm such an action executed -- does not survive the set it would leave behind. `FAILED`
+        is *confirmed* not to have worked and is counted, so this denominator has never meant
+        "took effect"; it means "we sent it". The approval was decided before the send in either
+        case, so the outcome cannot change whether a human was asked. Dropping timeouts would also
+        bias the rate upward: they concentrate in the slow network-affecting actions the pack gates
+        behind approval, so the rows lost are the *attended* ones and coverage climbs the more work
+        goes unconfirmed -- the same direction of error as counting refusals, above.
         """
-        executed = [
-            a
-            for a in state.get("action_history", [])
-            if a.outcome
-            in {ActionOutcome.SUCCEEDED, ActionOutcome.PARTIAL, ActionOutcome.FAILED,
-                ActionOutcome.SIMULATED}
-        ]
+        executed = [a for a in state.get("action_history", []) if a.was_attempted]
         if not executed:
             return None
         unattended = sum(1 for a in executed if not a.approval_ref)
@@ -759,7 +763,7 @@ class KPICalculator:
             merged.update(dimensions)
         return KPIEvent(
             event_id=new_id("KPI"),
-            kpi_name=kpi_name.value,
+            kpi_name=kpi_name,
             emitted_at=emitted_at if emitted_at is not None else self._clock.now(),
             value=computed.value,
             unit=computed.unit,

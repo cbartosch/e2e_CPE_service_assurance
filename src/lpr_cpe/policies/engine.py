@@ -82,7 +82,13 @@ _DECISION_CLASS: Final[dict[ActionType, str]] = {
 
 #: Actions that reach the customer. Quiet hours, contact caps and the vulnerable-customer rules
 #: apply to exactly these, and to nothing else -- rebooting a modem at 03:00 is not a contact.
-_CUSTOMER_CONTACT_ACTIONS: Final[frozenset[ActionType]] = frozenset(
+#:
+#: Public, because the graph has to count the contacts this set defines before it can hand the
+#: engine a `contacts_today` to compare against the cap. `graph.subgraphs._shared.contact_history`
+#: is that counter, and it imports this name rather than listing the two members again: the cap and
+#: the count must be over the same set, and two copies would disagree the first time a channel was
+#: added -- silently, since the symptom is a limit that stops applying rather than one that fires.
+CUSTOMER_CONTACT_ACTIONS: Final[frozenset[ActionType]] = frozenset(
     {ActionType.NOTIFY_CUSTOMER, ActionType.SEND_SELF_HELP}
 )
 
@@ -726,7 +732,7 @@ class PolicyEngine:
         ]
 
     def _check_customer_contact(self, request: PolicyInput, pack: PolicyPack) -> list[_Finding]:
-        if request.action_type not in _CUSTOMER_CONTACT_ACTIONS:
+        if request.action_type not in CUSTOMER_CONTACT_ACTIONS:
             return []
         out: list[_Finding] = []
         contact = pack.customer_contact

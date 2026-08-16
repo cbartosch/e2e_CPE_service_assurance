@@ -227,9 +227,7 @@ def test_corroboration_above_the_population_keeps_the_diagnosed_scope(
 
 def test_a_blast_radius_cannot_be_built_without_a_basis() -> None:
     with pytest.raises(ValueError, match="basis"):
-        br.BlastRadius(
-            count=8, measured=False, basis="   ", scope=br.BlastRadiusScope.DELIMITER
-        )
+        br.BlastRadius(count=8, measured=False, basis="   ", scope=br.BlastRadiusScope.DELIMITER)
 
 
 def test_scope_ranking_is_the_outward_nesting_not_alphabetical() -> None:
@@ -265,9 +263,7 @@ def test_the_resolved_target_is_never_looser_than_the_contract(
     asyncio.run(check())
 
 
-def test_both_sla_branches_are_reachable(
-    fixtures: Any, pack: PolicyPack, now: datetime
-) -> None:
+def test_both_sla_branches_are_reachable(fixtures: Any, pack: PolicyPack, now: datetime) -> None:
     """Falsification. A `_tighter` that always returned the pack passes every other SLA test here.
 
     The fixture set holds residential contracts looser than the pack at high severity and business
@@ -434,7 +430,11 @@ def test_a_lone_weak_finding_does_not_become_a_confident_diagnosis(
     carrying a single evidence reference, cannot be reported as a conclusive diagnosis.
     """
     lone = _finding(
-        now, 0.3, Severity.LOW, confidence=0.4, suspected_domain=FaultDomain.CPE,
+        now,
+        0.3,
+        Severity.LOW,
+        confidence=0.4,
+        suspected_domain=FaultDomain.CPE,
         evidence_refs=("ev-1",),
     )
     hypotheses = rca.build_hypotheses([lone], evidence=pack.evidence)
@@ -448,10 +448,16 @@ def test_evidence_for_another_domain_is_recorded_as_contradicting(
 ) -> None:
     """What makes the contradicting list real rather than decorative."""
     findings = [
-        _finding(now, 0.8, Severity.HIGH, suspected_domain=FaultDomain.CPE,
-                 evidence_refs=("ev-cpe",)),
-        _finding(now, 0.6, Severity.MEDIUM, suspected_domain=FaultDomain.TAP_OR_ODP,
-                 evidence_refs=("ev-tap",)),
+        _finding(
+            now, 0.8, Severity.HIGH, suspected_domain=FaultDomain.CPE, evidence_refs=("ev-cpe",)
+        ),
+        _finding(
+            now,
+            0.6,
+            Severity.MEDIUM,
+            suspected_domain=FaultDomain.TAP_OR_ODP,
+            evidence_refs=("ev-tap",),
+        ),
     ]
     by_domain = {h.fault_domain: h for h in rca.build_hypotheses(findings, evidence=pack.evidence)}
     assert by_domain[FaultDomain.CPE].contradicting_evidence_refs == ("ev-tap",)
@@ -583,9 +589,7 @@ def test_a_plan_never_offers_an_action_the_pack_forbids(pack: PolicyPack, now: d
             assert rule is not None and rule.allowed, (domain, option.action_type)
 
 
-def test_an_already_attempted_option_is_not_offered_again(
-    pack: PolicyPack, now: datetime
-) -> None:
+def test_an_already_attempted_option_is_not_offered_again(pack: PolicyPack, now: datetime) -> None:
     first = resolution.plan_resolution(
         plan_id="PLAN-1",
         created_at=now,

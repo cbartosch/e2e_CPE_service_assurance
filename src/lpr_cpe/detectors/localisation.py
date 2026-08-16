@@ -158,11 +158,7 @@ class FaultDomainClassifier(BaseDetector):
         contested = len(weights) > 1 and margin < context.threshold(
             "classifier.decisive_margin", 0.15
         )
-        also = (
-            f" Also suspected: {', '.join(d.value for d in runners)}."
-            if runners
-            else ""
-        )
+        also = f" Also suspected: {', '.join(d.value for d in runners)}." if runners else ""
         return self.ok(
             [
                 self.finding(
@@ -284,8 +280,7 @@ class DelimiterLocaliser(BaseDetector):
         flags: list[DataQualityFlag] = []
         audit_year = delimiter.get("last_audit_year")
         stale_audit = isinstance(audit_year, int) and (
-            context.now.year - audit_year
-            >= context.threshold("localiser.stale_audit_years", 4.0)
+            context.now.year - audit_year >= context.threshold("localiser.stale_audit_years", 4.0)
         )
         if stale_audit:
             flags.append(DataQualityFlag.STALE_DATA)

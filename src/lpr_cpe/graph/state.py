@@ -92,7 +92,24 @@ T = TypeVar("T")
 
 # The attribute used to de-duplicate each appended type, tried in order. Named once here so a new
 # appended type cannot quietly fall back to "no key" and lose de-duplication.
-_KEY_ATTRS = ("ref", "result_id", "action_id", "approval_id", "event_id", "finding_id", "key")
+#
+# `decision_id` is here because `PolicyDecision` was the type that had fallen back. It carries none
+# of the other six, so it was keyed on its `repr` -- which contains `decided_at`, so two recordings
+# of one decision a microsecond apart were two entries rather than one. `policy_block_rate` divides
+# by the length of that list and `approval_outstanding` compares `max(answers) < max(demands)`;
+# both read the duplicate as a genuine second evaluation. The `repr` fallback is the right default
+# for the plain dicts in `errors` and wrong for anything that has an identity, which is what this
+# tuple exists to enumerate.
+_KEY_ATTRS = (
+    "ref",
+    "result_id",
+    "action_id",
+    "approval_id",
+    "decision_id",
+    "event_id",
+    "finding_id",
+    "key",
+)
 
 
 def _natural_key(item: Any) -> str:
@@ -189,9 +206,7 @@ def take_max(current: int | None, update: int | None) -> int:
     return max(current or 0, update)
 
 
-def merge_dict(
-    current: dict[str, Any] | None, update: dict[str, Any] | None
-) -> dict[str, Any]:
+def merge_dict(current: dict[str, Any] | None, update: dict[str, Any] | None) -> dict[str, Any]:
     """Shallow merge, last writer wins per key. For `linked_records` and `metrics_timestamps`."""
     out = dict(current or {})
     if update:

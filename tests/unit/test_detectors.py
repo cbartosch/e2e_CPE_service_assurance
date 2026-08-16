@@ -181,18 +181,14 @@ def test_classifier_never_stays_silent(sweep: Sweep) -> None:
 
 
 @pytest.mark.parametrize("service_ref", PON_SUBJECTS)
-def test_hfc_detector_on_pon_is_not_applicable_not_a_defect(
-    service_ref: str, sweep: Sweep
-) -> None:
+def test_hfc_detector_on_pon_is_not_applicable_not_a_defect(service_ref: str, sweep: Sweep) -> None:
     result = sweep.by_service[service_ref]["hfc_rf_pnm_degradation"]
     assert not result.ran
     assert result.data_quality_warnings == [], result.unavailable_reason
 
 
 @pytest.mark.parametrize("service_ref", HFC_SUBJECTS)
-def test_pon_detector_on_hfc_is_not_applicable_not_a_defect(
-    service_ref: str, sweep: Sweep
-) -> None:
+def test_pon_detector_on_hfc_is_not_applicable_not_a_defect(service_ref: str, sweep: Sweep) -> None:
     result = sweep.by_service[service_ref]["pon_optical_degradation"]
     assert not result.ran
     assert result.data_quality_warnings == [], result.unavailable_reason
@@ -295,7 +291,7 @@ def test_healthy_service_produces_no_false_fault(sweep: Sweep) -> None:
 
 
 async def test_classifier_with_no_prior_results_does_not_run(now: datetime) -> None:
-    """"Nobody looked" is not "nothing was found", and the difference decides a dispatch."""
+    """ "Nobody looked" is not "nothing was found", and the difference decides a dispatch."""
     bare = DetectionContext(incident_id="INC-BARE", now=now, technology=Technology.HFC)
 
     classified = await FaultDomainClassifier().detect(bare)
@@ -759,9 +755,7 @@ def weather_advisory(sweep: Sweep) -> DetectorResult:
 
 
 def test_the_weather_finding_names_no_fault_domain(weather_advisory: DetectorResult) -> None:
-    advisories = [
-        f for f in weather_advisory.findings if "unsafe for field work" in f.explanation
-    ]
+    advisories = [f for f in weather_advisory.findings if "unsafe for field work" in f.explanation]
     assert advisories, "the safety constraint must still reach the dispatch layer"
     assert all(f.suspected_domain is None for f in advisories)
 
@@ -797,8 +791,7 @@ async def test_the_same_snapshot_produces_the_same_scores(
 
     def signature(results: list[DetectorResult]) -> list[Any]:
         return [
-            (r.detector_name, r.ran, [(f.score, f.confidence) for f in r.findings])
-            for r in results
+            (r.detector_name, r.ran, [(f.score, f.confidence) for f in r.findings]) for r in results
         ]
 
     assert signature(await run_detectors(context)) == signature(await run_detectors(context))
@@ -818,8 +811,7 @@ def test_the_fixtures_cannot_reach_parent_escalation(sweep: Sweep, fixtures: Any
         service_ref
         for service_ref, results in sweep.by_service.items()
         if results["delimiter_localiser"].findings
-        and results["delimiter_localiser"].findings[0].suspected_domain
-        is FaultDomain.NODE_OR_OLT
+        and results["delimiter_localiser"].findings[0].suspected_domain is FaultDomain.NODE_OR_OLT
     ]
     assert reached == [], f"{len(reached)} services now reach it; assert on those instead"
     assert len(fixtures.services) == 41

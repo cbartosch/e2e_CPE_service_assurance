@@ -112,6 +112,114 @@ names, the staleness model.
 * **CPE-6** — Staleness is simulated against an invented Inform interval. What is the estate's real
   Inform interval, and at what age does a reading stop being usable for a dispatch decision? The
   workflow flags `STALE` today on a number we chose.
+* **CPE-7** — **What does the ACS return for a diagnostic against an offline device?** The simulator
+  first raised `AdapterUnavailableError`, the class that means "the system could not be reached at
+  all". That was wrong in a way worth recording, because the ACS *did* answer — it answered that the
+  device is not there. Since `ADAPTER_UNAVAILABLE` is one of `DataQualityAssessment.BLOCKING_FLAGS`,
+  a single offline CPE made `sufficient_for_action` false, D05 answered `gather_more` on every pass,
+  and the `pon_power_affected` fixture spent its diagnostic-cycle budget and escalated with
+  `fault_domain=unknown` and no options — while a dying gasp, an open utility outage and a
+  power-correlation finding were already in state. It now raises a plain `AdapterError`
+  (`retryable=False`), which lands as `MISSING_FIELD` and does not block; the fixture diagnoses
+  `power` and offers two options. The sibling `read_status` had it right all along, returning
+  `data_available: False`. **The open question is which of these the real ACS does**: a CWMP fault
+  code, a session timeout, or silence. A timeout is genuinely "unreachable", and would restore the
+  old behaviour for a legitimate reason.
+* **CPE-8** — **The simulator now models the *effect* of an action, and the model is ours.** Until
+  this was added, `apply_action` recorded an intent and changed nothing, so the verification read
+  after a remote repair returned the same telemetry as before it. That made `RemoteAction.fixed_it`
+  unreachable, D10's `verify` branch dead, and the specification's Scenario 2 ("HFC remote repair
+  succeeds") impossible to express. A device is now recovered by an action when two things hold: the
+  action is one of `_RECOVERING_ACTIONS` (those that re-establish a management session), and the
+  service's telemetry profile is one where the *plant* is healthy, so the device is the only thing
+  left that can be wrong. The recovered device reports `_UPTIME_AFTER_RECOVERY = 120` seconds.
+
+  Three things here are invented and none should be quoted to anyone: **which actions actually
+  recover a wedged device** (a resync is listed alongside a reboot on the assumption that
+  re-provisioning clears a bad session; that may be optimistic), **how long a real device takes to
+  come back and re-Inform** — 120 s is a placeholder for a delay that in reality is long enough that
+  the graph may need the wait state CPE-5 already asks about — and **whether recovery is even
+  observable in one read**, since a device that reboots is unreachable for a while before it is
+  healthy, and this simulator steps straight from one to the other.
+
+  What is *not* arbitrary is the discriminator, and it is the part worth keeping: a reboot recovers
+  the wedged device at `SVC-UT-001-B-01` and does **not** recover `SVC-VQ-002-A-01`, whose ONT is
+  dark because utility power is out. A simulator that recovered both would close every incident on
+  the first reboot and never dispatch anyone; one that recovered neither is where this started.
+
+* **CPE-9** — **The simulator has no failure mode, so a *failed* action cannot be exercised.**
+  `simulate_write` has two outcomes: `ActionOutcome.SIMULATED` when the gate permits, and
+  `verdict.outcome_if_refused` when it does not — which WRITE-1 records as always resolving to
+  `SIMULATED` through the real gate. `apply_action` adds only an `AdapterError` for an action outside
+  `SUPPORTED_ACTIONS`. Nothing anywhere returns `FAILED`, `TIMED_OUT` or `PARTIAL`, so three of the
+  eight `ActionOutcome` members are unreachable from any fixture.
+
+  The consequence is specific and it was measured, not predicted. `RemoteAction.fixed_it` is
+  `outcome in _RAN and verification_passed is True`; when the outcome is always `SIMULATED`, the
+  first conjunct is always true and `fixed_it` becomes an alias for `verification_passed`. Replacing
+  `verified.fixed_it` with `passed` in `verify_remote_repair` left all fourteen end-to-end tests in
+  `tests/unit/test_subgraph_remote_resolution.py` green. The distinction it protects is real —
+  a real ACS reports a failed write whenever the CPE takes the reboot and the session times out
+  before it can acknowledge, and crediting that recovery to the action would put a fix we know
+  failed into `remote_fix_success_rate` — but no fixture can produce it, so it read as dead defence
+  and would have been refactored away as such.
+
+  Closed for the reason code by
+  `test_a_device_that_recovered_after_a_failed_action_claims_no_fix`, which drives
+  `verify_remote_repair` directly over a seeded `FAILED` action rather than through the graph. That
+  is a test-only affordance standing in for a capability the adapter does not have, the same shape
+  as WRITE-1's `_RefusingGate`. **Should the simulator grow an injectable failure mode?** All three
+  are load-bearing downstream: every reference to `FAILED`, `PARTIAL` and `TIMED_OUT` in `src/` is a
+  membership test in `ActionRecord.changed_something`, `ActionRecord.was_attempted` or
+  `KPICalculator.automation_coverage_rate` — six reads, no writes. A fixture set that cannot produce
+  an outcome cannot test the branches that read it.
+
+  One of those readers disagreed with the others, which is what made this more than housekeeping.
+  `was_attempted` is the single owner of "this reached the external system" and counts `TIMED_OUT`
+  deliberately — we sent it and never learned the result. `automation_coverage_rate` built its own
+  denominator from `{SUCCEEDED, PARTIAL, FAILED, SIMULATED}`, the same set minus `TIMED_OUT`: the
+  second private copy `was_attempted`'s own docstring warns about, invisible only because
+  `TIMED_OUT` is unreachable.
+
+  **Resolved in favour of `was_attempted`**, which the KPI now calls instead of re-spelling. The
+  case for excluding a timeout — that we cannot confirm it executed — does not survive the set it
+  would leave behind: `FAILED` is *confirmed* not to have worked and is counted, so the denominator
+  has never meant "took effect", it means "we sent it". Approval is decided before the send either
+  way, so the outcome cannot change whether a human was asked. Excluding timeouts would also bias
+  the rate upward, since they concentrate in the slow network-affecting actions the pack gates
+  behind approval: the rows dropped are the *attended* ones, and coverage would climb the more work
+  went unconfirmed — the same direction of error the denominator was narrowed to prevent.
+
+  Two tests in `tests/unit/test_subgraph_remote_resolution.py` hold it, and they fail to different
+  mutations on purpose. `test_the_coverage_denominator_is_the_set_was_attempted_owns` sweeps every
+  `ActionOutcome` member and catches a re-spelled set, including a future member taught to one
+  reader and not the other. The second, `test_an_action_whose_result_we_never_learned_still_counts_against_coverage`,
+  pins the *direction*, because the sweep would also pass if the two were reconciled the other way
+  by dropping `TIMED_OUT` from `was_attempted`. Both were mutation-checked.
+
+## Write gate (`integrations/base.py`, `simulation/simulated_base.py`)
+
+* **WRITE-1** — **`WriteGate` cannot currently block.** `authorize()` has exactly two returns:
+  `permitted=True, simulated=False` when `settings.writes_permitted`, otherwise `permitted=False,
+  simulated=True`. Neither yields `permitted=False, simulated=False`, so
+  `WriteVerdict.outcome_if_refused` always resolves to `SIMULATED` and `ActionOutcome`
+  `BLOCKED_BY_POLICY` is unreachable through the real gate.
+
+  Four guards downstream are written against it and are all correct: `simulate_write` withholds the
+  external reference, rewrites the detail, and keeps the idempotency key free for a retry, and
+  `SimulatedCPEAdapter.apply_action` declines to mark the device recovered. Being unreachable, they
+  were also untested, and the mutation check confirmed it — deleting the recovery guard changed no
+  test's result. `tests/unit/test_adapters.py` now injects a `_RefusingGate` subclass to exercise
+  them, which is a test-only affordance standing in for a capability the gate does not yet have.
+
+  This is the same shape of finding as INTAKE-1 below: a branch that is wired, defensible and dead.
+  The open question is where blocking belongs. The gate answers "may writes leave this process?"
+  from configuration alone, which is a deployment-wide fact; "may *this* action proceed?" is
+  `PolicyEngine`'s question and is answered earlier, before an `ActionRequest` is built at all —
+  `ActionRequest` refuses to be constructed with `policy_outcome=BLOCKED`. It may be that
+  `BLOCKED_BY_POLICY` is genuinely unreachable *by design* and the guards should stay as defence in
+  depth, or that the gate should grow a policy-aware refusal. That is a decision, not an oversight,
+  and it should be taken deliberately rather than discovered.
 
 ## TMF — CRM / ITSM (`integrations/tmf/`)
 
@@ -290,3 +398,158 @@ these are things we **have not built**, not things we **do not know**.
   splicing is not automatically credited with mechanical splicing), and no notion of a part being
   reserved for another job. **How does the WFM really encode capability, and does it expose expiry?**
   A lapsed confined-space certificate reads as a held skill here.
+
+---
+
+## Resolution options (`decision_services/resolution.py`)
+
+Also not an adapter, and listed for the same reason as `dispatch/`: these are things we **have not
+built**, not things we **do not know**. P11 says a candidate must carry ten attributes and that the
+node must produce candidates in eight categories. `ResolutionOption` carries six of the ten outright
+and the `_CATALOGUE` covers five of the eight. What follows is the remainder, named so that a reader
+comparing the spec against the code can tell a deliberate omission from an oversight.
+
+Two things here are **not** gaps. `risk` and `required_approval` are copied onto every option from
+the policy pack's `ActionRule` at plan time — they were the two spec attributes the pack already
+knew and `plan_resolution` was discarding. And the plan is not the authoriser: `PolicyEngine`
+re-reads the pack at execution time, and the copies exist for display and for the audit record.
+
+* **RESOLUTION-1** — **Every success probability is an estimate.** Nothing in this repository has
+  observed a reboot fixing 45% of CPE faults. They are ordering weights and their absolute values
+  should not be quoted to anyone. **What is the real per-action, per-domain success rate?** A
+  deployment with outcome history should replace the whole column; until then the *ordering* is the
+  only part of the number that is load-bearing.
+* **RESOLUTION-2** — Four of P11's ten required attributes have no field: **cost class**, **required
+  skill and parts**, **rollback plan** and **reason codes**. `reversible` is a bool where the spec
+  asks for a plan, and "required evidence" is only loosely `prerequisites`, a free-text tuple.
+  Skills and parts would inherit WFM-3's vocabulary problem, and a per-option `ReasonCode` has no
+  honest member today — see the note in `graph/nodes/diagnosis.py`, where P11 wanted one for "the
+  catalogue has nothing for this domain" and none of the 45 members distinguishes that from "the
+  pack disallowed everything". **Which of these does an operator actually act on?** Adding four
+  fields nobody reads is worse than naming them here.
+* **RESOLUTION-3** — **`rank_key` has no cost term, and it shows.** It weighs success against
+  *customer* disruption, so the 240 minutes of a technician's day and the 6 minutes of a reboot are
+  priced the same. Measured consequence: for `cpe`, `create_work_order` ranks first at 0.630 against
+  `cpe_reboot`'s 0.383; for `inside_home_wiring`, a truck outranks self-help 0.595 to 0.255. This is
+  cosmetic today and only because the routers filter `untried()` by *kind* rather than taking the
+  top rank — D09 asks for the first *remote* option and gets `cpe_reboot`. But the plan an operator
+  reads recommends a truck first. This is the same missing quantity as RESOLUTION-2's cost class,
+  which is why fudging the success numbers to force the intended order would be the wrong repair:
+  it would falsify an estimate to compensate for an absent term.
+* **RESOLUTION-4** — **Monitoring is not offered as a P11 candidate.** The spec lists it among the
+  eight, but the action that would express it, `create_pm_case`, is assigned by the spec to D04
+  (predictive risk with no current impact) and D24 (chronic pattern). Offering it here as well would
+  give preventive-maintenance cases two owners. **Is "watch it and do nothing yet" a real option for
+  an incident that already has customer impact?** If it is, it needs its own action type, because
+  reusing the D04 one conflates a preventive case with a deferred repair.
+* **RESOLUTION-5** — **`is_remote_option` is structural, so paperwork can pass for a remote repair.**
+  It is defined as "no truck and no customer", which is true of raising a maintenance request and of
+  notifying a customer. This was observed rather than reasoned: for `tap_or_odp` — the one plant
+  domain D08 deliberately does not divert, because its remedy is a joint dispatch — D08 returned
+  `continue` and D09 returned `remote` for a plan whose only option was `raise_mr`, handing a
+  day-long plant request to the remote-repair stage. Closed for MRs by flagging them `truck_roll`
+  (the flag describes the work the option causes, as `minutes=1440` already did) and by giving the
+  tap the Clean Boots half D08 assumes exists; the tap now routes D09 → `self_help_check` → D11 →
+  `field_planning` with both halves in hand. **Still open:** `notify_customer` under `power` remains
+  structurally "remote" and is only hidden by D08 diverting `power`. That half is now demonstrable
+  rather than argued: since the CPE-7 fix let `pon_power_affected` reach P11 at all,
+  that fixture produces `fault_domain=power` with options `[notify_customer, raise_mr]`, of which
+  `is_remote_option` accepts `notify_customer`. Only D08 answering `plant_path` for `power` keeps it
+  away from D09. **Should D09 ask a positive question** — does this option repair the device or its
+  configuration — rather than inferring a repair from the absence of a truck?
+
+  The open half is now at least *guarded*, which it was not before. `execute_remote_repair` hands
+  the selected option straight to `ctx.adapters.cpe.apply_action`, and that raises `AdapterError` on
+  anything outside `SUPPORTED_ACTIONS` — measured, by driving `raise_mr` into the subgraph. So the
+  safety of every non-CPE option `is_remote_option` admits rests entirely on D08 diverting its
+  domain first, an agreement between `boundaries.crew_for`, `resolution._CATALOGUE` and the CPE
+  adapter that none of the three mentions.
+  `test_only_cpe_executable_actions_can_reach_the_remote_branch` now walks every `FaultDomain`,
+  skips the ones D08 diverts, and fails if any survivor offers a remote option the adapter cannot
+  perform. Mutation-checked: adding a `raise_mr` row under `cpe`
+  turns it red naming `cpe/raise_mr`. That does not answer the design question above — it makes the
+  wrong answer fail in CI rather than in an incident.
+* **RESOLUTION-6** — **A back-office domain's remote repairs are never attempted.** The mirror image
+  of RESOLUTION-5, found while writing its guard. `provisioning` offers exactly two options,
+  `reprovision` and `profile_change`; both are in the CPE adapter's `SUPPORTED_ACTIONS`, both are
+  structurally remote (no truck, no customer), and the console could execute either. D08 diverts the
+  domain anyway, because `provisioning` is in `BACK_OFFICE_DOMAINS`, so neither is ever offered to
+  D09 and the remote branch never sees them.
+
+  D08 is not obviously wrong — its docstring says back-office domains "are equally not a truck roll,
+  and D08's remedy list names them explicitly", which follows the spec. But the two questions have
+  been collapsed. "Back office" says *who owns the fix*; the remote branch asks *can this be fixed
+  from a console*. For provisioning the honest answers are "the provisioning team" and "yes", and
+  D08 currently lets the first veto the second. **Should a back-office domain with an executable
+  remote repair try it before being routed to the plant path?** If yes, D08's condition needs
+  splitting; if no, the reason is that a reprovision needs an owner's authority rather than a
+  technical capability, and that belongs in the policy pack as an approval demand rather than in a
+  routing table as an omission.
+
+## Event validation (`graph/nodes/intake.py`, D01)
+
+**Supplied:** that D01 asks whether the event is valid and actionable, quarantines it if not, and
+records a rejection reason and a data-quality metric. **Invented:** every condition that makes an
+event invalid.
+
+* **INTAKE-1** — **D01's quarantine branch is unreachable from a well-formed start.** The router
+  itself is right, and is tested directly against hand-built states: it quarantines when there are
+  no events, and when the assessment carries one of the three
+  `DataQualityAssessment.BLOCKING_FLAGS`. Neither arm can fire in the assembled graph. P02 is the
+  only node that writes `data_quality` before D01, and the two flags it raises — `MISSING_FIELD` for
+  an unknown technology, and `CLOCK_SKEW` — are deliberately non-blocking; the blocking three
+  (`ADAPTER_UNAVAILABLE`, `CONFLICTING_SOURCES`, `INCONSISTENT_TOPOLOGY`) are raised by adapters in
+  P03 and later, which run *after* D01. `make_initial_state` always supplies an event, so the
+  empty-events arm cannot fire either. The branch is wired, tested in isolation, and dead in
+  practice — which is why P02 emits the data-quality metric on the continuing path too, and why the
+  spec's "generate a data-quality metric" bullet is satisfied only in the sense that the metric
+  exists. **What does an invalid event actually look like?** That is the vendor question underneath:
+  with no real NXT alarm schema there is nothing to validate an event *against*, so P02 checks the
+  two things a canonical model can check unaided. A real integration should say which of a malformed
+  payload, an unknown customer reference, a decommissioned service or a replayed vendor id is a
+  quarantine and which is a warning. Wherever that line falls, the check belongs in P02, because D01
+  is the last point before an incident exists.
+
+---
+
+## Guided self-help (`graph/subgraphs/self_help.py`, P13–P15, D11/D12)
+
+**Supplied:** that the workflow can offer a customer a self-help step, wait for them, and verify
+whether it worked. **Invented:** the script catalogue, the response window, and everything about the
+customer as a party the workflow can address.
+
+* **SELFHELP-1** — **A completed self-help step has no physical effect anywhere in the simulation, so
+  `resolved` is unreachable end to end.** The CPE simulator recovers a device for the actions *it*
+  applies (`SUPPORTED_ACTIONS`); a customer moving their router across the room is not one of them.
+  `verify_self_help` therefore reads the same `online: True` before and after, `reachability_verdict`
+  returns `None` — "cannot be told from here" — and the outcome is `not_resolved` however the
+  customer answers. This is faithful rather than broken: reachability genuinely is the only symptom a
+  TR-069 read exposes, and a Wi-Fi coverage complaint is precisely the fault it cannot see. The real
+  question is **what evidence closes a self-help session**. Interface counters, a fresh speed test, a
+  Wi-Fi RSSI read from the gateway's station table, or the customer's own word after a cooling-off
+  period? Until that is answered the branch can prove a customer complied and cannot prove it helped.
+  The `resolved` arm is exercised at node level with supplied readings, and the end-to-end tests
+  assert `not_resolved`, so the gap is visible in the suite rather than hidden by a mock.
+* **SELFHELP-2** — **The response window is ours.** `SelfHelpSession.response_deadline` comes from the
+  communications adapter, and the policy pack has no self-help timeout at all — no
+  `customer_contact.self_help_response_window`, nothing per-channel, nothing per-severity. An SMS at
+  09:00 and an email at 23:00 plainly do not deserve the same window, and a P1 outage should not wait
+  as long as a coverage complaint. How long does the business actually give a customer before it
+  treats silence as a refusal and spends a truck?
+* **SELFHELP-3** — **The customer has no representation in state.** `IncidentState` carries a
+  `customer_ref` and nothing else about them: no contact address, no channel preference, no language,
+  no accessibility or support needs. Two consequences are visible in the fixtures. The masked
+  destination on every send is `None`, because `_masked_destination` correctly reports "the caller did
+  not supply one" rather than inventing a number. And the adapter falls back to `'es'` for language,
+  which is a reasonable default for Puerto Rico and is still a *default* standing in for a fact
+  nobody recorded. Per COMMS-6 the right fix is not a phone-number field: the platform should resolve
+  a customer reference to a destination itself, so the workflow never holds a contact detail. But
+  language and support needs are decisions, not contact details, and they need an owner.
+* **SELFHELP-4** — **`customer_communications` had no writer.** The state contract declared it and no
+  node in `src` appended to it, while `KPICalculator.customer_contacts_per_incident` counts exactly
+  that list — and never returns `None`. An incident that had just texted its customer therefore
+  reported *zero contacts*, confidently, which is worse than reporting nothing. Now written by
+  `send_self_help_instructions`, keyed on `action_id` so `append_unique` collapses a replay. Recorded
+  here because the underlying question is a vendor one: **every outbound contact must land in this
+  list, including the ones the comms subgraph will send and any the platform originates itself.** A
+  contact cap enforced against a list only one node writes is not a cap.

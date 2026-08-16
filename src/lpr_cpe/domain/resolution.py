@@ -18,6 +18,7 @@ from lpr_cpe.domain.base import DomainModel, FrozenDomainModel
 from lpr_cpe.domain.enums import (
     ActionOutcome,
     ActionType,
+    ApprovalKind,
     CommunicationChannel,
     FaultDomain,
     ReasonCode,
@@ -25,7 +26,25 @@ from lpr_cpe.domain.enums import (
 
 
 class ResolutionOption(FrozenDomainModel):
-    """One way this might be fixed, with its cost to the customer stated."""
+    """One way this might be fixed, with its cost to the customer stated.
+
+    `risk` and `required_approval` are **copied from the policy pack when the plan is built**, by
+    `decision_services.resolution.plan_resolution`, which already reads the pack's `ActionRule` to
+    decide whether the option may be offered at all and until now discarded everything but
+    `allowed`. Two reasons to carry them rather than make every reader look them up again:
+
+    * A plan is checkpointed into graph state and read back during an audit. An option that names
+      only its action type tells an auditor what *today's* pack says about it, not what was in
+      force when the plan was made. The copy is a snapshot of the rule that actually applied.
+    * The API and the operator UI show options. "Needs a dispatch approval" is part of choosing,
+      and a surface that has to re-open the pack to say so will eventually not bother.
+
+    **The copy must never authorise anything.** `PolicyEngine` remains the only thing that decides
+    whether an action may run, and it re-reads the pack at execution time; these two fields are for
+    display and for the record. Using `required_approval` here as the approval gate would move the
+    authorisation decision to whenever the plan happened to be built, which for an incident that
+    sits pending overnight is a stale answer.
+    """
 
     option_id: str
     action_type: ActionType
@@ -39,6 +58,15 @@ class ResolutionOption(FrozenDomainModel):
     requires_customer_present: bool = False
     requires_truck_roll: bool = False
     blast_radius: int = Field(default=1, ge=0)
+    #: The pack's risk band for this action, verbatim. A `str` and not an enum because
+    #: `policies.models.ActionRule.risk` is a `str`: the pack owns that vocabulary, and mirroring it
+    #: as an enum here would make a pack that adds a band fail to load against a model that has not
+    #: been redeployed. Empty means the plan was built without a pack rule, which cannot happen on
+    #: the `plan_resolution` path -- an action with no rule is not offered at all.
+    risk: str = ""
+    #: The approval the pack demands before this action may run, or `None` for none. Display and
+    #: audit only; see the class docstring.
+    required_approval: ApprovalKind | None = None
     prerequisites: tuple[str, ...] = ()
     parameters: dict[str, Any] = Field(default_factory=dict)
     rationale: str = ""
@@ -101,6 +129,22 @@ class ResolutionPlan(DomainModel):
         return not self.untried()
 
 
+#: Outcomes that mean the action ran, for `RemoteAction.fixed_it`.
+#:
+#: `SIMULATED` sits beside `SUCCEEDED` because `simulate_write` never reports `SUCCEEDED`: it
+#: refuses to claim an effect it did not have, which is right. But simulation is the only mode with
+#: a working adapter today, so requiring `SUCCEEDED` here would make `fixed_it` a constant `False`,
+#: D10's `verify` branch dead code, and the specification's Scenario 2 inexpressible.
+#:
+#: No information is lost by admitting it. Whether the write was real is already recorded, once, on
+#: `RemoteAction.simulated`; encoding it a second time inside `fixed_it` would make that property
+#: mean two things at once, and it is the *verified* half that D10 needs.
+#:
+#: `PARTIAL` is deliberately absent. A partly-applied action that then verified clean is a real
+#: situation and a genuinely harder judgement than this constant should be making silently.
+_RAN: frozenset[ActionOutcome] = frozenset({ActionOutcome.SUCCEEDED, ActionOutcome.SIMULATED})
+
+
 class RemoteAction(DomainModel):
     """A remote fix attempt and its verification.
 
@@ -139,12 +183,13 @@ class RemoteAction(DomainModel):
 
     @property
     def fixed_it(self) -> bool:
-        """Only true when the action succeeded AND verification confirmed it.
+        """Only true when the action ran AND verification confirmed it.
 
         `verification_passed is True` rather than truthiness: `None` means not yet verified, and
-        treating that as success is exactly the failure this property exists to prevent.
+        treating that as success is exactly the failure this property exists to prevent. That is
+        the half this property exists for; see `_RAN` for why the outcome half admits `SIMULATED`.
         """
-        return self.outcome is ActionOutcome.SUCCEEDED and self.verification_passed is True
+        return self.outcome in _RAN and self.verification_passed is True
 
 
 class SelfHelpSession(DomainModel):
@@ -165,7 +210,24 @@ class SelfHelpSession(DomainModel):
     awaiting_response_since: datetime | None = None
     response_deadline: datetime | None = None
     completed_at: datetime | None = None
-    outcome: str = "in_progress"  # in_progress | resolved | not_resolved | declined | timed_out
+    #: Device telemetry as it stood when the instructions went out, and as it stands once the
+    #: customer has answered. Named to match `RemoteAction`, because they are the same two readings
+    #: taken for the same reason and a reader should not have to learn two vocabularies.
+    #:
+    #: The pair is what makes P13's "resulting telemetry" a *comparison* rather than a snapshot. A
+    #: post-reading on its own cannot distinguish "the customer fixed it" from "it was never broken
+    #: in a way this adapter can see", and those two lead to opposite places: closure and a truck.
+    pre_state: dict[str, Any] = Field(default_factory=dict)
+    post_state: dict[str, Any] = Field(default_factory=dict)
+    #: `in_progress | resolved | not_resolved | declined | timed_out`.
+    #:
+    #: Four terminal words for five situations: "the customer complied and the telemetry cannot say
+    #: whether it worked" has no word of its own and is recorded as `not_resolved`. That is the
+    #: conservative direction and the deliberate one -- D12 routes `resolved` to validation and
+    #: everything else back round, and an unconfirmable step is not a restoration. The distinction
+    #: is not lost, it is just not in this field: `notes` carries the summary that says which of the
+    #: two it was.
+    outcome: str = "in_progress"
     reason_code: ReasonCode | None = None
     accessibility_accommodations: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

@@ -30,8 +30,10 @@ from typing import Any, Final
 # Shapes
 # --------------------------------------------------------------------------------------------
 
-_MAC_COLON: Final = re.compile(r"^([0-9A-Fa-f]{2})([:-])([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})\2"
-                              r"([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})$")
+_MAC_COLON: Final = re.compile(
+    r"^([0-9A-Fa-f]{2})([:-])([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})\2"
+    r"([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})\2([0-9A-Fa-f]{2})$"
+)
 _MAC_DOT: Final = re.compile(r"^([0-9A-Fa-f]{4})\.([0-9A-Fa-f]{4})\.([0-9A-Fa-f]{4})$")
 _MAC_BARE: Final = re.compile(r"^[0-9A-Fa-f]{12}$")
 
@@ -52,9 +54,7 @@ _IPV4_EMBEDDED: Final = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 # NANP shape only (3-3-4, optional +1). Deliberately narrower than `_PHONE`: a looser embedded
 # pattern matches an ISO date, a codeword count or a firmware build number inside prose, and masking
 # one of those in a technician note destroys the note's diagnostic value.
-_PHONE_EMBEDDED: Final = re.compile(
-    r"(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b"
-)
+_PHONE_EMBEDDED: Final = re.compile(r"(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b")
 
 MASK: Final = "**"
 REDACTED: Final = "[REDACTED]"
@@ -344,10 +344,7 @@ def looks_like_pii(value: str) -> bool:
     """
     text = value.strip()
     return bool(
-        _MAC_COLON.match(text)
-        or _MAC_DOT.match(text)
-        or _EMAIL.match(text)
-        or _PHONE.match(text)
+        _MAC_COLON.match(text) or _MAC_DOT.match(text) or _EMAIL.match(text) or _PHONE.match(text)
     )
 
 
@@ -442,8 +439,10 @@ def redact(payload: Any, *, depth: int = 0) -> Any:
             normalised = _normalise_key(key)
             if normalised in _PII_KEYS and isinstance(value, str):
                 out[key] = _mask_for_key(normalised, value)
-            elif normalised in _PII_KEYS and isinstance(value, Sequence) and not isinstance(
-                value, str | bytes
+            elif (
+                normalised in _PII_KEYS
+                and isinstance(value, Sequence)
+                and not isinstance(value, str | bytes)
             ):
                 # `associated_macs: [...]` -- the key applies to every element.
                 out[key] = [

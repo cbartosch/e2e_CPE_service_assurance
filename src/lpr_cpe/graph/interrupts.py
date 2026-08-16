@@ -88,15 +88,25 @@ if TYPE_CHECKING:
     from lpr_cpe.graph.context import GraphContext
 
 
-def approval_id_for(incident_id: str, kind: ApprovalKind, attempt: int) -> str:
+def approval_id_for(incident_id: str, kind: ApprovalKind, attempt: int, subject: str = "") -> str:
     """A stable id for one asking of one question.
 
     `attempt` is what keeps a *second* genuine request distinguishable from a replay of the first:
     a dispatch rejected once and re-proposed with a different crew is two questions and must appear
     in the audit trail as two. Callers pass the relevant attempt counter, so an accidental repeat
     cannot manufacture a new id but a deliberate one can.
+
+    `subject` is what keeps two *different* questions of the same kind apart, and it was added
+    because the incident and the attempt are not enough. `high_risk_remote_action` covers both the
+    firmware update and the factory reset; an incident that offers the firmware update in one
+    diagnostic cycle and the factory reset in the next asks about each at attempt 1, so both derived
+    the same `approval_id`. `approvals` de-duplicates on that id and keeps the *first* write, so
+    approving the firmware update silently pre-approved the factory reset -- an unasked human
+    authorising the most destructive action in the CPE catalogue. `build_request` fills this in from
+    the action and its target; a gate with no action type (`low_confidence_rca`) leaves it empty,
+    because for those the attempt counter really is the whole of the difference.
     """
-    material = f"{incident_id}\x1f{kind.value}\x1f{attempt}"
+    material = f"{incident_id}\x1f{kind.value}\x1f{attempt}\x1f{subject}"
     return f"APR-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:20]}"
 
 
@@ -224,11 +234,16 @@ def build_request(
 
     A caller that could pass its own `expires_after` would be a caller that could make a high-blast-
     radius approval stand for a week. The pack owns both, so changing either is a versioned change.
+
+    The `subject` handed to `approval_id_for` is derived here rather than taken as an argument, so a
+    caller cannot forget it and collide two questions into one id; see that function for what that
+    collision cost.
     """
     rule = ctx.policy.pack.approvals[kind]
     now = ctx.clock.now()
+    subject = f"{action_type.value}:{target_ref or ''}" if action_type is not None else ""
     return ApprovalRequest(
-        approval_id=approval_id_for(state.get("incident_id") or "", kind, attempt),
+        approval_id=approval_id_for(state.get("incident_id") or "", kind, attempt, subject),
         incident_id=state.get("incident_id") or "",
         kind=kind,
         requested_at=now,

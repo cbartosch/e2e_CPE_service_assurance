@@ -43,6 +43,7 @@ key -- would keep both. The escalation would then appear to have happened twice.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -208,3 +209,51 @@ def escalation_update(
         "audit_events": [event],
         "updated_at": now,
     }
+
+
+# ------------------------------------------------------------------------------------------------
+# How the escalation reaches the edges
+# ------------------------------------------------------------------------------------------------
+#
+# `escalation_update` stops a *node*; it does not stop the *graph*. Only D02 and D05 read
+# `escalated`, so an incident that exhausted its budget at P04 walked five further super-steps
+# before being diverted -- five further checkpoint writes and a recorded `total_steps` five past
+# the limit that was supposed to have stopped it (measured; see `graph.builder`'s docstring).
+#
+# The remedy is to wire the flag onto every edge, and these three names are how. They live here
+# rather than in `graph.builder` because the parent is no longer the only graph that needs them:
+# each subgraph wires its own edges and would otherwise either import the builder -- a cycle, once
+# the builder imports the subgraph -- or keep its own copy of the sentinel, which is how one half
+# of the graph comes to have a guard the other half does not.
+
+
+#: The branch every guarded edge takes when `escalated` is set. Spelled in LangGraph's own sentinel
+#: style so it provably cannot collide with a specification answer; `builder._check_tables`
+#: subtracts exactly this key before comparing a `path_map` against `Decision.branches`.
+ESCALATED = "__escalated__"
+
+#: The branch a plain edge takes when the guard has not fired. A plain edge has one destination, so
+#: this exists only to give the two-way conditional edge a second key.
+ONWARD = "__onward__"
+
+
+def guarded(answer: Callable[[IncidentState], str]) -> Callable[[IncidentState], str]:
+    """Wrap a router so the guard's verdict is read before the specification's question.
+
+    Order matters, and it is the same order `route_identity_resolution` uses for the same reason: an
+    incident that exhausted its budget and *then* produced a usable answer on its final pass has
+    still exhausted its budget. Asking the question first would leave the escalation recorded in the
+    audit trail but not acted on -- state and graph disagreeing about whether a human was involved.
+    """
+
+    def route(state: IncidentState) -> str:
+        if state.get("escalated"):
+            return ESCALATED
+        return answer(state)
+
+    return route
+
+
+def straight_on(state: IncidentState) -> str:
+    """The answer a plain edge gives. Total, like every router: reads nothing, cannot raise."""
+    return ONWARD

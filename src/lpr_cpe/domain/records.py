@@ -50,7 +50,15 @@ class AssuranceEvent(FrozenDomainModel):
     vendor_event_type: str = ""
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
-    # Set by the intake node when this event is recognised as a duplicate of a live incident.
+    # The source system's own correlation key, carried across at construction. NXT groups repeats of
+    # one alarm under a key before we ever see them; care systems key a ticket to a call. P04 reads
+    # it as one correlation input among several.
+    #
+    # Set here and nowhere else, because it cannot be set anywhere else. `events` reduces with
+    # `append_unique`, which keys on `event_id` and keeps the *first* write -- so a node appending
+    # an enriched `model_copy` of an event already in state has that copy silently dropped. The
+    # event is what arrived; where P04 concludes this incident belongs to a larger one, it says so
+    # in `linked_records` under a `routing.PARENT_RECORD_KEYS` key, the field D03 reads.
     dedupe_key: str = ""
 
     @field_validator("occurred_at", "received_at")

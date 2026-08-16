@@ -46,18 +46,41 @@ class _Candidate:
     customer_present: bool = False
     truck_roll: bool = False
     rationale: str = ""
+    #: Which self-help script the customer should be sent, for `send_self_help` entries only.
+    #:
+    #: Carried on the catalogue entry because the *catalogue* is what knows which fault this option
+    #: addresses. `CommunicationsAdapter.send_self_help` defaults a missing `script_id` to
+    #: `reboot_gateway`, so leaving it off does not fail -- it sends the customer a perfectly valid
+    #: instruction to power-cycle their gateway in answer to a Wi-Fi coverage problem, which this
+    #: catalogue's own rationale says is the wrong remedy ("placement fixes what no remote setting
+    #: can"). A wrong instruction that the adapter accepts is worse than one it rejects.
+    #:
+    #: Not validated against `SELF_HELP_SCRIPTS` here: the decision services do not import adapters,
+    #: and doing so to check a string would invert the dependency. `test_decision_services.py`
+    #: asserts every id in this catalogue is one the adapter knows, which is the same guarantee
+    #: bought at import time rather than at layering cost.
+    script_id: str = ""
 
 
-#: Remote-first, then guided, then a truck. Within each domain the entries are written in the order
-#: an experienced operator would try them, but that order is *not* what the plan uses --
-#: `ResolutionOption.rank_key` re-sorts on success against disruption. The written order is
-#: documentation of intent; the ranking is the behaviour, and where the two disagree the numbers are
-#: wrong and should be changed here rather than the sort being bypassed.
+#: Remote-first, then guided, then a truck. Within each domain the entries are written in that
+#: order, but the written order is not what makes it happen and neither is `ranked()`. The
+#: *sequence* is the routers': D08 diverts plant work, D09 asks for an untried remote option, D11
+#: asks for a self-help one, and field planning gets what is left. Each of those filters
+#: `untried()` by kind and takes the first match, so an option's rank decides which reboot is tried
+#: before which resync -- not whether a reboot is tried before a truck.
 #:
-#: Success probabilities are estimates, not measurements. Nothing in this repository has observed a
-#: reboot fixing 45% of CPE faults -- `docs/vendor-integration-gaps.md` records that a deployment
-#: replaces these with its own outcome history, and until then they are ordering weights whose
-#: absolute values should not be quoted to anyone.
+#: Say so because the ranking and the written order genuinely disagree, and the disagreement used to
+#: be documented here as a defect in the numbers. It is not. `rank_key` weighs success against
+#: *customer* disruption and has no term for what an action costs to perform, so a 240-minute truck
+#: roll and a 6-minute reboot are priced alike: `create_work_order` ranks above `cpe_reboot` for
+#: `cpe`, 0.630 to 0.383. Editing the success estimates until the order came out right would
+#: falsify a measurement to compensate for a missing term -- gap RESOLUTION-3, which is the same
+#: absent quantity as P11's "cost class".
+#:
+#: Success probabilities are estimates, not measurements -- gap RESOLUTION-1. Nothing in this
+#: repository has observed a reboot fixing 45% of CPE faults; `docs/vendor-integration-gaps.md`
+#: records that a deployment replaces these with its own outcome history, and until then they are
+#: ordering weights whose absolute values should not be quoted to anyone.
 _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
     FaultDomain.CPE: (
         _Candidate(
@@ -132,6 +155,7 @@ _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
             disruption=0.25,
             minutes=45,
             customer_present=True,
+            script_id="move_device_closer",
             rationale=(
                 "placement fixes what no remote setting can, and needs the person who can move it"
             ),
@@ -145,6 +169,7 @@ _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
             disruption=0.3,
             minutes=45,
             customer_present=True,
+            script_id="check_cable_connections",
             rationale="a loose or damaged connector is often visible and fixable by the customer",
         ),
         _Candidate(
@@ -192,6 +217,13 @@ _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
     # From the delimiter outward the fault is the plant's, and the action is a maintenance request
     # to OSP rather than a work order. That boundary is the Clean/Dirty Boots handover and it is why
     # `raise_mr` carries the `clean_to_dirty_handover` approval kind in the pack.
+    #
+    # The tap and the ODP are the one place that boundary runs through the middle of the remedy.
+    # `boundaries.crew_for` calls them `JOINT`, and D08 deliberately does *not* divert them down the
+    # plant path -- its docstring says diverting them "would skip the Clean Boots half of a joint
+    # visit and strand the customer's side of the fault". So both halves are catalogued here, and
+    # both carry `truck_roll`: see the note on `raise_mr` below for why that flag is what makes the
+    # routing work.
     FaultDomain.TAP_OR_ODP: (
         _Candidate(
             ActionType.RAISE_MR,
@@ -199,9 +231,38 @@ _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
             success=0.8,
             disruption=0.4,
             minutes=1440,
+            truck_roll=True,
             rationale="the delimiter is plant, so OSP owns the repair",
         ),
+        _Candidate(
+            ActionType.CREATE_WORK_ORDER,
+            "Send a Clean Boots technician to the premises side of the tap",
+            success=0.35,
+            disruption=0.6,
+            minutes=240,
+            customer_present=True,
+            truck_roll=True,
+            rationale=(
+                "the customer half of a joint visit: confirms the drop and premises are sound so "
+                "the plant crew is not sent to a tap that was never the fault"
+            ),
+        ),
     ),
+    # `truck_roll` on an MR reads oddly -- raising one is paperwork, and nobody drives to a form --
+    # so this is gap RESOLUTION-5 and the reasoning is worth keeping next to the flag.
+    # It is set because the flag describes *the work the option causes*, which is the same thing
+    # `minutes=1440` already describes: OSP attends the plant. The routers depend on that reading.
+    # `is_remote_option` is "no truck and no customer", so an MR left at `truck_roll=False` is
+    # indistinguishable from a reboot, and D09 will hand a day-long plant request to the
+    # remote-repair stage. That was observed on `tap_or_odp`, the one plant domain D08 does not
+    # divert: D08 returned `continue` and D09 returned `remote` for a plan whose only option was
+    # `raise_mr`. The domains below are diverted at D08 today and so cannot show the fault, but they
+    # are the same kind of object and are flagged the same way rather than left as a trap for the
+    # next person to change D08.
+    #
+    # `headend_or_co` and `service_platform` keep `truck_roll=False`, and that is not an omission:
+    # their own rationales say the work is the platform team's and "not by field dispatch". Nobody
+    # drives to those, so the flag would be false in the plain sense as well as the derived one.
     FaultDomain.DISTRIBUTION: (
         _Candidate(
             ActionType.RAISE_MR,
@@ -209,6 +270,7 @@ _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
             success=0.8,
             disruption=0.5,
             minutes=1440,
+            truck_roll=True,
             rationale="an amplifier or distribution leg fault affects every home behind it",
         ),
     ),
@@ -219,6 +281,7 @@ _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
             success=0.8,
             disruption=0.6,
             minutes=1440,
+            truck_roll=True,
             rationale="feeder faults are plant work and cannot be addressed from the premises",
         ),
     ),
@@ -247,6 +310,7 @@ _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
             success=0.85,
             disruption=0.5,
             minutes=1440,
+            truck_roll=True,
             rationale="a fault that survives a reset is hardware and needs the plant crew",
         ),
     ),
@@ -291,6 +355,7 @@ _CATALOGUE: dict[FaultDomain, tuple[_Candidate, ...]] = {
             success=0.7,
             disruption=0.5,
             minutes=1440,
+            truck_roll=True,
             rationale="power at a plant element is ours, unlike power at the premises",
         ),
     ),
@@ -356,6 +421,16 @@ def plan_resolution(
                 requires_customer_present=candidate.customer_present,
                 requires_truck_roll=candidate.truck_roll,
                 blast_radius=radius.count,
+                # Snapshot the rule that let this option through, rather than dropping it. `rule`
+                # has already been read to get here; a reader of the finished plan should not have
+                # to re-open the pack to learn that `create_work_order` needs a dispatch approval.
+                # For display and audit only -- `PolicyEngine` still authorises at execution time.
+                risk=rule.risk,
+                required_approval=rule.approval_kind,
+                # Empty for every action but self-help, and empty rather than absent-with-a-default
+                # so that `ActionRequest.parameters` is built by copying the option wholesale. A
+                # node that had to know which options carry parameters would be a node that forgot.
+                parameters={"script_id": candidate.script_id} if candidate.script_id else {},
                 rationale=candidate.rationale,
             )
         )

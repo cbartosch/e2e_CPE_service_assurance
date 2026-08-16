@@ -848,7 +848,13 @@ CREWS: tuple[dict[str, Any], ...] = (
         # which is exactly the constraint that makes remote_island dispatch different.
         "crew_id": "CREW-JOINT-VQ-01",
         "crew_type": "joint",
-        "skills": ["fibre_drop", "fibre_splicing", "ont_replacement", "in_home_wiring", "generator"],
+        "skills": [
+            "fibre_drop",
+            "fibre_splicing",
+            "ont_replacement",
+            "in_home_wiring",
+            "generator",
+        ],
         "shift_start_hour_local": 7,
         "shift_end_hour_local": 16,
         "base_latitude": 18.1483,

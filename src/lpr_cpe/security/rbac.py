@@ -207,11 +207,7 @@ _ALLOWLIST: Final[dict[Role, frozenset[ActionType]]] = {
     # Admin is deliberately NOT `set(ActionType)` spelled as a wildcard. It is the full set, written
     # as the full set, so that a new ActionType does not become admin-requestable the moment it is
     # declared -- someone has to decide.
-    Role.ADMIN: _READ_ONLY
-    | _SAFE_REMOTE
-    | _DISRUPTIVE_REMOTE
-    | _NETWORK_AFFECTING
-    | _WORKFLOW,
+    Role.ADMIN: _READ_ONLY | _SAFE_REMOTE | _DISRUPTIVE_REMOTE | _NETWORK_AFFECTING | _WORKFLOW,
 }
 
 
@@ -256,8 +252,10 @@ class ToolAllowlist:
     @staticmethod
     def as_dict() -> dict[str, list[str]]:
         """Serialisable view, for the API and the generated docs. Sorted, so diffs are stable."""
-        return {role.value: sorted(a.value for a in actions) for role, actions in
-                sorted(_ALLOWLIST.items(), key=lambda kv: kv[0].value)}
+        return {
+            role.value: sorted(a.value for a in actions)
+            for role, actions in sorted(_ALLOWLIST.items(), key=lambda kv: kv[0].value)
+        }
 
 
 # --------------------------------------------------------------------------------------------
@@ -310,9 +308,7 @@ _APPROVERS: Final[dict[ApprovalKind, frozenset[Role]]] = {
 # "a technician cannot approve a network-wide action" is a property of the table and not a second
 # assertion that could drift from it.
 SUPERVISOR_ONLY_KINDS: Final[frozenset[ApprovalKind]] = frozenset(
-    kind
-    for kind, roles in _APPROVERS.items()
-    if roles <= {Role.NOC_SUPERVISOR, Role.ADMIN}
+    kind for kind, roles in _APPROVERS.items() if roles <= {Role.NOC_SUPERVISOR, Role.ADMIN}
 )
 
 

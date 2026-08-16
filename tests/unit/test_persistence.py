@@ -31,10 +31,11 @@ from lpr_cpe.domain.enums import (
     ApprovalKind,
     ApprovalStatus,
     IncidentStatus,
+    KPIName,
     ReasonCode,
     Technology,
 )
-from lpr_cpe.domain.governance import ApprovalDecision, ApprovalRequest, AuditEvent
+from lpr_cpe.domain.governance import ApprovalDecision, ApprovalRequest, AuditEvent, KPIEvent
 from lpr_cpe.graph.state import IncidentState
 from lpr_cpe.persistence.checkpointer import build_memory_checkpointer, checkpointer_scope
 from lpr_cpe.persistence.serde import allowlisted_types, build_serde
@@ -46,8 +47,9 @@ def _populated() -> dict[str, Any]:
     """A state fragment covering each shape the reducers store: scalar enum, model, list of models.
 
     Not an exhaustive state. The point is one representative of each *serialisation* shape -- a bare
-    enum, a model in a scalar field, models inside a list -- since the allowlist works per type and
-    the list case is the one where a degradation is easiest to miss.
+    enum, a model in a scalar field, models inside a list, and a model with an enum *inside* it --
+    since the allowlist works per type and the nested case is the one where a degradation is
+    easiest to miss.
     """
     return {
         "status": IncidentStatus.TRIAGING,
@@ -72,6 +74,17 @@ def _populated() -> dict[str, Any]:
         "audit_events": [
             AuditEvent(
                 event_id="AUD-1", incident_id="INC-1", occurred_at=AT, actor="bot", action="t"
+            )
+        ],
+        "kpi_events": [
+            KPIEvent(
+                event_id="KPI-1",
+                kpi_name=KPIName.SELF_HELP_SUCCESS_RATE,
+                emitted_at=AT,
+                value=0.0,
+                unit="rate",
+                numerator=0.0,
+                denominator=1.0,
             )
         ],
     }
@@ -155,6 +168,36 @@ async def test_a_mismatched_allowlist_degrades_every_type_without_raising(
     )
     assert isinstance(restored["status"], str)
     assert isinstance(restored["pending_approval"], dict)
+
+
+async def test_an_enum_inside_a_model_survives_as_the_member_not_an_equal_string() -> None:
+    """`KPIEvent.kpi_name` comes back as `KPIName`, so an identity comparison against it holds.
+
+    `_degraded_fields` cannot make this claim and never could: it compares the type of the *outer*
+    value, which is `KPIEvent` either way. An enum field flattened to `str` inside a model that is
+    itself restored perfectly passes every other test in this file.
+
+    Worth pinning because the failure is silent and asymmetric. Declared `str`, the field still
+    accepted a `KPIName` -- pydantic coerced it down -- and `e.kpi_name is KPIName.X` was then never
+    true. A filter written that way and used *positively* fails loudly; used negatively,
+    `assert not [e for e in events if e.kpi_name is KPIName.X]` passes on the empty list it always
+    produces and proves nothing for as long as it exists. That is not hypothetical: it was written,
+    in the self-help subgraph tests, and the absence assertion was green.
+
+    Seen to go red: with `kpi_name` reinstated as `str` on `KPIEvent`, this fails on the `is` --
+    `assert 'self_help_success_rate' is <KPIName.SELF_HELP_SUCCESS_RATE>` -- while every other test
+    in this file still passes.
+    """
+    restored = await _round_trip(build_memory_checkpointer())
+    kpi = restored["kpi_events"][0]
+
+    assert kpi.kpi_name is KPIName.SELF_HELP_SUCCESS_RATE, (
+        "the enum member did not survive the checkpoint, so `is` comparisons on kpi_name are "
+        "silently false everywhere and any negative filter built on one proves nothing"
+    )
+    # The StrEnum half of the contract, which the aggregation layer and `derive_id` both lean on:
+    # `str(member)` is the value, so a derived event id is unchanged by the field being an enum.
+    assert kpi.kpi_name == "self_help_success_rate"
 
 
 def test_the_allowlist_is_derived_from_the_domain_api_so_a_new_model_cannot_be_missed() -> None:

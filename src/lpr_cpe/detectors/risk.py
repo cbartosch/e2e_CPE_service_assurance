@@ -229,11 +229,7 @@ class HandoverQualityValidator(BaseDetector):
                 self.name, self.version, "no handover package to validate on this incident"
             )
 
-        absent = [
-            (field, why)
-            for field, why in self._REQUIRED
-            if not package.get(field)
-        ]
+        absent = [(field, why) for field, why in self._REQUIRED if not package.get(field)]
         features = {
             "required_fields": float(len(self._REQUIRED)),
             "missing_fields": float(len(absent)),
