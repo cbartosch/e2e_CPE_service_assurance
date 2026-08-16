@@ -171,9 +171,11 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
             "continue": "assess_impact_and_priority",
             ESCALATED: END,
         },
-        # P05 -> D04.
+        # P05 -> D04. The one decision whose answers leave in opposite directions: `active`
+        # continues down the main line to P06, `preventive` hands the thread to a subgraph that
+        # ends it.
         "assess_impact_and_priority": {
-            "preventive": END,
+            "preventive": "preventive_maintenance",
             "active": "create_or_attach_incident",
             ESCALATED: END,
         },
@@ -214,7 +216,21 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
             "field_planning": END,  # D11
             ESCALATED: END,
         },
-        # The two subgraphs. D10 and D12 are asked *here* and not inside them because every
+        # The terminal subgraph, and the only edge here that carries no question at all. Both keys
+        # end at `END`, which is what `_plain_edges` produces for anything with no `DECISION_AFTER`
+        # entry -- the same edge the last ordered step would get, and the reason the loop that
+        # draws it was dead code until this stage was wired. `preventive_maintenance` picks its own
+        # disposition internally and every disposition is the end of that thread, so there is
+        # nothing for the parent to ask.
+        #
+        # Guarded even so, and this is the one guarded edge in the graph where that buys nothing:
+        # both keys go to `END`, so `guarded` reading `escalated` cannot change where the run goes.
+        # It is here because the terminal loop draws one kind of edge rather than two, and a
+        # special case for "the destinations happen to be equal" would be a branch in the builder
+        # that no run can distinguish. The escalation was recorded inside the subgraph, by that
+        # subgraph's own guarded edges, before the parent saw the state at all.
+        "preventive_maintenance": {ONWARD: END, ESCALATED: END},
+        # The other two subgraphs. D10 and D12 are asked *here* and not inside them because every
         # destination either answer has is a sibling the subgraph does not contain -- a subgraph
         # cannot route to P07, and `retry_diagnosis` is most of the point of both.
         "remote_resolution": {
@@ -238,13 +254,15 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
     assert sorted(graph.edges) == [("__start__", "receive_signal")]
 
 
-def test_the_compiled_graph_contains_the_eleven_steps_the_two_subgraphs_and_nothing_else() -> None:
-    """A fourteenth node would be reachable from nowhere; a missing one, an edge to nothing.
+def test_the_compiled_graph_contains_the_eleven_steps_the_three_subgraphs_and_nothing_else() -> None:
+    """A fifteenth node would be reachable from nowhere; a missing one, an edge to nothing.
 
     The subgraphs are asserted from `SUBGRAPH_NODES` rather than by name, so that this says "the
-    table was wired" and not "these two happen to be here". A compiled subgraph is added exactly as
-    a function is, and `get_graph()` reports it as one node -- its own eight are one level down,
-    which is what `xray` renders and what nothing here needs.
+    table was wired" and not "these three happen to be here". That is why wiring the preventive
+    stage cost this test's *body* nothing and its *name* a word: the assertion followed the table,
+    and only the sentence describing it had to be told. A compiled subgraph is added exactly as a
+    function is, and `get_graph()` reports it as one node -- its own five, six or eight are one
+    level down, which is what `xray` renders and what nothing here needs.
     """
     nodes = set(compile_parent_graph().get_graph().nodes)
     expected = {name for name, _ in PARENT_NODES} | set(SUBGRAPH_NODES)
@@ -815,11 +833,17 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     off the end -- and adds one for every branch the new stage opens that leads somewhere still
     unwritten. Stage 3 asks four questions and answers seven of its branches to `END`.
 
+    Wiring the preventive stage did neither: the count stayed at nine because one entry changed
+    *kind* rather than going away. `D04:preventive` was a decision answer that fell to `END`; it now
+    reaches a subgraph, and that subgraph is what falls to `END`, so the gap is spelled
+    `__onward__:preventive_maintenance`. The stage is built and the thing it does not do -- pick a
+    crew, which is P14/D13's fact -- is still named. A stage can be wired and still owe something.
+
     `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
     against the tables in both directions, so an exit that stops reaching `END` fails the build.
     """
     assert set(PENDING_STAGES) == {
-        "D04:preventive",
+        f"{ONWARD}:preventive_maintenance",
         "D06:approve_low_confidence",
         "D07:approve_high_blast_radius",
         "D07:escalate",

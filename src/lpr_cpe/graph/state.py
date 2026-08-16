@@ -38,6 +38,7 @@ from lpr_cpe.domain.diagnosis import (
     AnomalyFinding,
     ImpactAssessment,
     PredictionResult,
+    PreventiveMaintenanceCase,
     RCAResult,
     TestPlan,
     TestResult,
@@ -280,6 +281,12 @@ class IncidentState(TypedDict, total=False):
     anomaly_findings: Annotated[list[AnomalyFinding], append_unique]
     prediction: PredictionResult | None
     impact: ImpactAssessment | None
+    # The preventive-maintenance record, opened by the `preventive_maintenance` subgraph off
+    # `D04:preventive`. Last-write-wins rather than append-only, and deliberately: there is at most
+    # one case per thread, `PreventiveMaintenanceCase` is mutable, and a second pass through the
+    # stage updates the case it already opened. Appending would produce two cases for one service
+    # and leave `linked_records["pm_case"]` pointing at whichever was written first.
+    pm_case: PreventiveMaintenanceCase | None
 
     # -- diagnosis -----------------------------------------------------------------------------
     test_plan: TestPlan | None
@@ -388,6 +395,7 @@ def make_initial_state(
         anomaly_findings=[],
         prediction=None,
         impact=None,
+        pm_case=None,
         test_plan=None,
         test_results=[],
         rca=None,

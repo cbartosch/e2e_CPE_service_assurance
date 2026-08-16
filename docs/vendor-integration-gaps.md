@@ -553,3 +553,49 @@ customer as a party the workflow can address.
   here because the underlying question is a vendor one: **every outbound contact must land in this
   list, including the ones the comms subgraph will send and any the platform originates itself.** A
   contact cap enforced against a list only one node writes is not a cap.
+
+## Preventive maintenance (`graph/subgraphs/preventive_maintenance.py`, D04 preventive arm)
+
+**Supplied:** that a predictive signal can open a maintenance case and that the case gets a
+disposition. **Invented:** everything about what a preventive case is worth, and to whom.
+
+* **PREVENTIVE-1** — **The specification's four dispositions are implemented as three: planned Clean
+  Boots work and planned Dirty Boots work are one `field_work` arm.** The seam is missing because
+  nothing in this stage decides it. `domain.boundaries.crew_for` derives the crew from the finding's
+  `suspected_domain`, and P14 is the stage that reads it; minting a second answer here would give
+  the crew choice two owners, and the one that drifted would be the one nothing loaded. Measured
+  over all 41 fixtures: **every physical finding this stage can produce classifies to
+  `CrewType.DIRTY`, and not one produces `CrewType.CLEAN`** — so splitting the arm would have added
+  a branch no fixture takes, to answer a question this stage does not own. The arm records the
+  domain and the derived crew, and `builder.PENDING_STAGES` names P14/D13 as the owner of what
+  happens next. **The open question is whether the crew split is a scheduling decision at all**, or
+  a consequence of the fault domain that no stage should be asked to choose. If it is genuinely a
+  decision — if a distribution fault can ever warrant a Clean Boots visit — then `crew_for` is the
+  wrong shape and the fixtures are missing the case that would show it. A test asserts the
+  all-`DIRTY` measurement and fails loudly if a fixture ever produces `CLEAN`, so this entry cannot
+  go quietly stale.
+* **PREVENTIVE-2** — **A preventive case is never linked to a later incident, because nothing
+  re-reads it.** The specification's third sentence for this stage is "keep it linked to any later
+  service incident", and `PreventiveMaintenanceCase.linked_incident_id` exists for exactly that —
+  set to `None` at construction and never assigned a value anywhere in `src`. (A grep finds one
+  other hit, `integrations/tmf/simulator.py`, but that is a same-named key in a TMF service-problem
+  payload carrying the *current* incident's id, not this field.) The stage cannot do better:
+  the linking event is a *future* incident on the same subject, which arrives on a different thread
+  with a different `incident_id`, and correlation has no store of open PM cases to look in.
+  **Where do preventive cases live between the forecast and the fault?** Until that has an owner,
+  the predictive true-positive rate is unmeasurable in principle rather than merely unimplemented —
+  which is why `PREDICTIVE_TRUE_POSITIVE_RATE` sits in `observability.kpi.NOT_DERIVABLE_FROM_STATE`
+  rather than being computed from one incident's state and reported as 1.0.
+* **PREVENTIVE-3** — **The evidence bar cannot fire at the shipped pack.**
+  `open_preventive_case` gates the disposition on `evidence.min_sources_for_diagnosis`, which is `2`;
+  measured over all 41 fixtures the smallest number of distinct source systems present at D04 is
+  **3**, before this stage reads anything, and 6 or 7 by the time the case opens. The floor is
+  structural rather than a property of the fixture set — P02 and P03 each emit one evidence item
+  unconditionally, under source systems that cannot collide — so no incident arriving through the
+  parent can be below the bar. The bound is kept rather than deleted because the number is an
+  operator's to change, and the suite asserts both directions: one test records the floor, another
+  raises the pack's bar and shows the arm overruling an actionable `critical` finding. Recorded here
+  because the real gap is upstream: **a source count is a proxy for corroboration, not corroboration
+  itself.** Two systems reporting the same reading because one derives it from the other is two
+  sources by this measure. The bar cannot tell independence from duplication, and nothing in the
+  evidence record says which it has.

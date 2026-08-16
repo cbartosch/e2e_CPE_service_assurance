@@ -78,10 +78,21 @@ from lpr_cpe.integrations.base import AdapterError, AdapterUnavailableError
 # ----------------------------------------------------------------------------------------------
 # The snapshot P07 assembles
 # ----------------------------------------------------------------------------------------------
+#
+# `Source`, `SOURCES`, `Subject`, `subject_of`, `reads_for` and `place_payloads` are public because
+# P07 is no longer their only caller. The preventive-maintenance subgraph makes a deliberately
+# *narrow* read -- four of the twelve sources -- and needs the same three facts P07 needs: which
+# adapter call produces a source, what `EvidenceKind` its reading is, and which `DetectionContext`
+# field and slot the payload lands in. That last one is where a private copy would do real damage:
+# `HFCRFDegradationDetector` reads `nxt["rf"]`, and a second stage that spelt the slot `"rf_levels"`
+# would produce a detector reporting itself unavailable on a service whose RF had in fact been
+# read -- a clean scan indistinguishable from an unread one. They stay here, owned by the stage that
+# reads every source, rather than moving to a shared module: the second caller reads a subset of
+# this table, not a different table.
 
 
 @dataclass(frozen=True, slots=True)
-class _Source:
+class Source:
     """One adapter read, and where its answer lands.
 
     `field` is the `DetectionContext` attribute the payload becomes part of, and it is the join key
@@ -96,41 +107,43 @@ class _Source:
     label: str
 
 
-#: Every source P07 reads, keyed by the name it is gathered under. The key is what appears in
-#: `DataQualityAssessment.missing_sources` when a read fails, so it is written as
+#: Every source this repository reads, keyed by the name it is gathered under. The key is what
+#: appears in `DataQualityAssessment.missing_sources` when a read fails, so it is written as
 #: `system.reading` rather than as prose -- an operator reading the assessment needs to know which
 #: adapter to go and look at.
 #:
-#: The set is technology-conditional at the call site, not here: an HFC service has no optical
-#: reading and asking for one produces a `not_applicable` from the adapter and a phantom
-#: data-quality defect on the incident. Which sources apply is `_sources_for` below.
-_SOURCES: Mapping[str, _Source] = {
-    "nxt.rf": _Source("nxt", "rf", EvidenceKind.RF_MEASUREMENT, "DOCSIS RF levels"),
-    "nxt.pnm": _Source("nxt", "pnm", EvidenceKind.PNM_CAPTURE, "PNM capture"),
-    "nxt.service_group": _Source(
+#: *Which* of these a stage reads is decided at the call site, not here, and the two call sites want
+#: different breadths: P07 takes everything its technology supports (`_sources_for` below), the
+#: preventive subgraph takes four. The set is technology-conditional at the call site for the same
+#: reason -- an HFC service has no optical reading, and asking for one produces a `not_applicable`
+#: from the adapter and a phantom data-quality defect on the incident.
+SOURCES: Mapping[str, Source] = {
+    "nxt.rf": Source("nxt", "rf", EvidenceKind.RF_MEASUREMENT, "DOCSIS RF levels"),
+    "nxt.pnm": Source("nxt", "pnm", EvidenceKind.PNM_CAPTURE, "PNM capture"),
+    "nxt.service_group": Source(
         "nxt", "service_group", EvidenceKind.CLUSTER_ANALYSIS, "service-group health"
     ),
-    "plant.optical": _Source(
+    "plant.optical": Source(
         "plant", "optical", EvidenceKind.OPTICAL_MEASUREMENT, "ONT optical levels"
     ),
-    "plant.port": _Source("plant", "port", EvidenceKind.TOPOLOGY_LOOKUP, "upstream port health"),
+    "plant.port": Source("plant", "port", EvidenceKind.TOPOLOGY_LOOKUP, "upstream port health"),
     # The delimiter view is where `degraded_count` against `services_in_service` comes from, which
     # is the one reading in this set that is about the neighbours rather than about this service.
-    "plant.delimiter": _Source(
+    "plant.delimiter": Source(
         "plant", "delimiter", EvidenceKind.CLUSTER_ANALYSIS, "tap or ODP view"
     ),
-    "cpe.status": _Source("cpe_raw", None, EvidenceKind.CPE_STATUS, "CPE status"),
-    "cpe.wifi": _Source("wifi", None, EvidenceKind.WIFI_SCAN, "Wi-Fi radio status"),
-    "cpe.throughput": _Source(
+    "cpe.status": Source("cpe_raw", None, EvidenceKind.CPE_STATUS, "CPE status"),
+    "cpe.wifi": Source("wifi", None, EvidenceKind.WIFI_SCAN, "Wi-Fi radio status"),
+    "cpe.throughput": Source(
         "service_platform", None, EvidenceKind.SPEED_TEST, "downstream throughput"
     ),
-    "inventory.recent_changes": _Source(
+    "inventory.recent_changes": Source(
         "recent_changes", None, EvidenceKind.CHANGE_RECORD, "recent plant changes"
     ),
-    "gis.power_outages": _Source(
+    "gis.power_outages": Source(
         "power_outages", None, EvidenceKind.POWER_OUTAGE_REPORT, "commercial power"
     ),
-    "gis.weather": _Source("weather", None, EvidenceKind.WEATHER_REPORT, "weather"),
+    "gis.weather": Source("weather", None, EvidenceKind.WEATHER_REPORT, "weather"),
 }
 
 #: The context fields P07 fills from the graph's own state rather than from an adapter. Named here
@@ -178,7 +191,7 @@ def _sources_for(technology: Technology) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
-class _Subject:
+class Subject:
     """The references a read needs, pulled out of state once.
 
     A frozen record rather than a dict so that a reader asking for a reference that does not exist
@@ -197,9 +210,9 @@ class _Subject:
     longitude: float | None
 
 
-def _subject_of(state: IncidentState) -> _Subject:
+def subject_of(state: IncidentState) -> Subject:
     topology = state.get("topology")
-    return _Subject(
+    return Subject(
         incident_id=state.get("incident_id") or "",
         technology=state.get("technology", Technology.UNKNOWN),
         service_ref=state.get("service_ref") or "",
@@ -215,7 +228,7 @@ def _subject_of(state: IncidentState) -> _Subject:
     )
 
 
-def _reads(ctx: GraphContext, subject: _Subject, names: Iterable[str]) -> dict[str, Any]:
+def reads_for(ctx: GraphContext, subject: Subject, names: Iterable[str]) -> dict[str, Any]:
     """The awaitable for each named source that has the reference it needs.
 
     A source whose reference is missing is **left out** rather than called with an empty string.
@@ -282,7 +295,7 @@ def _reads(ctx: GraphContext, subject: _Subject, names: Iterable[str]) -> dict[s
     return calls
 
 
-def _place(payloads: Mapping[str, Any]) -> dict[str, Any]:
+def place_payloads(payloads: Mapping[str, Any]) -> dict[str, Any]:
     """Fold gathered payloads into `DetectionContext` keyword arguments.
 
     `nxt` and `plant` are composites and are only created when at least one of their slots
@@ -292,7 +305,7 @@ def _place(payloads: Mapping[str, Any]) -> dict[str, Any]:
     """
     fields: dict[str, Any] = {}
     for name, payload in payloads.items():
-        source = _SOURCES[name]
+        source = SOURCES[name]
         if source.slot is None:
             fields[source.field] = payload
         else:
@@ -300,7 +313,7 @@ def _place(payloads: Mapping[str, Any]) -> dict[str, Any]:
     return fields
 
 
-def _throughput_snapshot(subject: _Subject, payload: object) -> dict[str, Any]:
+def _throughput_snapshot(subject: Subject, payload: object) -> dict[str, Any]:
     """`run_diagnostic`'s envelope reshaped into what `ServicePlatformAnomalyDetector` reads.
 
     The detector wants `{"download_speed": {...}}`; the adapter returns the measurement under
@@ -465,13 +478,13 @@ def _stamped(
     return findings
 
 
-def _sources_of(evidence: Sequence[EvidenceItem]) -> list[_Source]:
-    """The `_Source` behind each item, recovered from the name stamped on it at creation.
+def _sources_of(evidence: Sequence[EvidenceItem]) -> list[Source]:
+    """The `Source` behind each item, recovered from the name stamped on it at creation.
 
     `EvidenceItem.source_system` holds the gather name for items P07 created, so the mapping back
     is a lookup rather than a second list kept in step with the first.
     """
-    return [_SOURCES[item.source_system] for item in evidence]
+    return [SOURCES[item.source_system] for item in evidence]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -499,9 +512,9 @@ async def assemble_case_evidence(state: IncidentState, ctx: GraphContext) -> Nod
     now = ctx.clock.now()
     cycle = state.get("diagnostic_cycles", 0) + 1
     gathered = Gathered(ctx, assessed_at=now)
-    subject = _subject_of(state)
+    subject = subject_of(state)
 
-    calls = _reads(ctx, subject, _sources_for(subject.technology))
+    calls = reads_for(ctx, subject, _sources_for(subject.technology))
     # One freshness class for the batch. The age limits only bite on payloads that stamp
     # `observed_at`, and every one of these is a current-state reading rather than a structural
     # record -- a tap view from yesterday is as misleading as an RF reading from yesterday.
@@ -517,9 +530,9 @@ async def assemble_case_evidence(state: IncidentState, ctx: GraphContext) -> Nod
             state,
             ctx,
             node="assemble_case_evidence",
-            kind=_SOURCES[name].kind,
+            kind=SOURCES[name].kind,
             subject_ref=_evidence_subject(name, subject),
-            summary=f"{_SOURCES[name].label} read for cycle {cycle}",
+            summary=f"{SOURCES[name].label} read for cycle {cycle}",
             # The gather name, not the adapter's own label: `_sources_of` reads it back to find
             # which context field this item stands behind.
             source_system=name,
@@ -544,7 +557,7 @@ async def assemble_case_evidence(state: IncidentState, ctx: GraphContext) -> Nod
         # from reading every source as backing every hypothesis.
         evidence=[],
         thresholds=dict(ctx.policy.pack.detector_thresholds),
-        **_place(payloads),
+        **place_payloads(payloads),
     )
     results = await run_detectors(context)
     findings = _stamped(results, detectors, evidence)
@@ -587,7 +600,7 @@ async def assemble_case_evidence(state: IncidentState, ctx: GraphContext) -> Nod
 
 
 async def _fetch_geo(
-    ctx: GraphContext, gathered: Gathered, subject: _Subject, now: datetime
+    ctx: GraphContext, gathered: Gathered, subject: Subject, now: datetime
 ) -> dict[str, Any]:
     """Power and weather, which need coordinates P03 resolved rather than a service reference."""
     if subject.latitude is None or subject.longitude is None:
@@ -605,7 +618,7 @@ async def _fetch_geo(
     )
 
 
-def _evidence_subject(name: str, subject: _Subject) -> str:
+def _evidence_subject(name: str, subject: Subject) -> str:
     """What each read is *about*, which is not always the service.
 
     A tap view is about the tap and a node health read is about the node. Filing all twelve under
@@ -636,15 +649,15 @@ def _evidence_subject(name: str, subject: _Subject) -> str:
 #: verdict `DetectionContext`, and the raw payload to record as evidence and mine for measurements.
 #: They are separate because the overlay is often a reshaping -- the throughput snapshot, the `nxt`
 #: composite -- and the evidence should carry what the adapter actually said.
-_Reader = Callable[[GraphContext, "_Subject"], Awaitable[tuple[dict[str, Any], dict[str, Any]]]]
+_Reader = Callable[[GraphContext, "Subject"], Awaitable[tuple[dict[str, Any], dict[str, Any]]]]
 
 
-async def _read_rf(ctx: GraphContext, subject: _Subject) -> tuple[dict[str, Any], dict[str, Any]]:
+async def _read_rf(ctx: GraphContext, subject: Subject) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = await ctx.adapters.nxt.fetch_rf_measurements(subject.service_ref)
     return {"nxt": {"rf": payload}}, payload
 
 
-async def _read_pnm(ctx: GraphContext, subject: _Subject) -> tuple[dict[str, Any], dict[str, Any]]:
+async def _read_pnm(ctx: GraphContext, subject: Subject) -> tuple[dict[str, Any], dict[str, Any]]:
     # The RF detector reads both slots and scores the capture only alongside the levels, so a PNM
     # sweep is fetched with the levels it is interpreted against rather than on its own.
     levels = await ctx.adapters.nxt.fetch_rf_measurements(subject.service_ref)
@@ -653,20 +666,20 @@ async def _read_pnm(ctx: GraphContext, subject: _Subject) -> tuple[dict[str, Any
 
 
 async def _read_optical(
-    ctx: GraphContext, subject: _Subject
+    ctx: GraphContext, subject: Subject
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = await ctx.adapters.pon.fetch_optical_levels(subject.service_ref)
     return {"plant": {"optical": payload}}, payload
 
 
 async def _read_throughput(
-    ctx: GraphContext, subject: _Subject
+    ctx: GraphContext, subject: Subject
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = await ctx.adapters.cpe.run_diagnostic(subject.cpe_ref, "download_speed")
     return {"service_platform": _throughput_snapshot(subject, payload)}, payload
 
 
-async def _read_wifi(ctx: GraphContext, subject: _Subject) -> tuple[dict[str, Any], dict[str, Any]]:
+async def _read_wifi(ctx: GraphContext, subject: Subject) -> tuple[dict[str, Any], dict[str, Any]]:
     # `CPEWiFiAnomalyDetector` requires `cpe_raw` and reads `wifi`; a survey handed only the radio
     # snapshot would report itself unavailable on a device that is simply offline, which is a
     # finding rather than a gap.
@@ -676,7 +689,7 @@ async def _read_wifi(ctx: GraphContext, subject: _Subject) -> tuple[dict[str, An
 
 
 async def _read_delimiter(
-    ctx: GraphContext, subject: _Subject
+    ctx: GraphContext, subject: Subject
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = (
         await ctx.adapters.pon.fetch_odp_view(subject.delimiter_ref)
@@ -780,7 +793,7 @@ SUPPORTED_TESTS: Mapping[TestKind, _TestSpec] = {
 }
 
 
-def _runnable(kind: TestKind, subject: _Subject) -> bool:
+def _runnable(kind: TestKind, subject: Subject) -> bool:
     """Whether this test applies to the technology and has the references it needs."""
     spec = SUPPORTED_TESTS.get(kind)
     if spec is None:
@@ -794,7 +807,7 @@ def _runnable(kind: TestKind, subject: _Subject) -> bool:
     return all(getattr(subject, need) for need in spec.needs)
 
 
-def _target_of(kind: TestKind, subject: _Subject) -> str:
+def _target_of(kind: TestKind, subject: Subject) -> str:
     """What the test is performed against, which the result is filed under."""
     match kind:
         case TestKind.NEIGHBOUR_COMPARISON:
@@ -832,7 +845,7 @@ async def create_diagnostic_test_plan(state: IncidentState, ctx: GraphContext) -
     """
     now = ctx.clock.now()
     cycle = state.get("diagnostic_cycles", 1)
-    subject = _subject_of(state)
+    subject = subject_of(state)
     findings = live_findings(state)
     hypotheses = build_hypotheses(findings, evidence=ctx.policy.pack.evidence)
     live = [h for h in hypotheses if not h.rejected]
@@ -998,7 +1011,7 @@ async def execute_read_only_tests(state: IncidentState, ctx: GraphContext) -> No
     """
     now = ctx.clock.now()
     cycle = state.get("diagnostic_cycles", 1)
-    subject = _subject_of(state)
+    subject = subject_of(state)
     plan = state.get("test_plan")
     if plan is None or not plan.requests:
         return {
@@ -1066,7 +1079,7 @@ async def _execute(
     state: IncidentState,
     ctx: GraphContext,
     request: TestRequest,
-    subject: _Subject,
+    subject: Subject,
     *,
     now: datetime,
     cycle: int,
@@ -1255,9 +1268,15 @@ EVIDENCE_NODES: Sequence[tuple[str, Any]] = (
 __all__ = [
     "DERIVED_DETECTORS",
     "EVIDENCE_NODES",
+    "SOURCES",
     "SUPPORTED_TESTS",
+    "Source",
+    "Subject",
     "assemble_case_evidence",
     "create_diagnostic_test_plan",
     "execute_read_only_tests",
     "live_findings",
+    "place_payloads",
+    "reads_for",
+    "subject_of",
 ]

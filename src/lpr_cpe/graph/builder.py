@@ -1,4 +1,4 @@
-"""The parent graph: eleven steps, two subgraphs, twelve decisions, and the edges between them.
+"""The parent graph: eleven steps, three subgraphs, twelve decisions, and the edges between them.
 
 This module is the only place that knows what the workflow's *shape* is. `graph.nodes` knows what
 each step does, `graph.routing` knows what each question asks, and neither knows what follows what.
@@ -12,11 +12,14 @@ The topology is data, not control flow, and it is spread over exactly four place
 * **`graph.nodes.PARENT_NODES`** -- the eleven steps in specification order. Consecutive entries
   with no decision between them are joined by a plain edge, so the registry's *order* is what draws
   P01 -> P02, P06 -> P07, P08 -> P09 and P09 -> P10. Nothing here restates them.
-* **`SUBGRAPH_NODES`** -- the stages that own an interrupt, and are therefore compiled graphs rather
-  than functions. Deliberately *not* in `PARENT_NODES`, and not merely because `graph.nodes` says
-  nothing beyond P11 lives there: they have no order to be in. Each is reached by name from a
-  branch, never by falling off the end of the one before, so listing them in sequence would invite
-  the plain edge that `_plain_edges` draws between consecutive registry entries.
+* **`SUBGRAPH_NODES`** -- the stages compiled as graphs rather than written as functions.
+  Deliberately *not* in `PARENT_NODES`, and not merely because `graph.nodes` says nothing beyond P11
+  lives there: they have no order to be in. Each is reached by name from a branch, never by falling
+  off the end of the one before, so listing them in sequence would invite the plain edge that
+  `_plain_edges` draws between consecutive registry entries. Two of the three are here because they
+  own an interrupt and a paused stage should checkpoint its own resume point; the third,
+  `preventive_maintenance`, has none and is here because it fans out internally from one answer of
+  one decision, which is a shape the sequence cannot hold. `graph.subgraphs` states both reasons.
 * **`DECISION_AFTER`** -- which decision is asked after which node.
 * **`BRANCH_TARGETS`** -- where each answer goes.
 
@@ -92,7 +95,11 @@ from lpr_cpe.graph.guards import ESCALATED, ONWARD, guarded, straight_on
 from lpr_cpe.graph.nodes import PARENT_NODES
 from lpr_cpe.graph.routing import DECISIONS
 from lpr_cpe.graph.state import IncidentState
-from lpr_cpe.graph.subgraphs import compile_remote_resolution_graph, compile_self_help_graph
+from lpr_cpe.graph.subgraphs import (
+    compile_preventive_maintenance_graph,
+    compile_remote_resolution_graph,
+    compile_self_help_graph,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -117,6 +124,7 @@ if TYPE_CHECKING:
 #: two subgraphs. Sharing one compiled instance across parents would work today and is the kind of
 #: thing that stops working the moment anything is cached on the compiled object.
 SUBGRAPH_NODES: Mapping[str, Callable[[], Any]] = {
+    "preventive_maintenance": compile_preventive_maintenance_graph,
     "remote_resolution": compile_remote_resolution_graph,
     "self_help": compile_self_help_graph,
 }
@@ -188,7 +196,7 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
         "continue": "assess_impact_and_priority",
     },
     "D04": {
-        "preventive": END,
+        "preventive": "preventive_maintenance",
         "active": "create_or_attach_incident",
     },
     "D05": {
@@ -239,10 +247,15 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
 #: incident may be resumed from either by a supervisor re-invoking the thread; neither is waiting on
 #: a stage that is missing.
 PENDING_STAGES: Mapping[str, str] = {
-    "D04:preventive": (
-        "the preventive-maintenance subgraph -- D04's 'predictive risk without current service "
-        "impact' arm, which creates or updates a PM case and selects remote prevention, planned "
-        "Clean Boots work, planned Dirty Boots work, or monitoring"
+    f"{ONWARD}:preventive_maintenance": (
+        "field planning for a preventive case -- P14 and D13. The subgraph runs to completion and "
+        "its three dispositions are all real answers, but one of them, "
+        "`plan_preventive_field_work`, records that a visit is warranted and stops there: it "
+        "writes the suspected domain and the crew `boundaries.crew_for` derives, and P14 is what "
+        "turns those into a work order. The "
+        "specification's separate Clean Boots and Dirty Boots arms are that same seam, and it is "
+        "left where its owner is rather than answered twice; see the subgraph's module docstring "
+        "and docs/vendor-integration-gaps.md"
     ),
     "D06:approve_low_confidence": (
         "the L2/SME review interrupt -- a human-approval interruption that resumes the same "
@@ -308,11 +321,25 @@ def _plain_edges() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
     Derived rather than listed. A twelfth node inserted into the registry is wired by that edit
     alone; a hand-written edge list would have had to be found and updated, and the failure mode of
     forgetting is a node that is present in the graph and unreachable.
+
+    **A subgraph may also be terminal, and the two kinds of terminal are found differently.** An
+    ordered step is terminal by being last in the sequence with no decision after it. A subgraph has
+    no position -- `_wired_node_names` says why it is a set -- so the only thing that can make one
+    terminal is the absence of a `DECISION_AFTER` entry, which is exactly what is tested here.
+    `preventive_maintenance` is the first of these: D04's preventive arm creates a case and picks a
+    disposition, and every disposition is the end of that thread's automated work. D10 and D12 keep
+    the other two subgraphs out of this set by existing.
+
+    Nothing about that absence is silent. A subgraph reaching `END` because somebody *forgot* its
+    decision looks identical here to one that ends deliberately, so the distinction is not drawn
+    here at all -- it is drawn in `PENDING_STAGES`, which `_check_pending_stages` requires an entry
+    in for every terminal node and refuses to let go stale.
     """
     names = _node_names()
     pairs = tuple((left, right) for left, right in pairwise(names) if left not in DECISION_AFTER)
-    terminal = (names[-1],) if names[-1] not in DECISION_AFTER else ()
-    return pairs, terminal
+    last: tuple[str, ...] = (names[-1],) if names[-1] not in DECISION_AFTER else ()
+    subgraphs = tuple(name for name in SUBGRAPH_NODES if name not in DECISION_AFTER)
+    return pairs, last + subgraphs
 
 
 def chain_from(identifier: str) -> tuple[str, ...]:

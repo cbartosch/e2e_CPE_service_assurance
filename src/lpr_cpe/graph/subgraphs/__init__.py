@@ -1,11 +1,18 @@
-"""The stages that contain an interrupt, each compiled as its own graph.
+"""The branch stages, each compiled as its own graph.
 
-Everything from stage 3 onwards lives here rather than in `graph.nodes`, and the reason is the
+A stage lives here rather than in `graph.nodes` for one of two reasons, and the first is the
 interrupt. A paused graph checkpoints *its own* state, and on resume LangGraph re-enters the task
 that raised. Put a gate directly in the parent and the parent is what pauses, so the parent's
 checkpoint becomes the resume point for a question that belongs to one stage of one branch -- and
 every later stage inherits a parent whose status field says `awaiting_approval` about a decision it
-does not own.
+does not own. `remote_resolution` and `self_help` are here for that reason.
+
+The second is branching. `graph.nodes.PARENT_NODES` is a *sequence*: `builder._plain_edges` draws an
+edge between consecutive entries, so a stage written there is a stage on the main line. A stage that
+is reached from one answer of one decision and fans out internally has no place in that sequence at
+all -- listing it would invite the plain edge that its position implies. `preventive_maintenance` is
+here for that reason and holds no interrupt at all, which is why this docstring no longer says every
+module here has one.
 
 Nesting also buys the property `graph.interrupts` documents at length and `graph.inspect` exists to
 work around: a paused subgraph's writes have not reached the parent, so the parent alone understates
@@ -21,6 +28,11 @@ forgotten.
 
 from __future__ import annotations
 
+from lpr_cpe.graph.subgraphs.preventive_maintenance import (
+    PREVENTIVE_MAINTENANCE_NODES,
+    build_preventive_maintenance_graph,
+    compile_preventive_maintenance_graph,
+)
 from lpr_cpe.graph.subgraphs.remote_resolution import (
     REMOTE_RESOLUTION_NODES,
     build_remote_resolution_graph,
@@ -33,10 +45,13 @@ from lpr_cpe.graph.subgraphs.self_help import (
 )
 
 __all__ = [
+    "PREVENTIVE_MAINTENANCE_NODES",
     "REMOTE_RESOLUTION_NODES",
     "SELF_HELP_NODES",
+    "build_preventive_maintenance_graph",
     "build_remote_resolution_graph",
     "build_self_help_graph",
+    "compile_preventive_maintenance_graph",
     "compile_remote_resolution_graph",
     "compile_self_help_graph",
 ]
