@@ -79,6 +79,7 @@ from lpr_cpe.domain.enums import (
     DelimiterKind,
     FaultDomain,
     MRStatus,
+    SelfHelpOutcome,
     TestStatus,
 )
 from lpr_cpe.graph.state import (
@@ -530,7 +531,7 @@ def route_self_help_outcome(
     step budget to arrive at field planning anyway.
     """
     session = state.get("self_help_session")
-    if session is not None and session.outcome == "resolved":
+    if session is not None and session.outcome is SelfHelpOutcome.RESOLVED:
         return "verify"
     plan = state.get("resolution_plan")
     if plan is None or plan.exhausted:

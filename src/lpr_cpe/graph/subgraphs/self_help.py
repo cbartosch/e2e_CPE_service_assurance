@@ -86,6 +86,7 @@ from lpr_cpe.domain.enums import (
     KPIName,
     PolicyOutcome,
     ReasonCode,
+    SelfHelpOutcome,
 )
 from lpr_cpe.domain.governance import ActionRecord, ActionRequest, PolicyDecision
 from lpr_cpe.domain.resolution import ResolutionOption, SelfHelpSession
@@ -807,14 +808,11 @@ async def await_customer_response(state: IncidentState, ctx: GraphContext) -> No
         responses.append(reply)
 
     if reply == "declined":
-        updated = session.model_copy(
-            update={
-                "customer_responses": responses,
-                "completed_at": now,
-                "outcome": "declined",
-                "reason_code": ReasonCode.SELF_HELP_DECLINED,
-                "notes": [*session.notes, "the customer declined to carry out the step"],
-            }
+        updated = session.model_copy(update={"customer_responses": responses}).complete(
+            SelfHelpOutcome.DECLINED,
+            at=now,
+            note="the customer declined to carry out the step",
+            reason_code=ReasonCode.SELF_HELP_DECLINED,
         )
         outcome = "declined"
     elif reply == "completed":
@@ -833,13 +831,11 @@ async def await_customer_response(state: IncidentState, ctx: GraphContext) -> No
         )
         outcome = "completed"
     elif session.timed_out(now):
-        updated = session.model_copy(
-            update={
-                "completed_at": now,
-                "outcome": "timed_out",
-                "reason_code": ReasonCode.SELF_HELP_TIMED_OUT,
-                "notes": [*session.notes, "no reply arrived before the deadline"],
-            }
+        updated = session.complete(
+            SelfHelpOutcome.TIMED_OUT,
+            at=now,
+            note="no reply arrived before the deadline",
+            reason_code=ReasonCode.SELF_HELP_TIMED_OUT,
         )
         outcome = "timed_out"
     else:
@@ -895,7 +891,7 @@ def route_customer_answer(state: IncidentState) -> Literal["verify", "wait", "ab
         return "abandon"
     if session.awaiting_customer:
         return "wait"
-    if session.outcome in {"declined", "timed_out"}:
+    if session.outcome in {SelfHelpOutcome.DECLINED, SelfHelpOutcome.TIMED_OUT}:
         return "abandon"
     return "verify"
 
@@ -960,22 +956,16 @@ async def verify_self_help(state: IncidentState, ctx: GraphContext) -> NodeUpdat
     )
 
     if passed:
-        outcome, reason = "resolved", ReasonCode.SELF_HELP_SUCCEEDED
+        outcome, reason = SelfHelpOutcome.RESOLVED, ReasonCode.SELF_HELP_SUCCEEDED
     else:
         # `None` and `False` share the word and not the sentence. Neither is a restoration, and the
         # reason code is left unset for both rather than borrowed from a code that asserts something
         # we have not established -- an audit event with no reason code reads as "not applicable",
         # which for "the customer complied and we cannot tell" is exactly right.
-        outcome, reason = "not_resolved", None
+        outcome, reason = SelfHelpOutcome.NOT_RESOLVED, None
 
-    verified = session.model_copy(
-        update={
-            "post_state": dict(post_state or {}),
-            "outcome": outcome,
-            "reason_code": reason,
-            "completed_at": session.completed_at or now,
-            "notes": [*session.notes, summary],
-        }
+    verified = session.model_copy(update={"post_state": dict(post_state or {})}).complete(
+        outcome, at=now, note=summary, reason_code=reason
     )
 
     update: NodeUpdate = {
@@ -990,7 +980,7 @@ async def verify_self_help(state: IncidentState, ctx: GraphContext) -> NodeUpdat
                 ctx,
                 node="verify_self_help",
                 action="verify_self_help",
-                outcome=outcome,
+                outcome=outcome.value,
                 subject_ref=cpe_ref,
                 reason_code=reason,
                 detail={
@@ -1063,9 +1053,9 @@ async def abandon_self_help(state: IncidentState, ctx: GraphContext) -> NodeUpda
     )
     cycle = state.get("diagnostic_cycles", 1)
 
-    if session is not None and session.outcome == "declined":
+    if session is not None and session.outcome is SelfHelpOutcome.DECLINED:
         outcome, reason = "customer_declined", ReasonCode.SELF_HELP_DECLINED
-    elif session is not None and session.outcome == "timed_out":
+    elif session is not None and session.outcome is SelfHelpOutcome.TIMED_OUT:
         outcome, reason = "customer_did_not_respond", ReasonCode.SELF_HELP_TIMED_OUT
     elif answer is not None and not answer.granted:
         outcome, reason = "approval_refused", ReasonCode.POLICY_ACTION_NOT_PERMITTED_FOR_ROLE
@@ -1099,7 +1089,7 @@ async def abandon_self_help(state: IncidentState, ctx: GraphContext) -> NodeUpda
                     "cycle": cycle,
                     "option_id": option.option_id if option is not None else None,
                     "session_id": session.session_id if session is not None else None,
-                    "session_outcome": session.outcome if session is not None else None,
+                    "session_outcome": session.outcome.value if session is not None else None,
                     "policy_outcome": decision.outcome.value if decision is not None else None,
                     "approval_status": answer.status.value if answer is not None else None,
                     "approval_rationale": answer.rationale if answer is not None else "",

@@ -42,6 +42,7 @@ from lpr_cpe.domain.enums import (
     MRStatus,
     PolicyOutcome,
     ReasonCode,
+    SelfHelpOutcome,
 )
 from lpr_cpe.domain.governance import KPIEvent
 from lpr_cpe.graph.state import (
@@ -419,9 +420,9 @@ class KPICalculator:
         session = state.get("self_help_session")
         if session is None:
             return None
-        if session.outcome == "in_progress":
+        if session.outcome is SelfHelpOutcome.IN_PROGRESS:
             return None
-        return KPIValue.rate(1.0 if session.outcome == "resolved" else 0.0, 1.0)
+        return KPIValue.rate(1.0 if session.outcome is SelfHelpOutcome.RESOLVED else 0.0, 1.0)
 
     def dispatch_avoidance_rate(self, state: IncidentState) -> KPIValue | None:
         """Resolved without a crew travelling: remotely, by self-help, or by plant work alone."""

@@ -201,6 +201,28 @@ class ActionOutcome(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class SelfHelpOutcome(StrEnum):
+    """Where a guided self-help session ended, and the word D12 routes on.
+
+    Four terminal members for five situations: "the customer complied and the telemetry cannot say
+    whether it worked" has no member of its own and is recorded as `NOT_RESOLVED`. That is the
+    conservative direction and the deliberate one -- D12 sends `RESOLVED` to validation and
+    everything else back round, and an unconfirmable step is not a restoration. The distinction is
+    not lost, it is just not in this field: `SelfHelpSession.notes` carries the summary that says
+    which of the two it was.
+
+    Distinct from `ActionOutcome`, which is how a *remote* action ended. The two vocabularies share
+    `TIMED_OUT` and nothing else, and a session that a customer declined has no `ActionOutcome`
+    spelling at all.
+    """
+
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    NOT_RESOLVED = "not_resolved"
+    DECLINED = "declined"
+    TIMED_OUT = "timed_out"
+
+
 class PolicyOutcome(StrEnum):
     """The three answers the policy engine may give. There is no fourth, and no `None`:
     an unmatched request is `BLOCKED`, which is what "fail closed" means here."""

@@ -22,6 +22,7 @@ from lpr_cpe.domain.enums import (
     CommunicationChannel,
     FaultDomain,
     ReasonCode,
+    SelfHelpOutcome,
 )
 
 
@@ -219,15 +220,9 @@ class SelfHelpSession(DomainModel):
     #: in a way this adapter can see", and those two lead to opposite places: closure and a truck.
     pre_state: dict[str, Any] = Field(default_factory=dict)
     post_state: dict[str, Any] = Field(default_factory=dict)
-    #: `in_progress | resolved | not_resolved | declined | timed_out`.
-    #:
-    #: Four terminal words for five situations: "the customer complied and the telemetry cannot say
-    #: whether it worked" has no word of its own and is recorded as `not_resolved`. That is the
-    #: conservative direction and the deliberate one -- D12 routes `resolved` to validation and
-    #: everything else back round, and an unconfirmable step is not a restoration. The distinction
-    #: is not lost, it is just not in this field: `notes` carries the summary that says which of the
-    #: two it was.
-    outcome: str = "in_progress"
+    #: Written through `complete`, not by a bare `model_copy` update. See `SelfHelpOutcome` for why
+    #: there are four terminal members for five situations.
+    outcome: SelfHelpOutcome = SelfHelpOutcome.IN_PROGRESS
     reason_code: ReasonCode | None = None
     accessibility_accommodations: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -252,3 +247,31 @@ class SelfHelpSession(DomainModel):
             return None
         end = self.completed_at or now
         return max(end - self.awaiting_response_since, timedelta(0))
+
+    def complete(
+        self,
+        outcome: SelfHelpOutcome,
+        *,
+        at: datetime,
+        note: str,
+        reason_code: ReasonCode | None = None,
+    ) -> Self:
+        """Return this session ended on `outcome`, with the transition spelled one way.
+
+        A typed argument rather than a `model_copy(update={"outcome": ...})` dict at each node,
+        because this is the word D12 routes on and a dict update is checked by nothing: `model_copy`
+        skips validation, so a misspelt outcome would reach the router as a value that matches no
+        branch and be treated as though the session simply had not resolved. As an argument, mypy
+        rejects it at the call site.
+
+        `completed_at` is kept when already set: the customer's part of a session ends when they
+        answer, and `verify_self_help` runs afterwards and should not restamp it.
+        """
+        return self.model_copy(
+            update={
+                "outcome": outcome,
+                "completed_at": self.completed_at or at,
+                "reason_code": reason_code,
+                "notes": [*self.notes, note],
+            }
+        )

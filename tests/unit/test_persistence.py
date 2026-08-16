@@ -30,12 +30,15 @@ from lpr_cpe.config.settings import Settings
 from lpr_cpe.domain.enums import (
     ApprovalKind,
     ApprovalStatus,
+    CommunicationChannel,
     IncidentStatus,
     KPIName,
     ReasonCode,
+    SelfHelpOutcome,
     Technology,
 )
 from lpr_cpe.domain.governance import ApprovalDecision, ApprovalRequest, AuditEvent, KPIEvent
+from lpr_cpe.domain.resolution import SelfHelpSession
 from lpr_cpe.graph.state import IncidentState
 from lpr_cpe.persistence.checkpointer import build_memory_checkpointer, checkpointer_scope
 from lpr_cpe.persistence.serde import allowlisted_types, build_serde
@@ -76,6 +79,13 @@ def _populated() -> dict[str, Any]:
                 event_id="AUD-1", incident_id="INC-1", occurred_at=AT, actor="bot", action="t"
             )
         ],
+        "self_help_session": SelfHelpSession(
+            session_id="SHS-1",
+            incident_id="INC-1",
+            channel=CommunicationChannel.SMS,
+            started_at=AT,
+            outcome=SelfHelpOutcome.RESOLVED,
+        ),
         "kpi_events": [
             KPIEvent(
                 event_id="KPI-1",
@@ -198,6 +208,37 @@ async def test_an_enum_inside_a_model_survives_as_the_member_not_an_equal_string
     # The StrEnum half of the contract, which the aggregation layer and `derive_id` both lean on:
     # `str(member)` is the value, so a derived event id is unchanged by the field being an enum.
     assert kpi.kpi_name == "self_help_success_rate"
+
+
+async def test_a_restored_self_help_outcome_is_the_member_that_d12_routes_on() -> None:
+    """`SelfHelpSession.outcome` comes back as `SelfHelpOutcome`, because D12 compares with `is`.
+
+    Separate from the `kpi_name` case above even though the mechanism is identical, because the
+    consequence is: `route_self_help_outcome` sends `RESOLVED` to validation and everything else
+    back round the loop. An outcome flattened to `str` matches no member, so a session the customer
+    *did* resolve is re-diagnosed or sent to field planning instead of being validated and closed --
+    a truck for an incident that was already fixed. Nothing raises on that path.
+
+    The `==` assertion is the other half: `outcome` is a `StrEnum`, so a checkpoint written before
+    the field was typed still reads back as the member rather than needing a migration.
+
+    Seen to go red: with `outcome` reinstated as `str` on `SelfHelpSession`, this fails on the `is`
+    -- `assert 'resolved' is <SelfHelpOutcome.RESOLVED>` -- and every other test in this file still
+    passes, including `test_our_checkpointer_restores_every_type_it_was_given`. `_degraded_fields`
+    compares the type of the *outer* value, which is `SelfHelpSession` either way, so nothing here
+    could see it. The only other test in the suite that notices is the D12 branch-reachability case
+    in `test_routing.py`, which stops reaching `verify` at all -- the truck-roll consequence above,
+    observed rather than argued.
+    """
+    restored = await _round_trip(build_memory_checkpointer())
+    session = restored["self_help_session"]
+
+    assert session.outcome is SelfHelpOutcome.RESOLVED, (
+        "the outcome did not survive the checkpoint as its member, so every `is` comparison in "
+        "route_self_help_outcome, route_customer_answer and self_help_success_rate is silently "
+        "false and a resolved session never reaches validation"
+    )
+    assert session.outcome == "resolved"
 
 
 def test_the_allowlist_is_derived_from_the_domain_api_so_a_new_model_cannot_be_missed() -> None:
