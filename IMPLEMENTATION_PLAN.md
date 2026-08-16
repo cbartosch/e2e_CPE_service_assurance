@@ -287,17 +287,28 @@ merged into the payload after the model returns. A schema violation triggers one
 validation error attached, then a hard fallback to a templated narrative. The band thresholds live
 in the policy pack, so changing them is a config change with a version number.
 
-**D7 — The fake model needs no API key.** Tests run against a deterministic fake that hashes its
-prompt to pick a canned response, so the suite is offline and reproducible. The Anthropic-compatible
-implementation sits behind the same Protocol and is exercised only when a key is present.
+**D7 — The fake model needs no API key.** The fake is to hash its prompt to pick a canned response,
+so that the suite stays offline and reproducible, with the Anthropic-compatible implementation
+behind the same Protocol and exercised only when a key is present. Stated in the future tense
+because **neither exists yet** — §5 carries `model provider + deterministic fake` as pending, and
+the suite is offline today for the simpler reason that nothing in `src/` calls a model at all. The
+decision is still worth recording here: it is what the Protocol has to be shaped for.
 
 ---
 
 ## 5. Status
 
 "Done" below means the code exists **and** something ran against it, not that it was written.
-Measured on **2026-08-16**: `ruff check src tests` passes, `mypy --strict src/lpr_cpe` reports no
-issues in **98** source files, and `pytest` collects and passes **758** tests.
+Measured on **2026-08-16**: `ruff check src tests` passes, `ruff format --check` reports 116 files
+already formatted, `mypy --strict src/lpr_cpe` reports no issues in **99** source files, and
+`pytest` collects and passes **768** tests at **80.96%** line coverage.
+
+Run twice, in `.venv` and in the system interpreter, because they are **not the same environment**
+and it is easy to check the wrong one: `make` uses `.venv` — which is where §2's version table was
+resolved and the only one with the `optimizer` extra installed — while a bare `python -m pytest`
+from the repository root uses the system interpreter, where `ortools` is absent and `pydantic`,
+`fastapi` and `psycopg` are each a patch behind. All four numbers above are identical in both, so
+nothing here depends on which is used; §2's versions do, and it says so.
 
 The previous revision of this section claimed the same for 86 files, and it was **wrong**: mypy was
 reporting two errors in `persistence/checkpointer.py` at the moment `a38fdd1` was committed, and
@@ -305,6 +316,13 @@ they were the visible end of a Postgres branch that could not work (§2). The cl
 run that was not re-read after the last edit. Every number in this section is now taken from a
 command run *after* the final state of the tree, which is the only version of the claim worth
 making.
+
+That discipline is necessary and it is **not sufficient**, which the same numbers went on to
+demonstrate. 98 and 758 were both correct when written and were both stale within the day — the
+tree moved, and nothing re-read them, because no gate in this repository can. A number in prose has
+no expiry and nothing watches it, so treat every count in this section as a measurement dated
+2026-08-16 rather than as a fact, and re-run the three commands before quoting one. Gap 7 in §6 is
+the general form of this.
 
 Where a row says *mutation-checked*, it means every regression assertion was verified by reinstating
 the defect it names and watching that test — not merely some test — fail. A green suite is not
@@ -386,7 +404,7 @@ control through the same comparison first, so a broken filter fails the test tha
 | Area | State | How it was checked |
 | --- | --- | --- |
 | API verification (§2) | done | probe graph, output quoted in §2 |
-| Project scaffold, pyproject, Makefile, README | done | `pip install -e ".[dev]"` succeeds |
+| Project scaffold, pyproject, Makefile, README | done | every path and command the two files assert, checked against the tree; `[project.scripts]` resolved by importing what it names. The old check here was `pip install -e ".[dev]"` succeeds, which passed throughout and could not have caught any of it — see gap 7 |
 | `config` (settings, clock, scan windows) | done | write-permission matrix, 4/4 combinations |
 | `domain` (34 required models + 6 supporting) | done | 40 exports import; model set parsed from the specification and compared |
 | `domain/boundaries.py` — the Clean/Dirty crew split | done | 52 committed tests, mutation-checked 9/9; the expected-crew table is written out by hand rather than derived from the sets it checks |
@@ -398,7 +416,7 @@ control through the same comparison first, so a broken filter fails the test tha
 | `policies` engine + pack | done | 139 committed tests, mutation-checked 24/24; 2 defects found by execution, both now named regression tests |
 | `detectors` (13) | done | 65 committed tests; fire/clean sweep over all 41 services; 4 defects found by execution, each now a named regression test |
 | `decision_services` | done | 79 committed tests |
-| `dispatch` (OR-Tools + greedy fallback) | done | 55 committed tests |
+| `dispatch` (greedy + the seam a solver would fill) | done | 55 committed tests. **No CP-SAT implementation exists** — checked by running it in `.venv`, where `ortools` 9.15.6755 *is* installed: `select_optimizer` returns `GreedyDispatchOptimizer` for `prefer_solver` both True and False, so the `optimizer` extra changes nothing even when present (gap DISPATCH-1) |
 | LangGraph replay semantics (§2) | done | 8 committed tests with a positive control, mutation-checked 8/8 |
 | `graph` context, loop guard, approval gates, paused-state reads | done | 29 committed tests, mutation-checked 42/42; 2 of the 42 survived the first sweep and both were real gaps, now closed |
 | `graph/routing.py` — the 24 decision points | done | 233 committed tests, mutation-checked 46/46; 6 of the first sweep's 48 survived — 4 real gaps, 1 dead branch since removed, 1 provably equivalent; every question string is parsed out of `docs/specification.md` rather than copied, and each router's `Literal` return type is compared against its declared `branches` |
@@ -408,11 +426,14 @@ control through the same comparison first, so a broken filter fails the test tha
 | `graph` parent past P11 + the remaining 6 subgraphs | **in progress** | field planning, dispatch, closure, escalation, comms and reconciliation are not written; D07/D08/D09/D11 are routed but not yet wired to subgraph nodes |
 | `persistence` checkpointer + serde | done | 14 committed tests, each paired with a control that fails; lazy Postgres import checked in a clean subprocess; the Postgres branch driven without a database and the shipped defect reinstated to watch it fail |
 | `persistence` outbox + migrations | **pending** | — |
-| `api` | **pending** | — |
-| model provider + deterministic fake | **pending** | — |
-| tests | 758 passing | unit only; no integration, contract or scenario tests yet, and coverage is not yet measured against the 85% bar |
-| docs + diagrams | 1 of 9 | `docs/vendor-integration-gaps.md` only; **no Mermaid diagram exists yet** |
-| demo | **pending** | — |
+| `api` | **pending** | `src/lpr_cpe/api/` does not exist. `make serve` names the gap and exits non-zero rather than importing it |
+| model provider + deterministic fake | **pending** | no module in `src/` calls a model provider. `ModelProvider` is an enum in `config.settings` with nothing behind it, so the `anthropic` extra changes nothing and D7 above describes an intent, not a running path |
+| `cli.py` + `[project.scripts]` | done | 6 committed tests, each watched red. The declaration shipped naming a module that was never written; the guard reads `[project.scripts]` out of `pyproject.toml` and imports what it names, so it covers a second entry point without being extended |
+| tests | 768 passing | unit only; no integration, contract or scenario tests yet, and none of the 17 required scenarios exist |
+| coverage | **80.96%**, gate is 85% | measured 2026-08-16, so `make test` and `make check` fail today; `make test-fast` is the target that runs green |
+| docs + diagrams | 1 of 9 documents, 0 of 10 diagrams | `docs/vendor-integration-gaps.md` only. `docs/specification.md` is the vendored input, not a deliverable. The other eight documents and every Mermaid diagram the specification requires are unwritten |
+| demo | **pending** | the seven scenarios are unwritten. `make demo` names the gap and exits non-zero rather than invoking a subcommand `cli.py` deliberately does not define |
+| CI | **none exists** | no `.github/`, GitLab, Azure, CircleCI, tox, nox or pre-commit configuration is tracked. Every gate in this repository is manual |
 
 ## 6. Known gaps
 
@@ -420,12 +441,21 @@ A gap named here is a gap acknowledged. An empty section at the end of a pass th
 least believable part of the document.
 
 1. **The committed suite is unit-only, and the coverage gate is unmet.** Every row marked *done* in
-   §5 now rests on committed tests rather than on a throwaway script, but all 758 are unit tests.
-   There are no integration, contract or scenario tests, none of the 17 required scenarios exist,
-   and coverage has not been measured against the 85% bar. The two resolution subgraphs are driven
-   through the real parent graph from intake onwards, so those paths are end-to-end in everything
-   but name — but the graph still stops at the resolution fork, so there is no *incident* that runs
-   from event to closure.
+   §5 now rests on committed tests rather than on a throwaway script, but all 768 are unit tests.
+   There are no integration, contract or scenario tests and none of the 17 required scenarios exist.
+   Coverage **has** now been measured against the 85% bar — an earlier revision of this gap said it
+   had not — and it is **80.96%**, so `make test` and `make check` fail today. Four points is a
+   small-sounding shortfall, and the aggregate is the least informative thing about it, because the
+   uncovered lines are not spread evenly. They concentrate in exactly the cross-cutting modules the
+   unit tests aim past: `security/redaction.py` at 18% and `security/injection.py` at 34% — the two
+   whose job is keeping customer data out of logs and prompts — `observability/tracing.py` at 25%
+   and `logging.py` at 26%, and the write-side simulators, `wfm` at 16% and `jtrack` at 25%, which
+   are the ones a dispatch would actually go through. Raising the number is therefore the wrong
+   objective; those seven modules are the work, and a scenario test that ran one incident end to
+   end would reach most of them at once. The two resolution subgraphs are driven through the real
+   parent graph from intake onwards, so those paths are end-to-end in everything but name — but the
+   graph still stops at the resolution fork, so there is no *incident* that runs from event to
+   closure.
 
    The standard those tests are held to is worth stating, because it was learned by being caught out.
    The first detector regression test **passed with the defect reinstated**: it asserted
@@ -467,3 +497,35 @@ least believable part of the document.
    absent. A fake nobody checks against the real thing is a test of the fake.
 6. **Vendor field names are invented.** 47 of them, listed in `docs/vendor-integration-gaps.md`.
    That file is the falsifiable part of assumption A1.
+7. **No gate reads the prose, and the prose had drifted.** Every check in this repository runs
+   against `src/` and `tests/`. Nothing reads README.md, the Makefile or this file, so a false claim
+   in any of them survives a green suite indefinitely — and §5 recorded the check for the row
+   covering those files as `pip install -e ".[dev]"` succeeds, which is structurally incapable of
+   catching one. Audited against the tree on 2026-08-16, it had missed all of the following:
+
+   - `[project.scripts]` named `lpr_cpe.cli:main`, and **no `cli.py` had ever been written**.
+     `git log --all --diff-filter=D` returns nothing for it, so it was not deleted; it was never
+     there. `pip install` reported success and the console script raised `ModuleNotFoundError` in
+     the user's shell. This is the sharpest form of the gap: packaging metadata is executable
+     configuration that no test imports.
+   - README's Layout table listed `src/lpr_cpe/api/`, which does not exist; described `persistence/`
+     as holding a transactional outbox, which is gap-listed and unwritten; and described `docs/` as
+     holding diagrams, decision tables, the runbook and the decision records, **none of which
+     exists**. It linked to `docs/operations-runbook.md`, which is not there.
+   - README advertised the `optimizer` and `anthropic` extras as enabling OR-Tools dispatch and real
+     model calls. Neither has an implementation behind it, so installing either changes nothing.
+   - `make demo` invoked a `cli.py` subcommand that `cli.py` deliberately does not define, and
+     `make serve` invoked `lpr_cpe.api.app`, which has never existed. Both now name the gap and exit
+     non-zero, because an argparse error or a `ModuleNotFoundError` reads as a broken install rather
+     than as unbuilt work.
+   - `make check` described itself as "Everything CI runs". There is no CI.
+   - This section's own counts — 98 source files, 758 tests, "coverage has not been measured" — were
+     each correct when written and stale within the day.
+
+   Two things follow. The first is a rule: **verify a documentation claim against the tree, not
+   against this file**, and treat §5's *State* column as a dated measurement rather than a fact. The
+   second is that the rule is a poor substitute for a gate, and the cheapest ones are known —
+   `tests/unit/test_cli.py` already closes the entry-point case by importing what `pyproject.toml`
+   declares, and the same shape would close the rest: a test that asserts every path a markdown file
+   names exists, and every relative link resolves. That test is not written. Until it is, this gap
+   is open by construction rather than by oversight.

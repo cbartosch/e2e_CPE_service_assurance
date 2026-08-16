@@ -1,6 +1,7 @@
-# Every target here is a thin wrapper over one command. If `make` is unavailable (a plain Windows
-# shell, for instance) run the command shown in the recipe directly -- README.md lists them, and
-# this file is their only owner, so the README points here rather than repeating them.
+# Every target here is a thin wrapper over the commands its recipe shows -- most over a single one,
+# `lint`, `fmt` and `setup` over a short sequence. If `make` is unavailable (a plain Windows shell,
+# for instance) run those commands directly. This file is their only owner, so README.md points
+# here rather than repeating them.
 
 PY ?= python
 VENV := .venv
@@ -11,7 +12,7 @@ else
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help setup test test-fast lint fmt typecheck demo cov check clean
+.PHONY: help setup test test-fast lint fmt typecheck demo serve cov check clean
 
 help:  ## Show this help
 	@$(PY) -c "import re,sys; [print(f'  {m[1]:<12} {m[2]}') for m in (re.match(r'^([a-z-]+):.*?## (.*)$$', l) for l in open('Makefile')) if m]"
@@ -42,13 +43,25 @@ fmt:  ## Ruff autofix and format
 typecheck:  ## Mypy strict over src
 	$(VPY) -m mypy
 
-demo:  ## Run the seven demonstration scenarios end to end, in-memory
-	$(VPY) -m lpr_cpe.cli demo
+# The two targets below name a gap and stop. Each previously invoked something that has never been
+# written -- `lpr_cpe.cli demo` and `lpr_cpe.api.app` -- so the failure a reader met was an argparse
+# error or a ModuleNotFoundError, which reads as a broken install rather than as unbuilt work. The
+# targets are kept rather than deleted because IMPLEMENTATION_PLAN.md carries both as pending, and a
+# target that says why it cannot run is worth more than a name nobody can find.
 
-serve:  ## Run the API on :8000 with the in-memory checkpointer
-	$(VPY) -m uvicorn lpr_cpe.api.app:app --reload --port 8000
+demo:  ## Not runnable yet -- the demonstration scenarios are unwritten
+	@echo "make demo: the seven scenarios are not written, and the parent graph still stops"
+	@echo "at the resolution fork. See IMPLEMENTATION_PLAN.md section 5, row 'demo'."
+	@echo "What does run today: lpr-cpe topology"
+	@exit 1
 
-check: lint typecheck test  ## Everything CI runs
+serve:  ## Not runnable yet -- src/lpr_cpe/api/ is unwritten
+	@echo "make serve: there is no HTTP surface. src/lpr_cpe/api/ does not exist, so neither"
+	@echo "does the approval-resume endpoint or any webhook. See IMPLEMENTATION_PLAN.md"
+	@echo "section 5, row 'api'. What does run today: lpr-cpe config"
+	@exit 1
 
-clean:
+check: lint typecheck test  ## lint, typecheck, then the suite behind the coverage gate
+
+clean:  ## Remove caches and build artefacts
 	$(PY) -c "import shutil,pathlib; [shutil.rmtree(p, ignore_errors=True) for p in ['.pytest_cache','.mypy_cache','.ruff_cache','htmlcov','build','dist']]; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]"
