@@ -98,6 +98,45 @@ async def interrupt_payloads(
     return [{"id": i.id, "value": i.value} for i in root.interrupts]
 
 
+async def awaiting_node_path(
+    app: CompiledStateGraph[Any, Any, Any], config: RunnableConfig
+) -> tuple[str, ...]:
+    """Which node is asking, named from the outside in -- `("gate", "ask")`. Empty when none is.
+
+    The question a console asks first and the one the interrupt itself cannot answer. Measured on
+    langgraph 1.2.11: `Interrupt` carries `id` and `value` and nothing else. The `id` is an opaque
+    digest (`5ed6ae3c455c6fcdc2eee48356fbbf12`) that names no node, and `Interrupt.from_ns` -- which
+    reads like the missing field -- is a **classmethod**, so `i.from_ns` yields a bound method
+    rather than a namespace. There is no node name anywhere on the object.
+
+    It is on the *tasks*, which is why this walks them rather than reusing `_snapshots`. That helper
+    merges `values` and drops the task it took them from; the name is exactly what it discards. Two
+    small walks answering two different questions is the honest arrangement here -- widening
+    `_snapshots` to carry names would make every caller pay for a field only this one reads.
+
+    The walk follows the task that **carries the interrupt** rather than the snapshot's `next`.
+    `next` names what would run, which is also populated for a graph stopped for some other reason;
+    following the interrupt means a non-empty path means *a human is being waited on* and nothing
+    else. So `bool(await awaiting_node_path(...))` equals `await is_awaiting_human(...)`, and that
+    equivalence is asserted rather than assumed -- two spellings of one predicate is precisely the
+    pair that drifts.
+
+    **If two gates were ever outstanding at once this names one of them.** `interrupt_payloads`
+    stays the complete list. Today the graph cannot produce two: the resolution fork is unwired, and
+    each subgraph has a single gate. When it can, this returns a path per interrupt or it lies.
+    """
+    snapshot: Any = await app.aget_state(config, subgraphs=True)
+    path: list[str] = []
+    while snapshot is not None:
+        asking = next((t for t in snapshot.tasks if getattr(t, "interrupts", ())), None)
+        if asking is None:
+            break
+        path.append(str(asking.name))
+        child = getattr(asking, "state", None)
+        snapshot = child if child is not None and hasattr(child, "tasks") else None
+    return tuple(path)
+
+
 async def is_awaiting_human(app: CompiledStateGraph[Any, Any, Any], config: RunnableConfig) -> bool:
     """Whether the incident is paused on an approval.
 

@@ -300,11 +300,16 @@ def test_expiry_and_required_role_come_from_the_pack_not_from_the_caller(
     )
 
 
-def _gate_app(kind: ApprovalKind = ApprovalKind.DISPATCH) -> Any:
+def _gate_app(kind: ApprovalKind = ApprovalKind.DISPATCH, *, nested: bool = True) -> Any:
     """A parent graph whose only node is a subgraph containing the two-node gate.
 
-    Nested deliberately: all six real gates are, and nesting is what makes the parent's state
+    Nested by default: all six real gates are, and nesting is what makes the parent's state
     understate a paused incident. A flat test graph would not exercise the case that matters.
+
+    `nested=False` puts the same two nodes directly in the parent. It is a **control**, not an
+    alternative arrangement to support -- several of the readers here are correct on a flat graph
+    and wrong on a nested one, and asserting only the nested case leaves no evidence of which half
+    of the behaviour is the surprising one.
     """
 
     async def prepare(state: IncidentState) -> dict[str, Any]:
@@ -320,17 +325,24 @@ def _gate_app(kind: ApprovalKind = ApprovalKind.DISPATCH) -> Any:
     async def ask(state: IncidentState) -> dict[str, Any]:
         return request_approval(state, get_runtime(GraphContext).context)
 
-    inner = StateGraph(IncidentState)
-    inner.add_node("prepare", prepare)
-    inner.add_node("ask", ask)
-    inner.add_edge(START, "prepare")
-    inner.add_edge("prepare", "ask")
-    inner.add_edge("ask", END)
-
     outer = StateGraph(IncidentState, context_schema=GraphContext)
-    outer.add_node("gate", inner.compile())
-    outer.add_edge(START, "gate")
-    outer.add_edge("gate", END)
+    if nested:
+        inner = StateGraph(IncidentState)
+        inner.add_node("prepare", prepare)
+        inner.add_node("ask", ask)
+        inner.add_edge(START, "prepare")
+        inner.add_edge("prepare", "ask")
+        inner.add_edge("ask", END)
+
+        outer.add_node("gate", inner.compile())
+        outer.add_edge(START, "gate")
+        outer.add_edge("gate", END)
+    else:
+        outer.add_node("prepare", prepare)
+        outer.add_node("ask", ask)
+        outer.add_edge(START, "prepare")
+        outer.add_edge("prepare", "ask")
+        outer.add_edge("ask", END)
     return outer.compile(checkpointer=build_memory_checkpointer())
 
 
@@ -638,3 +650,76 @@ async def test_the_interrupt_payload_is_json_serialisable(ctx: GraphContext) -> 
     await app.ainvoke({"incident_id": "INC-1"}, config, context=ctx)
     payloads = await gi.interrupt_payloads(app, config)
     assert json.loads(json.dumps(payloads[0]["value"]))["permitted_roles"]
+
+
+async def test_the_asking_node_is_named_in_full_and_the_parents_next_names_only_the_subgraph(
+    ctx: GraphContext,
+) -> None:
+    """Which node is asking, with the flat graph as the control that shows why this is not obvious.
+
+    A console has to say *what* is being approved, and the interrupt cannot tell it: `Interrupt`
+    carries an opaque `id` and a `value`, and `from_ns` is a classmethod rather than the namespace
+    field it reads as. So the name is taken from the tasks.
+
+    The obvious alternative -- the parent's own `next` -- is asserted here to be insufficient rather
+    than merely not used. It reports `("gate",)`, which is the *subgraph*, not the step inside it:
+    every real gate would render as "resolution" and no incident would ever say which question it
+    was blocked on.
+
+    The flat control is the half that explains how such a bug survives review. Flattened, the naive
+    read is **right**, because there is no subgraph to hide behind -- so a reader who tests only the
+    arrangement they happened to build sees the parent's `next` work perfectly.
+
+    Seen to go red. Reimplemented as `tuple(root.next)`, the nested case failed and the flat case
+    and all 29 other tests in this module passed:
+
+        AssertionError: the paused node must be named from the outside in, subgraph then step
+        assert ('gate',) == ('gate', 'ask')
+          Right contains one more item: 'ask'
+
+    That asymmetry is what the flat control costs four lines to record.
+
+    The resumed assertion at the end is a **boundary check, not a guard**, and is marked as such
+    because the distinction matters in this repo. It could not be made to fail: measured on 1.2.11,
+    a completed thread and a never-invoked one both report `next=()` and `tasks=[]`, so no
+    implementation of this function distinguishes them and none returns a path for either. It is
+    kept for the empty branch it covers, not as evidence of anything.
+    """
+    nested = _gate_app()
+    nested_config = {"configurable": {"thread_id": "path-nested"}}
+    await nested.ainvoke({"incident_id": "INC-1"}, nested_config, context=ctx)
+
+    assert await gi.awaiting_node_path(nested, nested_config) == ("gate", "ask"), (
+        "the paused node must be named from the outside in, subgraph then step"
+    )
+    assert (await nested.aget_state(nested_config)).next == ("gate",), (
+        "the control: the parent's own `next` names the subgraph and stops there. If this is now "
+        "the full path, LangGraph propagates it and `awaiting_node_path` has become a wrapper"
+    )
+
+    flat = _gate_app(nested=False)
+    flat_config = {"configurable": {"thread_id": "path-flat"}}
+    await flat.ainvoke({"incident_id": "INC-1"}, flat_config, context=ctx)
+
+    assert await gi.awaiting_node_path(flat, flat_config) == ("ask",)
+    assert (await flat.aget_state(flat_config)).next == ("ask",), (
+        "flattened, the naive read is correct -- which is why the nested failure is easy to miss"
+    )
+
+    # Boundary, not guard -- see the docstring. Resuming the nested gate must empty the path.
+    await nested.ainvoke(
+        Command(
+            resume={
+                p["id"]: {
+                    "status": "approved",
+                    "decided_by": "op-1",
+                    "decided_by_role": "noc_operator",
+                }
+                for p in await gi.interrupt_payloads(nested, nested_config)
+            }
+        ),
+        nested_config,
+        context=ctx,
+    )
+    assert await gi.awaiting_node_path(nested, nested_config) == ()
+    assert await gi.is_awaiting_human(nested, nested_config) is False
