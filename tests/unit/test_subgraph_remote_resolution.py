@@ -50,7 +50,7 @@ from lpr_cpe.domain.enums import (
 from lpr_cpe.domain.governance import ActionRecord, PolicyDecision
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.domain.resolution import RemoteAction
-from lpr_cpe.graph.builder import compile_parent_graph
+from lpr_cpe.graph.builder import build_parent_graph
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.guards import ESCALATED
 from lpr_cpe.graph.routing import is_remote_option
@@ -133,10 +133,25 @@ async def paused(fixtures: Any) -> Any:
     this module pass while `generate_resolution_options` offered something P12 cannot execute, which
     is precisely the coupling `test_only_cpe_executable_actions_can_reach_the_remote_branch` exists
     to police -- and a fabricated fixture would police it against itself.
+
+    P11 is asked for rather than assumed, because since the resolution fork was wired the parent no
+    longer stops there by itself: it answers D09 `remote` and enters this very subgraph. That it
+    still pauses at all is luck this fixture happens to have -- the parent reaches the approval gate
+    inside the fork, and a paused subgraph's writes never reach the parent, so the state came back
+    pre-fork and looked untouched. The sibling self-help fixture has no gate on its path, ran the
+    whole branch and escalated on the diagnostic-cycle budget, and thirteen of its tests failed as
+    `assert () == ('await_customer_response',)`. Same premise, and only one of the two was told.
     """
     service = fixtures.services[OFFLINE_CPE_SERVICE]
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
-    parent_final = await compile_parent_graph().ainvoke(_initial(service), context=ctx)
+    parent = build_parent_graph().compile(
+        name="lpr_cpe_parent",
+        checkpointer=InMemorySaver(),
+        interrupt_after=["generate_resolution_options"],
+    )
+    parent_final = await parent.ainvoke(
+        _initial(service), context=ctx, config={"configurable": {"thread_id": "parent-remote"}}
+    )
 
     graph = build_remote_resolution_graph().compile(
         name="lpr_cpe_remote_resolution", checkpointer=InMemorySaver()

@@ -1,21 +1,26 @@
-"""The parent graph: eleven nodes, six decisions, and the edges between them.
+"""The parent graph: eleven steps, two subgraphs, twelve decisions, and the edges between them.
 
 This module is the only place that knows what the workflow's *shape* is. `graph.nodes` knows what
 each step does, `graph.routing` knows what each question asks, and neither knows what follows what.
 That separation is what lets `routing.py` say -- as its docstring does -- that a branch "names the
 answer, never the node the builder happens to wire it to".
 
-Three tables and nothing else
------------------------------
-The topology is data, not control flow, and it is spread over exactly three places:
+Four tables and nothing else
+----------------------------
+The topology is data, not control flow, and it is spread over exactly four places:
 
 * **`graph.nodes.PARENT_NODES`** -- the eleven steps in specification order. Consecutive entries
   with no decision between them are joined by a plain edge, so the registry's *order* is what draws
   P01 -> P02, P06 -> P07, P08 -> P09 and P09 -> P10. Nothing here restates them.
-* **`DECISION_AFTER`** -- which of the six parent decisions follows which node.
+* **`SUBGRAPH_NODES`** -- the stages that own an interrupt, and are therefore compiled graphs rather
+  than functions. Deliberately *not* in `PARENT_NODES`, and not merely because `graph.nodes` says
+  nothing beyond P11 lives there: they have no order to be in. Each is reached by name from a
+  branch, never by falling off the end of the one before, so listing them in sequence would invite
+  the plain edge that `_plain_edges` draws between consecutive registry entries.
+* **`DECISION_AFTER`** -- which decision is asked after which node.
 * **`BRANCH_TARGETS`** -- where each answer goes.
 
-A reader wanting the diagram reads those three; a reader wanting the behaviour reads the other two
+A reader wanting the diagram reads those four; a reader wanting the behaviour reads the other two
 modules. `_check_tables` refuses to build a graph whose tables disagree with either.
 
 Why the answer-to-node mapping lives here and not on `Decision`
@@ -26,6 +31,27 @@ from being written in terms of them. Instead the mapping is here and `_check_tab
 `path_map`'s keys against `Decision.branches` -- the check `routing.py` delegates by name. It fires
 in both directions: an answer with no destination and a destination for an answer no router gives
 are both build-time errors, not runtime surprises.
+
+An answer may name another decision
+-----------------------------------
+`BRANCH_TARGETS["D07"]["continue"]` is `"D08"` rather than a node, and the specification is why. D07
+ends "If no, continue to D08"; D08 ends "If no, evaluate remote repair"; D09 ends "If yes, continue
+to P12. If no, continue to D11." Four questions in a row, with no step between any two of them.
+
+LangGraph attaches a conditional edge to a *node*, so those four cannot be four
+`add_conditional_edges` calls -- there is nothing to attach the second one to. `_cascade` composes
+them instead: it asks D07, and while the answer names a decision it asks that one too, stopping at
+the first answer that names a node or `END`. `_terminal_targets` is the union of those answers, and
+it is the path map.
+
+The composition is exact rather than an approximation, which is the whole of its justification.
+**No node runs between the four**, so they read a state that is identical by construction -- and a
+router's return value is never checkpointed, which `routing.py` opens by explaining, so four
+separate edges would have recorded no more than this one does. Nothing is lost, and what is gained
+is that the table can say what the specification says.
+
+The failure mode it introduces instead is a chain that never terminates, which `_check_chains`
+refuses at build time rather than letting `_cascade` spin.
 
 The escalation edge
 -------------------
@@ -46,7 +72,7 @@ same place the guard sends everything else.
 
 What is not wired yet
 ---------------------
-Three exits leave this graph for stages that do not exist. They go to `END`, which would otherwise
+Several exits leave this graph for stages that do not exist. They go to `END`, which would otherwise
 be indistinguishable from a successful run, so each is named in `PENDING_STAGES` and `_check_tables`
 holds the two in agreement in both directions: an exit that goes to `END` without an entry there,
 or an entry whose exit no longer goes to `END`, both fail the build. Wiring a subgraph therefore
@@ -66,8 +92,11 @@ from lpr_cpe.graph.guards import ESCALATED, ONWARD, guarded, straight_on
 from lpr_cpe.graph.nodes import PARENT_NODES
 from lpr_cpe.graph.routing import DECISIONS
 from lpr_cpe.graph.state import IncidentState
+from lpr_cpe.graph.subgraphs import compile_remote_resolution_graph, compile_self_help_graph
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
@@ -80,14 +109,32 @@ if TYPE_CHECKING:
 # The topology
 # ------------------------------------------------------------------------------------------------
 
-#: Which decision follows which node. A node absent from this mapping is followed by a plain edge to
-#: whatever comes next in `PARENT_NODES`.
+#: The stages that are compiled graphs rather than functions, and the factory for each. Added as
+#: nodes exactly like `PARENT_NODES`' entries; the parent cannot tell the difference, and that is
+#: the point of `compile_*` taking no checkpointer -- a subgraph node shares the parent's.
+#:
+#: Called at build time rather than held as already-compiled objects, so that two parent graphs get
+#: two subgraphs. Sharing one compiled instance across parents would work today and is the kind of
+#: thing that stops working the moment anything is cached on the compiled object.
+SUBGRAPH_NODES: Mapping[str, Callable[[], Any]] = {
+    "remote_resolution": compile_remote_resolution_graph,
+    "self_help": compile_self_help_graph,
+}
+
+#: Which decision is asked after which node. A node absent from this mapping is followed by a plain
+#: edge to whatever comes next in `PARENT_NODES`.
 #:
 #: The one entry worth checking against the specification is the first: **D01 follows P02, not
 #: P01**. "Is the event valid and actionable?" is a question about the normalised event and its
 #: data-quality score, and P02 is what computes that score -- asking before P02 would be asking
 #: before there was anything to read. The specification's heading order says so and this table is
 #: the only place the code does.
+#:
+#: The last three are Stage 3. **D07 is the head of a chain**, not the only question asked after
+#: P11: D08, D09 and D11 follow it through `BRANCH_TARGETS` because nothing runs in between. See the
+#: module docstring. D10 and D12 are asked after the two subgraph nodes, and they are asked *here*
+#: rather than inside those subgraphs because every destination they have is a sibling the subgraph
+#: does not contain -- which both subgraph modules say in their own docstrings.
 DECISION_AFTER: Mapping[str, str] = {
     "normalize_event": "D01",
     "resolve_identity_and_topology": "D02",
@@ -95,6 +142,9 @@ DECISION_AFTER: Mapping[str, str] = {
     "assess_impact_and_priority": "D04",
     "assemble_case_evidence": "D05",
     "determine_root_cause": "D06",
+    "generate_resolution_options": "D07",
+    "remote_resolution": "D10",
+    "self_help": "D12",
 }
 
 #: Where each answer goes. Keys are checked against `Decision.branches`; values against the node
@@ -114,6 +164,15 @@ DECISION_AFTER: Mapping[str, str] = {
 #:   re-test over the same stale snapshots would return the same answer.
 #: * **D06 `retry_diagnosis` -> P07, not P10.** A rejected low-confidence RCA is not re-derivable
 #:   from the evidence that produced it. See `route_rca_confidence`.
+#: * **D07 `continue` -> D08, D08 `continue` -> D09, D09 `self_help_check` -> D11.** A target that
+#:   names a decision means "ask that next"; see the module docstring for why Stage 3's opening is a
+#:   chain rather than four edges.
+#: * **D10 `retry_diagnosis` -> P07 and D12 `retry_diagnosis` -> P10.** Not the same destination,
+#:   and the specification asks for both. D10's remedy is "return to evidence assembly and
+#:   root-cause analysis (P07 and P10)" -- a remote repair that did not hold means the device has
+#:   changed since the evidence was gathered, so the evidence is re-gathered. D12's is "return to
+#:   diagnosis (P10)": self-help changes nothing the diagnostic reads unless it worked, and it did
+#:   not, so the same evidence supports a second opinion.
 BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
     "D01": {
         "quarantine": END,
@@ -142,6 +201,32 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
         "retry_diagnosis": "assemble_case_evidence",
         "continue": "generate_resolution_options",
     },
+    "D07": {
+        "approve_high_blast_radius": END,
+        "escalate": END,
+        "continue": "D08",
+    },
+    "D08": {
+        "plant_path": END,
+        "continue": "D09",
+    },
+    "D09": {
+        "remote": "remote_resolution",
+        "self_help_check": "D11",
+    },
+    "D10": {
+        "verify": END,
+        "retry_diagnosis": "assemble_case_evidence",
+    },
+    "D11": {
+        "self_help": "self_help",
+        "field_planning": END,
+    },
+    "D12": {
+        "verify": END,
+        "retry_diagnosis": "determine_root_cause",
+        "field_planning": END,
+    },
 }
 
 #: Every exit that reaches `END` because the work beyond it has not been written, spelled
@@ -163,8 +248,32 @@ PENDING_STAGES: Mapping[str, str] = {
         "the L2/SME review interrupt -- a human-approval interruption that resumes the same "
         "incident thread with the reviewer's structured response"
     ),
-    f"{ONWARD}:generate_resolution_options": (
-        "Stage 3, select and execute the resolution, which begins at D07"
+    "D07:approve_high_blast_radius": (
+        "the high-blast-radius approval gate -- the interrupt D07's 'require human approval' arm "
+        "needs. `remote_resolution` raises this kind when the pack demands it of a selected "
+        "action, but that is downstream of D09; a demand standing before the branch is chosen has "
+        "nowhere to be answered"
+    ),
+    "D07:escalate": (
+        "the escalation handler -- D07's 'or escalation' arm reaches END with `escalated` still "
+        "false and the status still `diagnosing`, because unlike D02 and D05 nothing on this path "
+        "has run `escalation_update`. The specification's third remedy, 'record the reason', is "
+        "the node that is missing"
+    ),
+    "D08:plant_path": (
+        "the NOC, provisioning and plant branch -- Stage 4's Dirty Boots half, P20 onwards, which "
+        "creates or updates an MR from NOC/plant evidence rather than from a handover contract"
+    ),
+    "D10:verify": (
+        "Stage 5, verify, reconcile, close and learn, which begins at P22 and is where every "
+        "successful resolution ends up"
+    ),
+    "D11:field_planning": (
+        "P14, build the field-service requirement, and the dispatch path to D15"
+    ),
+    "D12:verify": "Stage 5 again, reached from the self-help branch. See D10:verify",
+    "D12:field_planning": (
+        "P14 again, reached once the plan is exhausted. See D11:field_planning"
     ),
 }
 
@@ -182,6 +291,17 @@ def _node_names() -> tuple[str, ...]:
     return tuple(name for name, _ in PARENT_NODES)
 
 
+def _wired_node_names() -> frozenset[str]:
+    """Every name the parent graph has a node under, ordered steps and subgraphs alike.
+
+    What "is that a real destination?" means, and it is deliberately a set rather than a sequence:
+    `_plain_edges` needs the registry's *order* to draw the edges between consecutive steps, and a
+    subgraph has none. Keeping the two separate is what stops a subgraph from acquiring a plain edge
+    into it by being written down next to something.
+    """
+    return frozenset(_node_names()) | frozenset(SUBGRAPH_NODES)
+
+
 def _plain_edges() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
     """The consecutive pairs `PARENT_NODES` joins directly, and the nodes with no successor at all.
 
@@ -195,15 +315,131 @@ def _plain_edges() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
     return pairs, terminal
 
 
+def chain_from(identifier: str) -> tuple[str, ...]:
+    """Every decision reachable from this one without a node in between, the head first.
+
+    A target that is itself a key of `BRANCH_TARGETS` names a question rather than a destination, so
+    the chain is read off the table by following exactly those. `("D07", "D08", "D09", "D11")` for
+    Stage 3's opening; `("D01",)` for a decision that chains to nothing, which is most of them.
+
+    Breadth-first and de-duplicating, because a chain is a graph and not a list: two answers of one
+    decision may name the same next question, and D09's two arms already diverge. The de-duplication
+    is not what makes a cycle safe -- `_check_chains` refuses those -- it is what keeps a diamond
+    from being walked twice.
+
+    Public, unlike the rest of this section, because chaining made `DECISION_AFTER` an incomplete
+    answer to "which questions does this graph ask?" -- it names nine of twelve. Anything describing
+    the topology needs this to finish the sentence, and `cli.report_topology` is the first such
+    reader. The module docstring's "a reader wanting the diagram reads those four" now means: reads
+    those four, following the targets that name decisions.
+    """
+    order: list[str] = []
+    pending = [identifier]
+    while pending:
+        current = pending.pop(0)
+        if current in order or current not in BRANCH_TARGETS:
+            continue
+        order.append(current)
+        pending.extend(t for t in BRANCH_TARGETS[current].values() if t in BRANCH_TARGETS)
+    return tuple(order)
+
+
+def _terminal_targets(identifier: str) -> dict[str, str]:
+    """The path map for a chain: every answer that names a node or `END`, and where it goes.
+
+    Answers that name another decision are not in it, because they are not destinations -- they are
+    the chain itself, and `_cascade` has already followed them by the time an edge sees a return
+    value.
+
+    An answer appearing twice in one chain is a build-time error rather than a last-write-wins, and
+    this is the one hazard the composition introduces that four separate edges would not have had.
+    D10 and D12 both answer `retry_diagnosis` to different nodes and both are fine, because they are
+    asked after different nodes and are therefore different edges. Two decisions *in one chain*
+    answering `retry_diagnosis` would share one edge, and the branch could no longer say which
+    question had been asked -- which is the property `routing.py` is written around.
+    """
+    out: dict[str, str] = {}
+    origin: dict[str, str] = {}
+    for current in chain_from(identifier):
+        for answer, target in BRANCH_TARGETS[current].items():
+            if target in BRANCH_TARGETS:
+                continue
+            if answer in out:
+                raise GraphTopologyError(
+                    f"{current} and {origin[answer]} are chained after one node and both answer "
+                    f"'{answer}'. One conditional edge carries both, so the branch would no longer "
+                    "name which question was asked."
+                )
+            out[answer] = target
+            origin[answer] = current
+    return out
+
+
+def _cascade(identifier: str) -> Callable[[IncidentState], str]:
+    """The edge function for a chain: ask each question in turn, return the first real answer.
+
+    The composed router. It asks `identifier`, and while the answer names another decision it asks
+    that one too, so what reaches the edge is always a key of `_terminal_targets(identifier)`.
+
+    Composing is exact here, not an approximation, and the module docstring says why: no node runs
+    between the questions, so each reads the state the one before it read, and a router's return
+    value is never checkpointed. What the trace loses by having one edge instead of four is nothing
+    it ever held.
+
+    Wrapped in `guarded` by the caller, once, at the head. The guard's job is to stop the graph when
+    the budget is spent, and asking the same guard again between two questions that share a state
+    could only ever get the same answer.
+    """
+
+    def route(state: IncidentState) -> str:
+        current = identifier
+        while True:
+            answer = DECISIONS[current].route(state)
+            target = BRANCH_TARGETS[current][answer]
+            if target not in BRANCH_TARGETS:
+                return answer
+            current = target
+
+    return route
+
+
+def _check_chains() -> None:
+    """No chain loops back on itself, because `_cascade` would not return if one did.
+
+    The failure this exists to convert. `_cascade`'s loop terminates on the first answer that names
+    a node, so a table in which D09 answered back to D07 is not a wrong edge or a missing
+    destination -- it is an edge function that spins, inside a super-step, with no checkpoint
+    written and nothing in the log. Refusing it at build time costs one walk of a table with twelve
+    entries in it.
+
+    Depth-first over paths rather than a visited set, because the question is whether a decision can
+    reach *itself*, and a shared decision that two arms both reach is legitimate.
+    """
+    for head in sorted(set(DECISION_AFTER.values())):
+        stack: list[tuple[str, tuple[str, ...]]] = [(head, ())]
+        while stack:
+            current, path = stack.pop()
+            if current in path:
+                raise GraphTopologyError(
+                    f"the decision chain after {head} loops: {' -> '.join([*path, current])}. "
+                    "`_cascade` follows answers until one names a node, so this is an edge "
+                    "function that never returns."
+                )
+            walked = (*path, current)
+            stack.extend(
+                (t, walked) for t in BRANCH_TARGETS[current].values() if t in BRANCH_TARGETS
+            )
+
+
 def _check_tables() -> None:
-    """Refuse to build a graph whose three tables disagree. Every check fires in both directions.
+    """Refuse to build a graph whose four tables disagree. Every check fires in both directions.
 
     Called from `build_parent_graph` rather than at import. Import-time is right for a check whose
     inputs are all constants -- `graph.nodes` does one -- but this one reads `DECISIONS`, and a
     circular-import order in which `routing` is half-initialised would turn a topology error into an
     `AttributeError` from somewhere unhelpful.
     """
-    known = set(_node_names())
+    known = _wired_node_names()
 
     unknown_sources = sorted(set(DECISION_AFTER) - known)
     if unknown_sources:
@@ -211,10 +447,14 @@ def _check_tables() -> None:
             f"DECISION_AFTER names nodes that are not in the registry: {unknown_sources}"
         )
 
-    missing_decisions = sorted(set(DECISION_AFTER.values()) - set(DECISIONS))
+    # Both tables, not just `DECISION_AFTER`. A chained decision follows no node, so it reaches
+    # `DECISIONS[identifier]` below without this having looked at it, and the error would be a
+    # `KeyError` from the check rather than a sentence saying which table is wrong.
+    wired_decisions = set(BRANCH_TARGETS) | set(DECISION_AFTER.values())
+    missing_decisions = sorted(wired_decisions - set(DECISIONS))
     if missing_decisions:
         raise GraphTopologyError(
-            f"DECISION_AFTER names decisions that are not in routing.DECISIONS: {missing_decisions}"
+            f"decisions are wired here but are not in routing.DECISIONS: {missing_decisions}"
         )
 
     untargeted = sorted(set(DECISION_AFTER.values()) - set(BRANCH_TARGETS))
@@ -224,11 +464,18 @@ def _check_tables() -> None:
             "A decision with no destinations cannot be an edge."
         )
 
-    orphan_targets = sorted(set(BRANCH_TARGETS) - set(DECISION_AFTER.values()))
+    _check_chains()
+
+    # Reachable, not just wired: D08 follows no node, and is not an orphan -- D07 answers to it.
+    # Computed from `chain_from` rather than from `BRANCH_TARGETS`' values directly, so that a
+    # chain hanging off nothing is caught however long it is.
+    reachable = {d for head in DECISION_AFTER.values() for d in chain_from(head)}
+    orphan_targets = sorted(set(BRANCH_TARGETS) - reachable)
     if orphan_targets:
         raise GraphTopologyError(
-            f"BRANCH_TARGETS has destinations for decisions that follow no node: {orphan_targets}. "
-            "Either wire the decision in DECISION_AFTER or delete its destinations."
+            f"BRANCH_TARGETS has destinations for decisions nothing asks: {orphan_targets}. Either "
+            "wire the decision in DECISION_AFTER, answer to it from one that is, or delete its "
+            "destinations."
         )
 
     # The check `routing.py` delegates by name: "graph.builder owns the answer-to-node mapping and
@@ -242,11 +489,16 @@ def _check_tables() -> None:
                 f"{sorted(declared)}. An answer with no destination is an unreachable branch; a "
                 "destination for an answer no router gives is a dead edge."
             )
-        strangers = sorted(set(targets.values()) - known - {END})
+        # `- set(BRANCH_TARGETS)`: a target naming a decision is a chain link, checked above by
+        # `_check_chains` and resolved by `_cascade`, not a node that has gone missing.
+        strangers = sorted(set(targets.values()) - known - {END} - set(BRANCH_TARGETS))
         if strangers:
             raise GraphTopologyError(
                 f"{identifier} routes to nodes that are not in the registry: {strangers}"
             )
+
+    for head in set(DECISION_AFTER.values()):
+        _terminal_targets(head)
 
     _check_pending_stages()
 
@@ -323,6 +575,14 @@ def build_parent_graph() -> StateGraph[IncidentState, GraphContext, IncidentStat
     for name, fn in PARENT_NODES:
         graph.add_node(name, fn)
 
+    # A compiled graph is a runnable, so `add_node` takes one exactly as it takes a function and the
+    # parent has no way to tell which it got. What the subgraph does *not* get here is a
+    # checkpointer: a node compiled with its own would write its state somewhere the parent's thread
+    # cannot reach, and `graph.inspect` reads a paused stage through `subgraphs=True` on the
+    # parent's.
+    for name, compile_subgraph in SUBGRAPH_NODES.items():
+        graph.add_node(name, compile_subgraph())
+
     graph.add_edge(START, _node_names()[0])
 
     plain, terminal = _plain_edges()
@@ -338,9 +598,13 @@ def build_parent_graph() -> StateGraph[IncidentState, GraphContext, IncidentStat
         # Built through `.items()` rather than `{**table, ...}` for the same invariance: `**`
         # unpacking asks for a `SupportsKeysAndGetItem[Hashable, str]`, which a `Mapping[str, str]`
         # is not, while `Iterable[tuple[str, str]]` is an `Iterable[tuple[Hashable, str]]`.
-        path_map: dict[Hashable, str] = dict(BRANCH_TARGETS[identifier].items())
+        #
+        # `_terminal_targets` and `_cascade` rather than the table and the router: for the nine
+        # decisions that chain to nothing these are the table and the router, and for D07 they are
+        # the four questions the specification asks after P11 with no step between them.
+        path_map: dict[Hashable, str] = dict(_terminal_targets(identifier).items())
         path_map[ESCALATED] = END
-        graph.add_conditional_edges(source, guarded(DECISIONS[identifier].route), path_map)
+        graph.add_conditional_edges(source, guarded(_cascade(identifier)), path_map)
 
     return graph
 

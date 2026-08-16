@@ -26,9 +26,17 @@ from lpr_cpe.graph.subgraphs.remote_resolution import (
     build_remote_resolution_graph,
     compile_remote_resolution_graph,
 )
+from lpr_cpe.graph.subgraphs.self_help import (
+    SELF_HELP_NODES,
+    build_self_help_graph,
+    compile_self_help_graph,
+)
 
 __all__ = [
     "REMOTE_RESOLUTION_NODES",
+    "SELF_HELP_NODES",
     "build_remote_resolution_graph",
+    "build_self_help_graph",
     "compile_remote_resolution_graph",
+    "compile_self_help_graph",
 ]

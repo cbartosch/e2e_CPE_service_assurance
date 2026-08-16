@@ -13,6 +13,7 @@ compute the right answer, and that a real graph can run them at all.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -38,6 +39,7 @@ from lpr_cpe.graph.builder import (
     ESCALATED,
     ONWARD,
     PENDING_STAGES,
+    SUBGRAPH_NODES,
     GraphTopologyError,
     build_parent_graph,
     compile_parent_graph,
@@ -187,18 +189,62 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
             "continue": "generate_resolution_options",
             ESCALATED: END,
         },
-        # P11 -> Stage 3, which does not exist yet. See PENDING_STAGES.
-        "generate_resolution_options": {ONWARD: END, ESCALATED: END},
+        # P11 -> D07, D08, D09, D11 -- four questions with no step between any two of them, so
+        # LangGraph holds *one* edge carrying the union of their terminal answers. The comment on
+        # each names the question it came from, which is the thing the edge itself no longer says.
+        #
+        # `continue` and `self_help_check` are the assertion worth reading. They are how the chain
+        # gets from one question to the next, they appear in `BRANCH_TARGETS` under D07, D08 and
+        # D09, and they are absent here -- consumed by `_cascade` rather than routed. An edge
+        # labelled `continue` leaving P11 would mean the composition was never applied.
+        "generate_resolution_options": {
+            "approve_high_blast_radius": END,  # D07
+            "escalate": END,  # D07
+            "plant_path": END,  # D08
+            "remote": "remote_resolution",  # D09
+            "self_help": "self_help",  # D11
+            "field_planning": END,  # D11
+            ESCALATED: END,
+        },
+        # The two subgraphs. D10 and D12 are asked *here* and not inside them because every
+        # destination either answer has is a sibling the subgraph does not contain -- a subgraph
+        # cannot route to P07, and `retry_diagnosis` is most of the point of both.
+        "remote_resolution": {
+            "verify": END,
+            "retry_diagnosis": "assemble_case_evidence",
+            ESCALATED: END,
+        },
+        # D12's `retry_diagnosis` goes to P10 and D10's to P07, which is not a copy-paste slip:
+        # self-help changes nothing the diagnostic reads unless it worked, so the same evidence
+        # supports a second opinion, while a remote repair that did not hold means the device has
+        # changed since the evidence was gathered.
+        "self_help": {
+            "verify": END,
+            "retry_diagnosis": "determine_root_cause",
+            "field_planning": END,
+            ESCALATED: END,
+        },
     }
 
     # The only unconditional edge in the graph, and the reason `receive_signal` is P01.
     assert sorted(graph.edges) == [("__start__", "receive_signal")]
 
 
-def test_the_compiled_graph_contains_the_eleven_nodes_and_nothing_else() -> None:
-    """A twelfth node would be reachable from nowhere; a missing one, an edge to nothing."""
+def test_the_compiled_graph_contains_the_eleven_steps_the_two_subgraphs_and_nothing_else() -> None:
+    """A fourteenth node would be reachable from nowhere; a missing one, an edge to nothing.
+
+    The subgraphs are asserted from `SUBGRAPH_NODES` rather than by name, so that this says "the
+    table was wired" and not "these two happen to be here". A compiled subgraph is added exactly as
+    a function is, and `get_graph()` reports it as one node -- its own eight are one level down,
+    which is what `xray` renders and what nothing here needs.
+    """
     nodes = set(compile_parent_graph().get_graph().nodes)
-    assert nodes == {name for name, _ in PARENT_NODES} | {"__start__", "__end__"}
+    expected = {name for name, _ in PARENT_NODES} | set(SUBGRAPH_NODES)
+    assert nodes == expected | {"__start__", "__end__"}
+    assert not set(SUBGRAPH_NODES) & {name for name, _ in PARENT_NODES}, (
+        "a subgraph is in PARENT_NODES too, so `_plain_edges` has drawn an edge into it from "
+        "whatever is written above it -- see the module docstring on why they have no order"
+    )
 
 
 # ------------------------------------------------------------------------------------------------
@@ -217,6 +263,36 @@ async def test_a_fixture_runs_the_whole_parent_graph_without_writing_anything(
     than by count: it is the guard's own counter, written by the `@node` wrapper this module exists
     to exercise, and a run that looped P07 three times would still total eleven if the assertion
     were `len(...) == 11`.
+
+    Since the resolution fork was wired, the exact `node_visits` carries a third claim it did not
+    ask for: **no fixture enters a subgraph**, so the eleven are still eleven. That is the routers
+    answering honestly rather than the fork being broken, and it was measured. Two services divert
+    at D08 (`pon_degraded_optical` and `pon_power_affected`, both `plant_path`) and two run the
+    whole chain to D11 and answer `field_planning` -- `hfc_degraded_upstream` and `hfc_healthy`,
+    both diagnosed `tap_or_odp`, whose only options are `raise_mr` and `create_work_order` and
+    both of those set `requires_truck_roll`. `is_remote_option` and `is_self_help_option` reject a
+    truck roll, so there is nothing for D09 or D11 to choose.
+
+    Only these four, and `_service` takes the *first* service of each health profile -- the fork is
+    not dead across the fixture set. Swept over all 41 services, two do enter `remote_resolution`
+    (`SVC-UT-001-B-01` and `SVC-SJ-011-B-01`) and none reach `self_help`, for a reason the self-help
+    module's docstring records: the budget, not the wiring. So a service that changed profile could
+    move into the fork here, and this test should go red when it does -- the number to update is
+    then the twelfth and thirteenth visit, not the assertion.
+
+    This run is also what guards `_cascade`. Composing the chain has two halves -- the path map
+    (`_terminal_targets`) and the router (`_cascade`) -- and only the map is asserted structurally,
+    by `test_langgraph_holds_the_topology_the_specification_numbers`. Reverting the router half
+    alone, to `guarded(DECISIONS[identifier].route)`, leaves a graph that builds and compiles and
+    then fails here, on all four services::
+
+        E   KeyError: 'continue'
+        E   During task with name 'generate_resolution_options' and id '83deb6e4-...'
+        langgraph/graph/_branch.py:203: KeyError
+
+    -- the branch returning the answer that `_terminal_targets` consumed. That mutation was watched:
+    six tests went red, every one of them a test that runs the graph, and the structural test stayed
+    **green**, which is what shows the two halves need two guards rather than one.
     """
     final, ctx = await _run(_service(fixtures, health))
 
@@ -430,6 +506,153 @@ def test_the_builder_refuses_a_topology_that_disagrees_with_routing(
         build_parent_graph()
 
 
+def test_a_chain_that_loops_is_refused_rather_than_left_to_spin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure a decision chain can have that a plain table cannot.
+
+    `_cascade` follows answers until one names a node, so D09 answering back to D07 is not a wrong
+    edge or a missing destination -- it is an edge function that never returns, inside a super-step,
+    with no checkpoint written and nothing in the log. LangGraph cannot report it because the branch
+    never hands control back for LangGraph to have an opinion about.
+
+    Removing the `_check_chains()` line was measured, and the result is worse than a build that
+    hangs. **The build succeeds.** `chain_from` de-duplicates, so the build-time walk of a looping
+    table terminates perfectly happily -- it returned `('D07', 'D08', 'D09', 'D11')` and a five-entry
+    path map, and `build_parent_graph()` returned a graph. Only `_cascade` loops, and only when an
+    incident reaches P11: run on a daemon thread it was still running after two seconds, with
+    nothing returned. So the defect this check exists for is invisible to every other check in this
+    module and to compilation, and surfaces as one incident that never finishes.
+
+    The mutation below points D09 back at the head. `_check_chains` runs before the orphan check for
+    that reason: without it, the first thing to notice would be that D11 has become unreachable --
+    the loop stole its only inbound answer -- and the build would fail with a message about an
+    orphan, which is true and is not the problem.
+    """
+    monkeypatch.setattr(
+        builder_module,
+        "BRANCH_TARGETS",
+        {**BRANCH_TARGETS, "D09": {"remote": "remote_resolution", "self_help_check": "D07"}},
+    )
+    with pytest.raises(GraphTopologyError, match="loops"):
+        build_parent_graph()
+
+
+def test_two_decisions_in_one_chain_may_not_give_the_same_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One edge carries the whole chain, so one answer cannot mean two things on it.
+
+    D10 and D12 both answer `retry_diagnosis`, to different nodes, and both are correct: they are
+    asked after different nodes, so they are different edges. Two decisions *in one chain* are one
+    edge, and `path_map[answer]` would silently keep whichever was written last -- the graph would
+    build, compile, run, and route D08's `plant_path` wherever D07 had sent its own.
+
+    Spelled here as D08 answering `escalate` because that is the plausible version: the answer is
+    already in the chain's vocabulary, one question earlier, so it reads as a reasonable thing to
+    write. The check is what makes it a build error instead of a branch going somewhere D07 chose.
+
+    It routes to **P07 rather than to `END`**, and that too is load-bearing. Sent to `END` the
+    mutation is caught downstream by `_check_pending_stages` instead::
+
+        E   GraphTopologyError: these exits reach END with nothing to explain them:
+            ['D08:escalate'].
+
+    which is a true complaint about a different defect, and would let this test pass with the
+    collision refusal deleted. A duplicate answer pointing at a *node* is the case no other check
+    in this module can see, and deleting the refusal then gives the honest red::
+
+        E   Failed: DID NOT RAISE <class 'lpr_cpe.graph.builder.GraphTopologyError'>
+
+    **Both tables have to be mutated, and the first attempt at this test proved it.** Wiring the
+    answer in `BRANCH_TARGETS` alone never reaches the collision check::
+
+        E   AssertionError: Regex pattern did not match.
+        E     Expected regex: 'both answer'
+        E     Actual message: "D08 wires ['continue', 'escalate', 'plant_path'] but
+              routing.DECISIONS declares ['continue', 'plant_path']."
+
+    -- the `Decision.branches` comparison is a stronger gate and catches it first. So the collision
+    is only reachable when both decisions *genuinely declare* the answer, which is not a contrivance:
+    `routing.py` has no rule against two decisions sharing an answer word, and D02 and D05 both
+    declare `manual_review` while D10 and D12 both declare `retry_diagnosis`. What is new is those
+    two being in one chain.
+    """
+    from lpr_cpe.graph.routing import DECISIONS
+
+    monkeypatch.setattr(
+        builder_module,
+        "DECISIONS",
+        {
+            **DECISIONS,
+            "D08": replace(DECISIONS["D08"], branches=("plant_path", "continue", "escalate")),
+        },
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "BRANCH_TARGETS",
+        {
+            **BRANCH_TARGETS,
+            "D08": {
+                "plant_path": END,
+                "continue": "D09",
+                "escalate": "assemble_case_evidence",
+            },
+        },
+    )
+    with pytest.raises(GraphTopologyError, match="both answer"):
+        build_parent_graph()
+
+
+def test_a_chain_hanging_off_nothing_is_an_orphan_however_long_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`DECISION_AFTER` is no longer the list of wired decisions, so "orphan" had to be redefined.
+
+    D08 follows no node and is not an orphan -- D07 answers to it. The check therefore walks
+    `chain_from` from each head rather than reading `DECISION_AFTER.values()`, and this is the case
+    that separates the two: D13 and D14 chained to each other and to nothing else would pass a check
+    that only asked "is it a value of some other decision's table?", because each is.
+
+    The answers below are D13's and D14's **real** ones, and that is load-bearing rather than
+    tidiness. The first version invented `dispatch` and `defer`, which made the test pass under a
+    deliberately naive orphan check::
+
+        E   GraphTopologyError: D13 wires ['defer', 'dispatch'] but routing.DECISIONS declares
+            ['clean', 'dirty', 'escalate', 'joint'].
+
+    -- caught by the `Decision.branches` comparison two checks later, not by the orphan check at
+    all. A test that would pass with the check deleted is not a guard for it. With the real answers
+    the only thing wrong with this pair is that nothing asks them, which is the whole point.
+
+    They route to P07 for the same reason and it took a second attempt to see it. Routing them to
+    `END` let `_check_pending_stages` catch the mutation instead::
+
+        E   GraphTopologyError: these exits reach END with nothing to explain them:
+            ['D13:clean', 'D13:dirty', 'D13:escalate', 'D14:queue_for_dispatcher'].
+
+    Pointing every answer at a node leaves nothing else to object to, and the naive check then gives
+    `DID NOT RAISE`, which is the honest red.
+    """
+    unreachable = "assemble_case_evidence"
+    monkeypatch.setattr(
+        builder_module,
+        "BRANCH_TARGETS",
+        {
+            **BRANCH_TARGETS,
+            "D13": {
+                "clean": unreachable,
+                "dirty": unreachable,
+                "joint": "D14",
+                "escalate": unreachable,
+            },
+            "D14": {"queue_for_dispatcher": unreachable, "continue": "D13"},
+        },
+    )
+    with pytest.raises(GraphTopologyError, match="decisions nothing asks"):
+        build_parent_graph()
+
+
 def test_wiring_a_pending_stage_forces_its_line_to_be_deleted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -463,17 +686,27 @@ def test_a_new_dead_end_has_to_say_why_it_is_one(monkeypatch: pytest.MonkeyPatch
         build_parent_graph()
 
 
-def test_the_three_unbuilt_exits_are_the_ones_named() -> None:
+def test_the_unbuilt_exits_are_the_ones_named() -> None:
     """What is left to build, written down where the builder will not let it go stale.
 
-    Each of these is a subgraph in `PARENT_NODES`' terms -- Stage 3 onwards is not parent-graph
-    work, because every stage past P11 contains an interrupt. The list shrinks as they land, and
-    `_check_pending_stages` is what makes it shrink rather than rot.
+    Nine, and the list got *longer* when the resolution fork was wired, which is the shape to
+    expect. Wiring a stage deletes one line -- `ONWARD:generate_resolution_options`, P11's old fall
+    off the end -- and adds one for every branch the new stage opens that leads somewhere still
+    unwritten. Stage 3 asks four questions and answers seven of its branches to `END`.
+
+    `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
+    against the tables in both directions, so an exit that stops reaching `END` fails the build.
     """
     assert set(PENDING_STAGES) == {
         "D04:preventive",
         "D06:approve_low_confidence",
-        f"{ONWARD}:generate_resolution_options",
+        "D07:approve_high_blast_radius",
+        "D07:escalate",
+        "D08:plant_path",
+        "D10:verify",
+        "D11:field_planning",
+        "D12:verify",
+        "D12:field_planning",
     }
     assert all(text.strip() for text in PENDING_STAGES.values()), "each has to say what is missing"
 

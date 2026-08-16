@@ -35,9 +35,30 @@ from lpr_cpe.graph.builder import (
     BRANCH_TARGETS,
     DECISION_AFTER,
     PENDING_STAGES,
+    SUBGRAPH_NODES,
+    chain_from,
     compile_parent_graph,
 )
 from lpr_cpe.graph.routing import DECISIONS
+
+
+def _asked(identifier: str, node: str, chain: Sequence[str]) -> str:
+    """Where in the chain this question is reached from -- `after P11`, or `when D07 answers ...`.
+
+    Only the head of a chain follows a node. The rest are reached by an answer, and saying which
+    answer is the whole reason the report prints a chain as several blocks rather than as the one
+    edge the graph actually holds: `_terminal_targets` has already flattened D07, D08, D09 and D11
+    into six branches off P11, and flattened is exactly how the specification does *not* read them.
+    """
+    if identifier == chain[0]:
+        return f"after {node}"
+    reached_by = [
+        f"{earlier} answers {answer!r}"
+        for earlier in chain
+        for answer, target in BRANCH_TARGETS[earlier].items()
+        if target == identifier
+    ]
+    return "when " + " or ".join(reached_by)
 
 
 def report_topology(out: TextIO) -> None:
@@ -49,34 +70,52 @@ def report_topology(out: TextIO) -> None:
 
     The node list is read off the compiled graph; **the branches are not**, and the difference is
     not a stylistic one. `get_graph()` renders for drawing and keeps one edge per
-    `(source, target)` pair, so an answer sharing a destination with an earlier answer is dropped
-    from the rendering entirely. Measured on the graph as it stands, that loses four of the
-    fourteen declared answers -- `quarantine`, `manual_review`, `preventive` and
-    `approve_low_confidence` -- because each shares `END` with the escalation edge, and it collapses
-    D03's `associate` and `continue`, which `builder` documents as deliberately distinct. Two of the
-    four are `PENDING_STAGES` exits, so a report built on the rendering would hide precisely the
+    `(source, target)` pair, so an answer that shares a destination with an earlier answer keeps the
+    edge and loses its label. Measured on the graph as it stands: 31 drawn edges, 31 distinct pairs,
+    and **14 of the 26 declared answers named nowhere in it** -- every `END`-bound answer, because
+    each shares `END` with the uniform escalation edge; D03's `continue`, which `builder` documents
+    as deliberately distinct from `associate`; and D07's `self_help`, which is dropped for a second
+    reason worth knowing, that LangGraph omits a label equal to its target's name. Six of the
+    fourteen are `PENDING_STAGES` exits, so a report built on the rendering would hide precisely the
     branches that most need naming. `BRANCH_TARGETS` is therefore read directly, which
     `_check_tables` has already held against `Decision.branches` in both directions.
+
+    `DECISION_AFTER` is not sufficient either, for an unrelated reason: it names the nine decisions
+    that follow a node, and D08, D09 and D11 are reached only by another decision's answer.
+    `chain_from` is what takes the report from nine questions to twelve. Both omissions have the
+    same shape -- a structure that reads as the whole topology and is a projection of it -- so
+    neither the drawing nor either table is trusted to be complete on its own.
 
     The pending exits are printed rather than kept behind a flag, for the reason `PENDING_STAGES`
     exists at all: an `END` reached for want of a subgraph is otherwise indistinguishable from a
     finished run, and a report that omitted them would recreate that ambiguity one level up.
     """
     app = compile_parent_graph()
-    steps = [name for name in app.get_graph().nodes if name not in {START, END}]
+    drawn = [name for name in app.get_graph().nodes if name not in {START, END}]
+    steps = [name for name in drawn if name not in SUBGRAPH_NODES]
 
     out.write(f"graph {app.name}\n")
-    out.write(f"  nodes {len(steps)}, in specification order\n")
+    out.write(f"  nodes {len(drawn)}\n")
+    out.write(f"    steps {len(steps)}, in specification order\n")
     for position, name in enumerate(steps, start=1):
-        out.write(f"    P{position:02d} {name}\n")
+        out.write(f"      P{position:02d} {name}\n")
+    # Deliberately unnumbered. A subgraph is several specification steps and owns an interrupt, so
+    # `P12` would be a claim about which step it is that no table here makes.
+    out.write(f"    subgraphs {len(SUBGRAPH_NODES)}, each a compiled graph reached by name\n")
+    for name in drawn:
+        if name in SUBGRAPH_NODES:
+            out.write(f"      {name}\n")
 
-    out.write(f"  decisions {len(DECISION_AFTER)} wired here, of {len(DECISIONS)} declared\n")
-    for node, identifier in DECISION_AFTER.items():
-        out.write(f"    {identifier} after {node} -- {DECISIONS[identifier].question}\n")
-        targets = BRANCH_TARGETS[identifier]
-        width = max(len(answer) for answer in targets)
-        for answer, target in targets.items():
-            out.write(f"      {answer:<{width}} -> {target}\n")
+    out.write(f"  decisions {len(BRANCH_TARGETS)} wired here, of {len(DECISIONS)} declared\n")
+    for node, head in DECISION_AFTER.items():
+        chain = chain_from(head)
+        for identifier in chain:
+            out.write(f"    {identifier} {_asked(identifier, node, chain)}")
+            out.write(f" -- {DECISIONS[identifier].question}\n")
+            targets = BRANCH_TARGETS[identifier]
+            width = max(len(answer) for answer in targets)
+            for answer, target in targets.items():
+                out.write(f"      {answer:<{width}} -> {target}\n")
 
     out.write("  a node with no decision runs on to the next; every node also has an escalation\n")
     out.write(f"    edge to {END}, wired uniformly from the budget guard\n")

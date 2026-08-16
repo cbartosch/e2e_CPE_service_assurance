@@ -9,6 +9,18 @@ customer. That sweep is slow and is not repeated here; `test_the_self_help_fixtu
 _script` asserts the properties it depends on so a drift names the fixture instead of surfacing as
 six confusing failures about a missing session.
 
+Wiring the resolution fork changed what "reaches D11" is worth, and the sweep was re-run against the
+wired parent: `SVC-SJ-011-B-01` is still the only service that reaches this subgraph, and at the
+shipped `max_diagnostic_cycles` of 3 **it does not reach it either**. It answers D09 `remote` first,
+because both Wi-Fi settings options act without the customer and `first_actionable_option` offers
+them ahead of `send_self_help`; each costs a diagnostic cycle, and the guard refuses the third
+before `generate_resolution_options` can come round to the script. Raised to 6, the parent walks in
+and pauses at `mark_awaiting_customer` -- which is how the fork is known to be wired rather than
+merely declared. The bound is uniform across all three budgets in `graph.guards` and deliberate, so
+this is a tuning fact and not a defect to fix here; what it means for this module is that driving
+the branch through the parent is not available, and P11 is where the parent must be stopped. See
+`_parent_to_p11`.
+
 The same fixture is also the reason `resolved` is unreachable end to end, and that is the honest
 shape of this branch today rather than a gap in the tests. No adapter models the physical effect of
 a customer completing a step: the CPE simulator recovers a device for the actions *it* applies, and
@@ -51,7 +63,7 @@ from lpr_cpe.domain.enums import (
 )
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.domain.resolution import SelfHelpSession
-from lpr_cpe.graph.builder import compile_parent_graph
+from lpr_cpe.graph.builder import build_parent_graph
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.guards import ESCALATED
 from lpr_cpe.graph.nodes._runtime import derive_id
@@ -137,6 +149,28 @@ def _initial(service: dict[str, Any], incident_id: str, now: datetime = NOW) -> 
     )
 
 
+async def _parent_to_p11(initial: Any, ctx: Any, thread: str) -> Any:
+    """The parent, run for real and stopped the moment `generate_resolution_options` has run.
+
+    Stopping has to be asked for now, and did not before the resolution fork was wired. While D07's
+    answers all led to `END`, a plain `ainvoke` came back at P11 on its own and "parent to P11" cost
+    nothing to say. Wired, this service answers D07 `continue`, D08 `continue`, D09 `remote`, and the
+    parent goes on to spend both remote options, retry diagnosis after each, and escalate with
+    `diagnostic_cycles budget exhausted: observed 3, limit 3`. Handing *that* state to the subgraph
+    made `select_self_help_script`'s guard return `ESCALATED` on the first step, so the branch ran to
+    `END` without pausing and thirteen tests here failed as `assert () == ('await_customer_response',)`.
+
+    `interrupt_after` is therefore how P11 is named, and the checkpointer is what `interrupt_after`
+    requires rather than anything this module reads back.
+    """
+    parent = build_parent_graph().compile(
+        name="lpr_cpe_parent",
+        checkpointer=InMemorySaver(),
+        interrupt_after=["generate_resolution_options"],
+    )
+    return await parent.ainvoke(initial, context=ctx, config={"configurable": {"thread_id": thread}})
+
+
 async def _drive(fixtures: Any, incident_id: str, now: datetime = NOW) -> Any:
     """Parent to P11, then into the subgraph until it stops. Returns `(graph, ctx, config, state)`.
 
@@ -146,9 +180,8 @@ async def _drive(fixtures: Any, incident_id: str, now: datetime = NOW) -> Any:
     """
     service = fixtures.services[SELF_HELP_SERVICE]
     ctx = build_context(clock=_Ticking(now))  # type: ignore[arg-type]
-    parent_final = await compile_parent_graph().ainvoke(
-        _initial(service, incident_id, now), context=ctx
-    )
+    thread = f"parent-{incident_id}-{now.isoformat()}"
+    parent_final = await _parent_to_p11(_initial(service, incident_id, now), ctx, thread)
 
     graph = build_self_help_graph().compile(name="lpr_cpe_self_help", checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": f"self-help-{incident_id}-{now.isoformat()}"}}
@@ -181,7 +214,7 @@ async def test_the_self_help_fixture_still_offers_a_script(fixtures: Any) -> Non
     )
 
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
-    final = await compile_parent_graph().ainvoke(_initial(service, COMPLIED), context=ctx)
+    final = await _parent_to_p11(_initial(service, COMPLIED), ctx, f"control-{COMPLIED}")
 
     rca = final["rca"]
     assert rca.fault_domain is FaultDomain.CUSTOMER_ENVIRONMENT
