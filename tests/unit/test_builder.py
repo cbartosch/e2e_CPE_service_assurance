@@ -77,14 +77,14 @@ class _Ticking(FrozenClock):
         return self.advance(timedelta(seconds=3))
 
 
-def _initial(service: dict[str, Any]) -> Any:
+def _initial(service: dict[str, Any], *, case_type: CaseType = CaseType.PROACTIVE_ALARM) -> Any:
     return make_initial_state(
         incident_id=f"INC-{service['service_ref']}",
         correlation_id=f"COR-{service['service_ref']}",
         event=AssuranceEvent(
             event_id=f"EVT-{service['service_ref']}",
             source=EventSource.NXT,
-            case_type=CaseType.PROACTIVE_ALARM,
+            case_type=case_type,
             technology=Technology(service["technology"]),
             severity=Severity.HIGH,
             occurred_at=NOW - timedelta(minutes=6),
@@ -108,9 +108,16 @@ def _service(fixtures: Any, health: str) -> dict[str, Any]:
     return next(s for s in fixtures.services.values() if s["health"] == health)
 
 
-async def _run(service: dict[str, Any], **ctx_kwargs: Any) -> tuple[dict[str, Any], Any]:
+async def _run(
+    service: dict[str, Any],
+    *,
+    case_type: CaseType = CaseType.PROACTIVE_ALARM,
+    **ctx_kwargs: Any,
+) -> tuple[dict[str, Any], Any]:
     ctx = build_context(clock=_Ticking(NOW), **ctx_kwargs)  # type: ignore[arg-type]
-    final = await compile_parent_graph().ainvoke(_initial(service), context=ctx)
+    final = await compile_parent_graph().ainvoke(
+        _initial(service, case_type=case_type), context=ctx
+    )
     return final, ctx
 
 
@@ -384,6 +391,57 @@ async def test_a_power_cut_is_diagnosed_rather_than_sent_to_data_quality_review(
         "the power plan is no longer exactly [notify_customer, raise_mr]; somebody still has to "
         "tell the customer why, and the two gap notes quote this set"
     )
+
+
+#: A service that is mildly off and that correlation finds no peers for -- the shape a predictive
+#: case actually has. Named by ref rather than found by health label because `_service` returns the
+#: first match, and the first `hfc_healthy` fixture sits behind the degraded SJ-011-A tap with five
+#: correlated peers: healthy itself, and an active case however it is filed.
+QUIET_SERVICE = "SVC-PO-042-A-04"
+
+
+async def test_a_predictive_case_on_a_quiet_service_actually_reaches_the_preventive_arm(
+    fixtures: Any,
+) -> None:
+    """D04's `preventive` arm is reachable from a real intake run, and this is what proves it.
+
+    `test_routing` asks the router directly, on a state assembled by hand. That is what let the
+    original fault survive: the state it asked about -- an assessment with
+    `affected_customer_count == 0` -- is one the pipeline cannot produce. `blast_radius.size_of`
+    floors a single-premises radius at `count=1, measured=True`, P05 always runs before D04 and
+    always returns an assessment, so the old `> 0` test was satisfied by the subject alone. Every
+    one of the 41 fixture services, filed as `PREDICTIVE_MAINTENANCE`, came out `active`. The unit
+    test was green throughout.
+
+    So this one runs the compiled graph and reads which nodes were entered. `escalated is False`
+    matters as much as the arm itself: the guard also stops a run short, and without it a budget
+    escalation at P05 would look exactly like the branch being taken.
+
+    Shown red by restoring `route_predictive_or_active`'s original `affected_customer_count > 0`::
+
+        AssertionError: a predictive case with no correlated peers walked on into incident
+        creation; D04's preventive arm is unreachable again
+        assert 'create_or_attach_incident' not in {'assemble_case_evidence': 1,
+        'assess_impact_and_priority': 1, 'create_diagnostic_test_plan': 1,
+        'create_or_attach_incident': 1, ...}
+
+    It stays green under `> 1`, which is the point of the companion assertion in `test_routing`:
+    the two tests fail for different reasons and neither covers the other.
+    """
+    quiet = fixtures.services[QUIET_SERVICE]
+
+    preventive, _ = await _run(quiet, case_type=CaseType.PREDICTIVE_MAINTENANCE)
+    assert preventive["escalated"] is False, "stopped by the guard, which is not the branch"
+    assert preventive["node_visits"]["assess_impact_and_priority"] == 1
+    assert "create_or_attach_incident" not in preventive["node_visits"], (
+        "a predictive case with no correlated peers walked on into incident creation; D04's "
+        "preventive arm is unreachable again"
+    )
+
+    # The same service, same fixtures, filed as an alarm: the other arm, so the assertion above is
+    # about the case type and not about this service being unable to get past P05 at all.
+    active, _ = await _run(quiet, case_type=CaseType.PROACTIVE_ALARM)
+    assert active["node_visits"]["create_or_attach_incident"] == 1
 
 
 # ------------------------------------------------------------------------------------------------

@@ -132,8 +132,18 @@ def _topology(**overrides: Any) -> TopologyContext:
     return TopologyContext(**base)
 
 
-def _impact(count: int) -> ImpactAssessment:
-    return ImpactAssessment(assessed_at=AT, affected_customer_count=count, count_is_estimated=False)
+def _impact(count: int, *refs: str) -> ImpactAssessment:
+    """An assessment whose population and whose *observed* set are supplied independently.
+
+    Two arguments because D04 is the decision that turns on which of the two it reads, and a helper
+    that derived one from the other would make the distinction untestable.
+    """
+    return ImpactAssessment(
+        assessed_at=AT,
+        affected_customer_count=count,
+        count_is_estimated=False,
+        affected_service_refs=list(refs),
+    )
 
 
 def _rca(confidence: float = 0.9) -> RCAResult:
@@ -717,19 +727,59 @@ def test_a_subscriber_case_needs_a_delimiter_and_a_network_alarm_does_not() -> N
 
 
 def test_a_predictive_case_with_live_customers_is_an_incident() -> None:
-    """D04's override runs one way. Impact assessment promotes; nothing demotes."""
-    promoted = _state(case_type=CaseType.PREDICTIVE_MAINTENANCE, impact=_impact(12))
+    """D04's override runs one way. Correlation promotes; nothing demotes."""
+    promoted = _state(
+        case_type=CaseType.PREDICTIVE_MAINTENANCE,
+        service_ref="SVC-1",
+        impact=_impact(12, "SVC-1", "SVC-2"),
+    )
     assert DECISIONS["D04"].route(promoted) == "active"
 
-    still_predictive = _state(case_type=CaseType.PREDICTIVE_MAINTENANCE, impact=_impact(0))
-    assert DECISIONS["D04"].route(still_predictive) == "preventive"
+    alone = _state(
+        case_type=CaseType.PREDICTIVE_MAINTENANCE,
+        service_ref="SVC-1",
+        impact=_impact(1, "SVC-1"),
+    )
+    assert DECISIONS["D04"].route(alone) == "preventive"
 
     reported_with_no_measured_impact = _state(
-        case_type=CaseType.CUSTOMER_REPORTED, impact=_impact(0)
+        case_type=CaseType.CUSTOMER_REPORTED, service_ref="SVC-1", impact=_impact(1, "SVC-1")
     )
     assert DECISIONS["D04"].route(reported_with_no_measured_impact) == "active", (
         "a customer on the phone is an active incident whatever the blast radius says"
     )
+
+
+def test_a_predictive_case_is_not_promoted_by_a_population_nobody_observed() -> None:
+    """The population and the observed set are different quantities, and D04 reads the second.
+
+    A tap the pack sizes at 8 with only the subject seen is one forecast about one premises, and
+    the 8 is `blast_radius.size_of`'s default for a delimiter whose homes-behind count is missing
+    from plant records -- a number about record-keeping, not about customers in trouble. Reading
+    the population here promotes that forecast to an outage on the strength of a default.
+
+    This is the assertion that would have caught the original fault. `affected_customer_count` was
+    floored at 1 by the single-premises basis "the fault is at this premises, so one service is
+    affected", so `> 0` was true of every case that ever reached D04 and `preventive` was
+    unreachable -- 41 of 41 fixture services filed as predictive came out `active`. Both the old
+    threshold and the obvious repair, `> 1`, fail here; only the observed set answers it.
+
+    Shown red by pointing the router at `affected_customer_count > 1`, the repair that looks
+    sufficient and is not::
+
+        AssertionError: assert 'active' == 'preventive'
+        - preventive
+        + active
+
+    The compiled-graph test in `test_builder` stays green under that same revert, because on every
+    fixture the count and the observed set happen to agree. This is the case that separates them.
+    """
+    sized_but_unobserved = _state(
+        case_type=CaseType.PREDICTIVE_MAINTENANCE,
+        service_ref="SVC-1",
+        impact=_impact(8, "SVC-1"),
+    )
+    assert DECISIONS["D04"].route(sized_but_unobserved) == "preventive"
 
 
 # ------------------------------------------------------------------------------------------------

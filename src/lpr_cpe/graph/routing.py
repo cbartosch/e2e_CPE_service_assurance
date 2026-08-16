@@ -343,15 +343,41 @@ def route_correlation(state: IncidentState) -> Literal["associate", "continue"]:
 def route_predictive_or_active(state: IncidentState) -> Literal["preventive", "active"]:
     """D04. A predictive case with live impact is an incident, whatever it was filed as.
 
-    The override runs one way only. Impact assessment finding affected customers promotes a
-    predictive case to the active path; nothing demotes an active case to preventive, because the
-    cost of being wrong is a customer left in a maintenance queue during an outage.
+    The override runs one way only. Correlation finding *other* services with the same symptom
+    promotes a predictive case to the active path; nothing demotes an active case to preventive,
+    because the cost of being wrong is a customer left in a maintenance queue during an outage.
+
+    What it reads is `affected_service_refs` -- the services correlation actually observed -- minus
+    the subject. It used to read `affected_customer_count > 0`, and that made `preventive`
+    unreachable: measured over the simulator, all 41 fixture services filed as
+    `PREDICTIVE_MAINTENANCE` came out `active`. `blast_radius.size_of` floors a single-premises
+    radius at `count=1, measured=True` with the basis "the fault is at this premises, so one
+    service is affected", P05 always precedes D04 and always returns an assessment, so the subject
+    alone satisfied `> 0` and the arm could never be answered. A branch that cannot be taken is the
+    same fault as a bound that cannot fire: it reads like a path exists.
+
+    `count > 1` would answer this correctly *today* and is still the wrong field. P05 runs once and
+    before P10, so `fault_domain` is `UNKNOWN`, `scope_for_fault_domain` falls through to
+    `SINGLE_PREMISES` and the count is exactly the observed set -- the two spellings agree on all
+    41, checked. They part the moment P05 sees a known fault domain: at `TAP_OR_ODP` the count
+    becomes the pack's tap default of 8, and a forecast would be promoted to an outage by a default
+    with nothing behind it. `affected_service_refs` is the one field on the assessment that is
+    observed by construction rather than sized, which is why the question is asked of it.
+
+    Note what this cannot know. Every detector runs at P07 or later, so `anomaly_findings` is empty
+    here and no reading of *this* subject's current health exists at D04 at all. The question the
+    specification asks -- risk, or active impact? -- is therefore answered from corroboration only,
+    and a predictive case whose own premises is already down stays preventive. The preventive stage
+    is what has to notice and link, which is what "keep it linked to any later service incident"
+    is for.
     """
     if state.get("case_type") not in PREVENTIVE_CASE_TYPES:
         return "active"
     impact = state.get("impact")
-    if impact is not None and impact.affected_customer_count > 0:
-        return "active"
+    if impact is not None:
+        others = set(impact.affected_service_refs) - {state.get("service_ref") or ""}
+        if others:
+            return "active"
     return "preventive"
 
 
