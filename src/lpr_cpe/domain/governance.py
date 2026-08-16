@@ -315,12 +315,11 @@ class KPIEvent(FrozenDomainModel):
     the member intact, so `is` holds and a reader gets a `KPIName` rather than a string that merely
     equals one.
 
-    It does *not*, on its own, put a mistyped name in front of mypy at the construction site.
-    `pydantic.mypy` is loaded but `init_typed` is unset, so the synthesised `__init__` takes `Any`
-    per field and `kpi_name="self_help_sucess_rate"` type-checks clean. Measured: with
-    `init_typed = true` under `[tool.pydantic-mypy]` that typo becomes `Argument "kpi_name" to
-    "KPIEvent" has incompatible type "str"; expected "KPIName"`, and the tree passes unchanged --
-    98 files, no new errors. Turning it on is a decision about every model here, not just this one.
+    On its own that would not put a mistyped name in front of mypy at the *construction site*:
+    the plugin synthesises `__init__` taking `Any` per field unless told otherwise, and
+    `kpi_name="self_help_sucess_rate"` then type-checks clean. `init_typed = true` under
+    `[tool.pydantic-mypy]` is what closes that half, and it is now set -- the typo reports
+    `Argument "kpi_name" to "KPIEvent" has incompatible type "str"; expected "KPIName"`.
     """
 
     event_id: str

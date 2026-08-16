@@ -21,7 +21,7 @@ both through the same action and assert they diverge.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
 
@@ -261,6 +261,21 @@ async def test_an_action_the_gate_refuses_does_not_recover_anything(fixtures: An
 # ------------------------------------------------------------------------------------------------
 
 
+class _CommonAction(TypedDict):
+    """Typed so that `**common` below is *checked* rather than merely accepted.
+
+    A plain dict literal joins these five value types to `object`, and mypy cannot verify a
+    `**dict[str, object]` unpack against any field -- so under `init_typed` every field of
+    `RemoteAction` reports, and a genuinely wrong value here would report no differently.
+    """
+
+    action_id: str
+    action_type: ActionType
+    target_ref: str
+    idempotency_key: str
+    requested_at: datetime
+
+
 def test_a_simulated_action_can_still_be_a_restoration_once_it_is_verified() -> None:
     """`fixed_it` admits `SIMULATED`, and still insists on the verification.
 
@@ -269,7 +284,7 @@ def test_a_simulated_action_can_still_be_a_restoration_once_it_is_verified() -> 
     verification requirement would close incidents on actions nobody checked, which is the failure
     the property was written for. The third case below is the one that keeps the pair honest.
     """
-    common = {
+    common: _CommonAction = {
         "action_id": "ACT-1",
         "action_type": ActionType.CPE_REBOOT,
         "target_ref": WEDGED,
