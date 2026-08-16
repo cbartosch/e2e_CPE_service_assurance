@@ -846,9 +846,11 @@ async def test_a_blocked_send_is_not_counted_as_a_failed_self_help(fixtures: Any
 
     # The positive control goes first, and shares the comparison. This assertion is a negative one,
     # so a filter that matches nothing passes it while proving nothing -- which is not hypothetical:
-    # these were written as `e.kpi_name is KPIName.X`, and `KPIEvent.kpi_name` is declared `str`, so
-    # pydantic hands back a plain `str` and the identity is never true. The presence check failed
-    # loudly and named the mistake; had only the absence check existed it would have stayed green.
+    # these were written as `e.kpi_name is KPIName.X` while `KPIEvent.kpi_name` was declared `str`,
+    # so pydantic handed back a plain `str` and the identity was never true. The presence check
+    # failed loudly and named the mistake; had only the absence check existed it would have stayed
+    # green. The field is a `KPIName` now, which removes the trap -- but the control stays: it costs
+    # one assertion and it is what makes the absence check below mean something.
     assert named(KPIName.POLICY_BLOCK_RATE), (
         "the block itself is what this incident has to show for the branch -- and if this is empty, "
         "the absence check below is measuring a broken filter rather than the node's behaviour"

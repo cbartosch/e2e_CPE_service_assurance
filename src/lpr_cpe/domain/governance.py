@@ -312,8 +312,15 @@ class KPIEvent(FrozenDomainModel):
     fails. A *presence* filter written that way fails loudly; the absence filter beside it
     (`assert not [e for e in events if e.kpi_name is KPIName.X]`) passes vacuously and goes on
     proving nothing forever. That happened, in the self-help subgraph tests. Typing the field keeps
-    the member intact so `is` holds, and puts a mistyped KPI name in front of mypy at the call site
-    instead of letting it survive as a string nothing compares equal to.
+    the member intact, so `is` holds and a reader gets a `KPIName` rather than a string that merely
+    equals one.
+
+    It does *not*, on its own, put a mistyped name in front of mypy at the construction site.
+    `pydantic.mypy` is loaded but `init_typed` is unset, so the synthesised `__init__` takes `Any`
+    per field and `kpi_name="self_help_sucess_rate"` type-checks clean. Measured: with
+    `init_typed = true` under `[tool.pydantic-mypy]` that typo becomes `Argument "kpi_name" to
+    "KPIEvent" has incompatible type "str"; expected "KPIName"`, and the tree passes unchanged --
+    98 files, no new errors. Turning it on is a decision about every model here, not just this one.
     """
 
     event_id: str
