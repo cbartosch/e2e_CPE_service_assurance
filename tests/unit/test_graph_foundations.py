@@ -226,14 +226,22 @@ def test_a_per_node_override_can_tighten_or_loosen_the_reentry_bound() -> None:
 
 
 def test_escalation_names_the_bound_that_fired_and_where_to_read_it(ctx: GraphContext) -> None:
-    """ "Escalated: loop limit" without the limit is a page nobody can act on."""
-    verdict = check_budgets(_state(diagnostic_cycles=3), ctx, node="diagnose")
-    update = escalation_update(_state(diagnostic_cycles=3), ctx, verdict, node="diagnose")
+    """ "Escalated: loop limit" without the limit is a page nobody can act on.
+
+    The count comes off `ctx` rather than being written here, for the reason `_limit_of` gives one
+    screen up: a literal is a second copy of `settings.max_diagnostic_cycles` that goes stale in
+    silence. This one did. Raising the default from 3 to 6, so the resolution fork could be reached
+    at all, left this state comfortably *inside* the budget -- and the break surfaced as
+    `escalation_update` refusing a passing verdict, which says nothing about the number that moved.
+    """
+    cycles = ctx.max_diagnostic_cycles
+    verdict = check_budgets(_state(diagnostic_cycles=cycles), ctx, node="diagnose")
+    update = escalation_update(_state(diagnostic_cycles=cycles), ctx, verdict, node="diagnose")
     assert update["escalated"] is True
     assert update["status"] is IncidentStatus.ESCALATED
     event = update["audit_events"][0]
     assert event.detail["budget"] == BudgetKind.DIAGNOSTIC_CYCLES
-    assert event.detail["limit"] == 3
+    assert event.detail["limit"] == cycles
     assert event.detail["owner"] == "settings.max_diagnostic_cycles"
     assert event.policy_version == ctx.policy.policy_version
 
@@ -247,7 +255,7 @@ def test_escalating_twice_records_one_event_because_the_id_is_derived_not_minted
     `uuid4` here would defeat it. The contrast case is the point: a *different* bound is a different
     escalation and must keep its own id.
     """
-    state = _state(diagnostic_cycles=3)
+    state = _state(diagnostic_cycles=ctx.max_diagnostic_cycles)
     verdict = check_budgets(state, ctx, node="diagnose")
     first = escalation_update(state, ctx, verdict, node="diagnose")["audit_events"][0]
     second = escalation_update(state, ctx, verdict, node="diagnose")["audit_events"][0]

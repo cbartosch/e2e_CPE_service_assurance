@@ -10,16 +10,18 @@ _script` asserts the properties it depends on so a drift names the fixture inste
 six confusing failures about a missing session.
 
 Wiring the resolution fork changed what "reaches D11" is worth, and the sweep was re-run against the
-wired parent: `SVC-SJ-011-B-01` is still the only service that reaches this subgraph, and at the
-shipped `max_diagnostic_cycles` of 3 **it does not reach it either**. It answers D09 `remote` first,
-because both Wi-Fi settings options act without the customer and `first_actionable_option` offers
-them ahead of `send_self_help`; each costs a diagnostic cycle, and the guard refuses the third
-before `generate_resolution_options` can come round to the script. Raised to 6, the parent walks in
-and pauses at `mark_awaiting_customer` -- which is how the fork is known to be wired rather than
-merely declared. The bound is uniform across all three budgets in `graph.guards` and deliberate, so
-this is a tuning fact and not a defect to fix here; what it means for this module is that driving
-the branch through the parent is not available, and P11 is where the parent must be stopped. See
-`_parent_to_p11`.
+wired parent: `SVC-SJ-011-B-01` is still the only service that reaches this subgraph. It answers
+D09 `remote` first, because both Wi-Fi settings options act without the customer and
+`first_actionable_option` offers them ahead of `send_self_help`, so two diagnostic cycles are spent
+before the script is even proposed. At the `max_diagnostic_cycles` of 3 that shipped with the fork
+the guard refused the third pass and this branch was unreachable end to end; the setting is now 6,
+derived in `config.settings` from the largest plan the fixture set produces rather than from this
+one service. `test_the_shipped_cycle_budget_admits_the_self_help_branch` is what holds it there.
+
+Reachable is not the same as convenient, and this module still drives the subgraph from P11. Going
+through the parent costs three diagnostic cycles and two spent remote actions before the first
+self-help node runs, and every test below would inherit that state -- so the branch would be
+exercised only in the one condition the parent happens to deliver it in. See `_parent_to_p11`.
 
 The same fixture is also the reason `resolved` is unreachable end to end, and that is the honest
 shape of this branch today rather than a gap in the tests. No adapter models the physical effect of
@@ -46,6 +48,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
+from lpr_cpe.config import get_settings
 from lpr_cpe.config.clock import FrozenClock
 from lpr_cpe.domain.enums import (
     ActionType,
@@ -63,7 +66,7 @@ from lpr_cpe.domain.enums import (
 )
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.domain.resolution import SelfHelpSession
-from lpr_cpe.graph.builder import build_parent_graph
+from lpr_cpe.graph.builder import build_parent_graph, compile_parent_graph
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.guards import ESCALATED
 from lpr_cpe.graph.nodes._runtime import derive_id
@@ -233,6 +236,52 @@ async def test_the_self_help_fixture_still_offers_a_script(fixtures: Any) -> Non
     assert device["online"] is True, (
         "an offline gateway here would make `reachability_verdict` able to return True and the "
         "module docstring's account of why `resolved` is unreachable would be wrong"
+    )
+
+
+async def test_the_shipped_cycle_budget_admits_the_self_help_branch(fixtures: Any) -> None:
+    """The parent must actually be able to get here on the settings the process ships with.
+
+    This is the only test that runs the fork end to end, and it exists because the alternative is
+    invisible: a `max_diagnostic_cycles` one too low leaves the subgraph wired, compiled, checked by
+    `_check_tables`, reported by `lpr-cpe topology` and reachable in exactly no run. Nothing else in
+    the suite would have noticed -- every other test here enters the branch from P11, and the
+    builder's tests asserts the edge exists rather than that anything traverses it.
+
+    Read through `get_settings()` rather than parametrised over budgets, because the claim is about
+    the shipped number and a test that supplied its own would prove the graph works at *some*
+    setting, which was never in doubt.
+
+    Seen to go red at the previous default of 3::
+
+        AssertionError: the parent never entered the self_help subgraph on the shipped
+        settings.max_diagnostic_cycles of 3; it spends a cycle per resolution option and this
+        service is offered two remote ones first
+        assert 'self_help' in {'remote_resolution'}
+
+    Two remote options are asserted alongside, because they are *why* three was not enough and a
+    catalogue change that dropped one would make the budget look more generous than it is.
+    """
+    entered: set[str] = set()
+    ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+    async for namespace, _update in compile_parent_graph().astream(
+        _initial(fixtures.services[SELF_HELP_SERVICE], COMPLIED),
+        context=ctx,
+        stream_mode="updates",
+        subgraphs=True,
+    ):
+        if namespace:
+            entered.add(namespace[0].split(":")[0])
+
+    budget = get_settings().max_diagnostic_cycles
+    assert "self_help" in entered, (
+        f"the parent never entered the self_help subgraph on the shipped "
+        f"settings.max_diagnostic_cycles of {budget}; it spends a cycle per resolution option and "
+        "this service is offered two remote ones first"
+    )
+    assert "remote_resolution" in entered, (
+        "the remote branch is supposed to be tried and exhausted before the customer is asked to "
+        "do anything; reaching self-help without it means D09 stopped preferring a remote repair"
     )
 
 

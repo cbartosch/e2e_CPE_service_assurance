@@ -110,7 +110,16 @@ class Settings(BaseSettings):
     # max-loop protection; putting the number here rather than in the graph means the scenario
     # tests can lower it to prove the protection fires instead of waiting for 60 real iterations.
     max_graph_steps: int = Field(default=60, ge=4)
-    max_diagnostic_cycles: int = Field(default=3, ge=1)
+    # One pass through P07 is one cycle, counted on entry, and the guard refuses the pass that
+    # would *reach* the limit -- so N permits N-1 complete cycles. That arithmetic became
+    # load-bearing when the resolution fork was wired, because D10 and D12 spend a whole cycle to
+    # reach the next resolution option: a plan of k options needs k complete passes to be worked
+    # through. At 3 nothing could be tried twice, and measured over all 41 simulation services the
+    # self-help branch was unreachable end to end -- the one service that offers a script spends
+    # two cycles on the Wi-Fi settings options that are offered ahead of it. The largest plan any
+    # fixture produces holds five options, so 6 is the first value that lets a plan be exhausted
+    # rather than truncated. Higher buys nothing and costs the bound.
+    max_diagnostic_cycles: int = Field(default=6, ge=1)
 
     @field_validator("log_level")
     @classmethod
