@@ -299,16 +299,28 @@ decision is still worth recording here: it is what the Protocol has to be shaped
 ## 5. Status
 
 "Done" below means the code exists **and** something ran against it, not that it was written.
-Measured on **2026-08-16**: `ruff check src tests` passes, `ruff format --check` reports 116 files
-already formatted, `mypy --strict src/lpr_cpe` reports no issues in **99** source files, and
-`pytest` collects and passes **768** tests at **80.96%** line coverage.
+Measured on **2026-08-17**, after Stage 4 landed: `ruff check src tests` passes, `ruff format
+--check src tests` passes at **122 files already formatted**, `mypy --strict src/lpr_cpe` reports no
+issues in **102** source files, and `pytest` collects and passes **839** tests at **82.65%** line
+coverage. `make lint` therefore passes, which it did not earlier the same day.
+
+That format failure is worth keeping a line for rather than deleting, because of what it turned out
+to be. Under ruff 0.16.3 five committed files were reported as **would be reformatted** —
+`graph/subgraphs/field_planning.py`, `graph/subgraphs/preventive_maintenance.py`,
+`tests/unit/test_builder.py`, `tests/unit/test_subgraph_preventive_maintenance.py` and
+`tests/unit/test_subgraph_self_help.py`. The question that mattered was whether the pin had drifted,
+because that decides between "reformat the code" and "pin ruff": `pyproject.toml` asks for
+`ruff>=0.9`, an open upper bound, so a formatter change between 0.9 and 0.16.3 would have made the
+five files a version artefact rather than a defect. Measured across the intervening releases the
+formatting of those five is stable, so it was the code, and reformatting was the fix.
 
 Run twice, in `.venv` and in the system interpreter, because they are **not the same environment**
 and it is easy to check the wrong one: `make` uses `.venv` — which is where §2's version table was
 resolved and the only one with the `optimizer` extra installed — while a bare `python -m pytest`
 from the repository root uses the system interpreter, where `ortools` is absent and `pydantic`,
-`fastapi` and `psycopg` are each a patch behind. All four numbers above are identical in both, so
-nothing here depends on which is used; §2's versions do, and it says so.
+`fastapi` and `psycopg` are each a patch behind. Every number above is identical in both — the
+format failure was, while it lasted, and the 122 files and 102 source files are — so nothing here
+depends on which is used; §2's versions do, and it says so.
 
 The previous revision of this section claimed the same for 86 files, and it was **wrong**: mypy was
 reporting two errors in `persistence/checkpointer.py` at the moment `a38fdd1` was committed, and
@@ -321,7 +333,7 @@ That discipline is necessary and it is **not sufficient**, which the same number
 demonstrate. 98 and 758 were both correct when written and were both stale within the day — the
 tree moved, and nothing re-read them, because no gate in this repository can. A number in prose has
 no expiry and nothing watches it, so treat every count in this section as a measurement dated
-2026-08-16 rather than as a fact, and re-run the three commands before quoting one. Gap 7 in §6 is
+2026-08-17 rather than as a fact, and re-run the four commands before quoting one. Gap 7 in §6 is
 the general form of this.
 
 Where a row says *mutation-checked*, it means every regression assertion was verified by reinstating
@@ -395,11 +407,15 @@ tell the two apart.** Both modules now assert on the KPIs they emit, and reverti
 call turns one of those assertions red.
 
 Writing those assertions produced the sweep's second finding, in the new tests rather than the
-source. `KPIEvent.kpi_name` is declared `str`, so pydantic coerces the `KPIName` member to a plain
-`str` and `e.kpi_name is KPIName.X` is **never true** — every such filter matched nothing. The two
-*presence* assertions failed loudly and named the mistake; the *absence* assertion sitting beside
-them passed, and would have gone on passing forever while proving nothing. It now runs a positive
-control through the same comparison first, so a broken filter fails the test that depends on it.
+source. `KPIEvent.kpi_name` was declared `str` at the time, so pydantic coerced the `KPIName` member
+down to a plain `str` and `e.kpi_name is KPIName.X` was **never true** — every such filter matched
+nothing. The two *presence* assertions failed loudly and named the mistake; the *absence* assertion
+sitting beside them passed, and would have gone on passing forever while proving nothing. Two things
+changed in response. The field is now declared `KPIName` — the coercion was removed in `0f59e4b`,
+and `KPIEvent.model_fields["kpi_name"].annotation` is `<enum 'KPIName'>` today — and the absence
+assertion now runs a positive control through the same comparison first, so a broken filter fails
+the test that depends on it. The declaration is the fix; the positive control is what stops the next
+silent filter, whatever causes it.
 
 | Area | State | How it was checked |
 | --- | --- | --- |
@@ -422,15 +438,17 @@ control through the same comparison first, so a broken filter fails the test tha
 | `graph/routing.py` — the 24 decision points | done | 233 committed tests, mutation-checked 46/46; 6 of the first sweep's 48 survived — 4 real gaps, 1 dead branch since removed, 1 provably equivalent; every question string is parsed out of `docs/specification.md` rather than copied, and each router's `Literal` return type is compared against its declared `branches` |
 | `graph/nodes/` P01–P11 + `graph/builder.py` — the parent to the resolution fork | done | 8 + 20 committed tests; a registry guard asserts every declared node is wired; the offline-CPE blocking-flag defect (CPE-7) was found by running it |
 | `graph/subgraphs/remote_resolution.py` — P12, D10, the high-risk approval interrupt | done | 18 committed tests; mutation-checked 9/9 in the original sweep and 2/2 again when the KPI assertions were added; driven through the real parent graph rather than a hand-built plan |
-| `graph/subgraphs/self_help.py` — P13–P15, D11/D12, the customer-response interrupt | done | 22 committed tests, mutation-checked 11/11; three KPI defects found by execution (below) |
-| `graph` parent past P11 + the remaining 6 subgraphs | **in progress** | field planning, dispatch, closure, escalation, comms and reconciliation are not written; D07/D08/D09/D11 are routed but not yet wired to subgraph nodes |
+| `graph/subgraphs/self_help.py` — P13 and D12, the customer-response interrupt | done | 22 committed tests, mutation-checked 11/11; three KPI defects found by execution (below) |
+| `graph/subgraphs/field_planning.py` — P14, D13, P15, D14, D15, P16 | done | 20 committed tests; the joint incident driven from the real parent, which since the fork was wired runs into this subgraph by itself — the fixture passes `interrupt_after=["generate_resolution_options"]` to stop it. `is_field_option` was measured wrong for 16 of 50 arrivals and `is_dispatchable_option` written to narrow it |
+| `graph/subgraphs/field_execution.py` — P17, D16, D17, P18, D18, P19, P20 | done | 12 committed tests, mutation-checked 10/10. Driven from the real parent through `interrupt_after=["field_planning"]`, so the arriving state is one the graph actually produces. Two constraints were found by execution rather than reasoned about: the handover-gate router is wired on **two** edges and a state where both answer alike cannot tell a mis-wire from a correct wiring, so that test drives a discriminating pair; and `_Ticking` advances on every read of `local_time`, so a context shared across drives makes a later verdict depend on how many nodes an earlier drive ran — each drive builds its own. The stage's headline finding is that **no fixture reaches its own handover chain**: a contract is incomplete until something is ruled out, no first-cycle RCA rejects a hypothesis, so D18 onwards is unreachable end to end and the tests that cover it seed a rejection to get there. That is gap EXEC-1 in `docs/vendor-integration-gaps.md`, and a test asserts the emptiness rather than leaving it implied |
+| `graph` parent past P11 + the remaining 5 subgraphs | **in progress** | field planning and field execution are both written and wired — `SUBGRAPH_NODES` now holds five entries, and `SUBGRAPH_SUCCESSOR` carries `field_planning → field_execution`, which is why field planning's own exits are no longer a gap. Dispatch, closure, escalation, comms and reconciliation are not written. D09 and D11 route to subgraph nodes on every answer; D06, D07 and D08 do not — `approve_low_confidence`, `approve_high_blast_radius`, `escalate` and `plant_path` still reach `END`, as do both `verify` answers. Field execution and preventive maintenance are the two *terminal* subgraphs and one further entry each: field execution answers D16, D17 and D18 internally, but its three exits stop for three different reasons — `file_plant_mr` on P21's plant wait, `close_clean_boots_visit` on Stage 5 from P22, and `abandon_handover` on no missing stage at all but on a back-edge to P07 or P10 that the specification defines no decision for. `PENDING_STAGES` names all 8 such exits and `_check_pending_stages` fails the build in both directions |
 | `persistence` checkpointer + serde | done | 14 committed tests, each paired with a control that fails; lazy Postgres import checked in a clean subprocess; the Postgres branch driven without a database and the shipped defect reinstated to watch it fail |
 | `persistence` outbox + migrations | **pending** | — |
 | `api` | **pending** | `src/lpr_cpe/api/` does not exist. `make serve` names the gap and exits non-zero rather than importing it |
 | model provider + deterministic fake | **pending** | no module in `src/` calls a model provider. `ModelProvider` is an enum in `config.settings` with nothing behind it, so the `anthropic` extra changes nothing and D7 above describes an intent, not a running path |
 | `cli.py` + `[project.scripts]` | done | 6 committed tests, each watched red. The declaration shipped naming a module that was never written; the guard reads `[project.scripts]` out of `pyproject.toml` and imports what it names, so it covers a second entry point without being extended |
-| tests | 768 passing | unit only; no integration, contract or scenario tests yet, and none of the 17 required scenarios exist |
-| coverage | **80.96%**, gate is 85% | measured 2026-08-16, so `make test` and `make check` fail today; `make test-fast` is the target that runs green |
+| tests | 839 passing | unit only; no integration, contract or scenario tests yet, and none of the 17 required scenarios exist |
+| coverage | **82.65%**, gate is 85% | measured 2026-08-17 after Stage 4 landed, so `make test` and `make check` fail today; `make test-fast` is the target that runs green |
 | docs + diagrams | 1 of 9 documents, 0 of 10 diagrams | `docs/vendor-integration-gaps.md` only. `docs/specification.md` is the vendored input, not a deliverable. The other eight documents and every Mermaid diagram the specification requires are unwritten |
 | demo | **pending** | the seven scenarios are unwritten. `make demo` names the gap and exits non-zero rather than invoking a subcommand `cli.py` deliberately does not define |
 | CI | **none exists** | no `.github/`, GitLab, Azure, CircleCI, tox, nox or pre-commit configuration is tracked. Every gate in this repository is manual |
@@ -441,21 +459,43 @@ A gap named here is a gap acknowledged. An empty section at the end of a pass th
 least believable part of the document.
 
 1. **The committed suite is unit-only, and the coverage gate is unmet.** Every row marked *done* in
-   §5 now rests on committed tests rather than on a throwaway script, but all 768 are unit tests.
+   §5 now rests on committed tests rather than on a throwaway script, but all 839 are unit tests.
    There are no integration, contract or scenario tests and none of the 17 required scenarios exist.
    Coverage **has** now been measured against the 85% bar — an earlier revision of this gap said it
-   had not — and it is **80.96%**, so `make test` and `make check` fail today. Four points is a
-   small-sounding shortfall, and the aggregate is the least informative thing about it, because the
+   had not — and it is **82.65%**, so `make test` and `make check` fail today. The 2.35-point
+   shortfall sounds small, and the aggregate is the least informative thing about it, because the
    uncovered lines are not spread evenly. They concentrate in exactly the cross-cutting modules the
    unit tests aim past: `security/redaction.py` at 18% and `security/injection.py` at 34% — the two
-   whose job is keeping customer data out of logs and prompts — `observability/tracing.py` at 25%
-   and `logging.py` at 26%, and the write-side simulators, `wfm` at 16% and `jtrack` at 25%, which
-   are the ones a dispatch would actually go through. Raising the number is therefore the wrong
-   objective; those seven modules are the work, and a scenario test that ran one incident end to
-   end would reach most of them at once. The two resolution subgraphs are driven through the real
-   parent graph from intake onwards, so those paths are end-to-end in everything but name — but the
-   graph still stops at the resolution fork, so there is no *incident* that runs from event to
-   closure.
+   whose job is keeping customer data out of logs and prompts — and `observability/tracing.py` at
+   25% with `logging.py` at 26%.
+
+   Two entries have left that list, and both left it the same way, which is the useful part. `wfm`
+   was at 16% and is at **62%**: the field branch arriving, because a dispatch really does go
+   through it and something now drives one. `jtrack/simulator.py` was at **25%** and is at **33%**,
+   and those eight points are Stage 4 filing an MR — measured, not attributed, by re-running the
+   suite with `--ignore=tests/unit/test_subgraph_field_execution.py`, which puts jtrack back at 25%
+   and the total back to **79.72%**. So twelve tests are worth 2.93 points of the aggregate, which
+   is the clearest thing this section can say about what the remaining shortfall costs: it is not
+   2.35 points of tidying, it is roughly one more stage driven end to end. Neither module moved
+   because anybody set out to raise coverage, and that is the point. Raising the number is the wrong
+   objective; those modules are the work, and a scenario test that ran one incident end to end would
+   reach most of them at once — as writing the stage that files an MR just did, for jtrack, without
+   trying to.
+
+   The two resolution subgraphs are driven through the real parent graph from intake onwards, so
+   those paths are end-to-end in everything but name, and the field branch has joined them for two
+   stages rather than one. D11's and D12's `field_planning` answers reach a written subgraph, the
+   parent runs straight into it, and `SUBGRAPH_SUCCESSOR` now carries it on into field execution.
+   That is why `test_subgraph_field_planning.py` stops the parent with
+   `interrupt_after=["generate_resolution_options"]` and `test_subgraph_field_execution.py` stops it
+   with `interrupt_after=["field_planning"]` — each at its own seam, each driving on from the state
+   the parent actually produced rather than one assembled by hand. That is still not closure. A work
+   order is booked, a technician is briefed, evidence comes back, a delimiter is fixed and an MR is
+   filed — and then it stops, because the MR never leaves `submitted` (gap EXEC-2 in
+   `docs/vendor-integration-gaps.md`), so P21's
+   plant-repair wait is unwritten and Stage 5 from P22 behind it. So there is still no *incident*
+   that runs from event to closure, and what is missing is now the plant wait and reconciliation
+   rather than field execution.
 
    The standard those tests are held to is worth stating, because it was learned by being caught out.
    The first detector regression test **passed with the defect reinstated**: it asserted

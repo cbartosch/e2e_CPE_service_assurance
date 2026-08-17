@@ -599,3 +599,134 @@ disposition. **Invented:** everything about what a preventive case is worth, and
   itself.** Two systems reporting the same reading because one derives it from the other is two
   sources by this measure. The bar cannot tell independence from duplication, and nothing in the
   evidence record says which it has.
+
+## Field planning (`graph/subgraphs/field_planning.py`, P14–P16, D13–D15)
+
+**Supplied:** that a confirmed physical fault becomes a scheduled visit, that a human approves the
+slot before anything is booked, and that the work order is created in the WFM. **Invented:**
+everything about what a visit needs beyond a crew type, and how far ahead this stage may look.
+
+* **FIELD-1** — **Seven of the optimizer's twelve constraints cannot refuse anything this stage
+  produces, and six of the seven are short of a fact rather than making a permissive choice.**
+  Measured: `DispatchRequirement.skills_required`, `parts_required` and `equipment_required` are read
+  in five places across `dispatch/` and **written nowhere in `src`**, so `SKILL`, `PARTS` — both
+  arms, van stock and depot, since each is gated on the field being non-empty — and `EQUIPMENT` are
+  inert. `EQUIPMENT` is dead from both ends: `_crew_slot` passes `carried_equipment=[]` because
+  `fetch_crew_availability` returns no such key, so a requirement that *did* name equipment would be
+  refused by every crew rather than matched against one. `SAFETY` is inert because
+  `JobContext.aerial_work_required` is never set anywhere in `src` and nothing distinguishes an
+  aerial drop from a buried one — `check_safety` returns early, and passing `wind_kph` without the
+  flag would be a reading no check consults. `BUILDING_ACCESS` is inert because `TopologyContext`
+  says only *that* a service sits in an MDU — `mdu_ref` is a reference, and nothing anywhere holds
+  that building's riser-room hours, so an empty window set reads as "no restriction". It is the
+  permissive direction and the visible one. `CUSTOMER_ACCESS` is inert for
+  the reason in FIELD-2. Only `WORK_ORDER_DEPENDENCY` is inert for a reason that is *not* a gap: this
+  stage builds one requirement per incident, so there is no predecessor that could be unmet. That
+  leaves `CREW_TYPE`, `WORKING_HOURS`, `GEOGRAPHY`, `REMOTE_ACCESS_WINDOW` and `CAPACITY` as the five
+  that can actually stop a placement, and every refusal the fixtures produce is one of those.
+  **What names the skills, parts and equipment a repair needs, and does the WFM expose crew
+  capability as anything a set-membership test can honestly consume?** The second half inherits
+  WFM-3 and DISPATCH-4; the first half has no owner at all — `ResolutionOption.parameters` is empty
+  for all 40 measured field options, so the option that asks for the visit does not say what the
+  visit needs. Nothing was defaulted to a plausible value on the way past: a fabricated
+  `SPLICE-KIT-9` would be a constraint this repository invented, and it would refuse real crews.
+  **These constraints are starved, not broken, and that is measured rather than assumed** — writing
+  `parts_required=['SPLICE-KIT-9']`, `skills_required=['confined_space']` or
+  `equipment_required=['bucket_truck']` onto the fixture requirement and re-running the same P15
+  refuses the same crew three different ways (`parts: ... van stock lacks SPLICE-KIT-9`,
+  `skill: ... lacks confined_space`, `equipment: ... is not carrying bucket_truck`). A test pins both
+  halves and fails the day any of the three fields acquires a writer, which is the day this entry
+  should be deleted rather than quietly outgrown. **One consequence deserves naming on its own:** the
+  plan's stored explanation for the scheduled requirement reads
+  `satisfied: skill,crew_type,equipment,parts,working_hours,customer_access,building_access,safety,geography,remote_access_window,capacity,work_order_dependency`
+  — all twelve. `satisfied_codes` exists precisely because "an empty violation list is equally
+  consistent with twelve passing checks and with twelve checks that never ran", and on this path it
+  reports the first while the second is nearer the truth. A reviewer reading that line is being told
+  twelve constraints cleared when five were asked anything.
+* **FIELD-2** — **The one visit in the fixture set that needs the customer present is recorded as
+  prose, because the flag that would enforce it is unconstructible without a window.** The joint
+  work order carries `requires_customer_present=True`; `DispatchRequirement` refuses
+  `customer_access_required=True` with no `customer_availability_windows`, and refuses it correctly —
+  "this dispatch would be scheduled blind and fail access". Measured, nothing in the fixture set
+  holds a customer availability window, and there is no adapter call that would return one. So P14
+  writes the fact into `notes` and leaves the flag `False`. The two alternatives are both worse:
+  a fabricated window schedules against an appointment nobody made, which is the exact failure the
+  validator exists to prevent, committed by the caller instead of the model; dropping the fact
+  entirely hands the dispatcher a joint visit with no hint that the customer has to be in.
+  **Where does a customer availability window come from — a CRM appointment call, a booking flow, or
+  the dispatcher asking?** This is the one gap on the list that state could close tomorrow without
+  any other change here than passing the windows through, and until it does, `CUSTOMER_ACCESS` is a
+  hard constraint that has never refused anything.
+* **FIELD-3** — **This stage does not book tomorrow.** The crew search window is `now` to
+  `now + shift_minutes + max_overtime_minutes`, both from the pack — 540 minutes at the shipped
+  values, so nine hours. The bound is the longest a single job's placement can need, and it is
+  derived rather than typed, so an operator who lengthens the working day lengthens the search by the
+  same edit. The consequence is a real one: an incident raised after the last shift ends finds no
+  crew, and `queue_for_dispatcher` records `capacity` against it. That is a true statement about
+  today and an incomplete one about the week — the honest reading is "nobody can do this in the next
+  nine hours", and it will be read as "nobody can do this". **Does a real dispatch flow schedule
+  beyond the current shift, and if so is tomorrow morning an assignment or a different conversation
+  with the customer?** A multi-day horizon is not a wider number in the same call: appointment
+  windows, customer confirmation (WFM-5) and overnight crew changes all arrive with it.
+* **FIELD-4** — **Every plan this stage produces is priced on the pack's estimate and never on a
+  route, and the seam that would fix it is built and unwired.** `DispatchProblem.travel` is left
+  `None`, so `travel_model()` falls back to `PolicyTravelModel`. That is visible in band rather than
+  hidden — the measured plan carries `objective="weighted_sla_and_travel:estimated"`, and
+  `TravelEstimate.basis` says `estimated` on every leg. `prefetch_travel` already resolves an async
+  adapter into a `MatrixTravelModel` before the solve, which is what the purity requirement demands
+  and what a sync `TravelModel` inside the search cannot do for itself; it is tested, and P15 does
+  not call it. Measured on the fixture job (`CREW-JOINT-SJ-01` to a `metro_mdu` delimiter), wiring it
+  moves travel from **23.8 to 23.9 minutes** — because the GIS *simulator* is a straight-line
+  per-km model too, so routing it through the adapter buys 0.1 minute and a `basis` of `routed`.
+  **The gap is therefore GIS-2 arriving here:** against a real routing engine the difference is not
+  a rounding error, it is the arrival time somebody promises a customer. Two things make it worth
+  wiring before that day: the fallback is chosen silently at plan time rather than requested, and
+  with one requirement per solve travel is only a cost term today — the moment a solve carries two
+  jobs it becomes the sequencing decision, and a straight line between them is the wrong input.
+
+## Field execution (`graph/subgraphs/field_execution.py`, P17–P20, D16–D18)
+
+**Supplied:** that a technician is briefed, that structured field evidence comes back, that a
+  fault beyond the tap or ODP becomes a handover contract, and that a human approves the change of
+  responsibility domain before an MR is filed. **Invented:** the submission envelope, the
+  completeness bar, and everything about how a crew answers.
+
+* **EXEC-1** — **No RCA in the fixture set rejects a hypothesis, so no handover contract can ever be
+  complete and everything from D18 onwards is unreachable end to end.**
+  `HandoverContract.missing_items` requires `ruled_out` to be non-empty — a packet naming no
+  discarded explanation is one the receiving crew cannot audit — and this stage fills it from
+  `RCAResult.ruled_out`, which is `hypotheses` filtered on `rejected`. Measured across all 41
+  services: **zero** RCAs contain a rejected hypothesis, against hypothesis counts of `{0: 9, 1: 16,
+  2: 8, 3: 7, 4: 1}`. That is structural rather than a thin fixture set.
+  `graph/nodes/diagnosis._rejected_before` is the only thing in `src` that marks a hypothesis
+  rejected, it seeds them from a *previous* RCA cycle, and no fixture path runs P10 twice — so a
+  first-cycle incident has an empty `ruled_out` by construction.
+
+  The consequence was driven rather than reasoned. On `SVC-SJ-011-A-01` with a complete,
+  correctly-keyed submission the packet reaches `completeness=0.857` with `missing_items() ==
+  ['ruled_out']`, D18 answers `reject` on every lap, and the incident escalates on the seventh entry
+  to the briefing having filed nothing; `prepare_handover_approval`, `request_handover_approval` and
+  `file_plant_mr` are never entered. Seeding one rejected hypothesis onto that same state is
+  sufficient and nothing else changes: completeness goes to 1.0, D18 answers `request_approval`, and
+  the run files one MR and ends at `mr_raised`.
+
+  **What should a first pass put in `ruled_out`?** A diagnosis that weighed three domains and
+  reports none of them as discarded is under-reporting work it actually did — `build_hypotheses`
+  computes a posterior for every domain the evidence touches, and the ones it scores near zero are
+  ruled out in every sense except the flag. The alternative reading is that a first pass genuinely
+  rejects nothing and the completeness bar is wrong to demand it on a single-cycle incident. Those
+  are different fixes in different files, and the choice is P10's rather than this stage's. Until it
+  is made, the approval chain is exercised from state with one hypothesis rejected, and a test pins
+  the zero measurement so this entry cannot go quietly stale.
+
+* **EXEC-2** — **An MR never leaves `submitted`, which is why P21, D19 and D20 are not written.**
+  `create_mr` returns `MRStatus.SUBMITTED`, and `update_mr` — declared on the Protocol in
+  `integrations/base.py`, implemented in the simulator, and `allowed: true` in the pack — has **no
+  caller anywhere in `src` or `tests`**. It is the only method that moves one. So D19's "has plant
+  repair restored service?" would answer `await_plant` for every incident that ever reached it,
+  `restored` and `retry_diagnosis` would be arms no state can enter, and the whole of D20 would sit
+  behind them — the same dead-clause shape the mutation sweep removed from
+  `route_delimiter_evidence`. `builder.PENDING_STAGES` names the stage and points here. **What moves
+  an MR — a jTrack webhook, a poll, or an operator's own screen?** The answer decides whether P21 is
+  a wait state in this graph or a separate thread that resumes it, which is a topology question and
+  not an afternoon's work. Inherits JTRACK-1.

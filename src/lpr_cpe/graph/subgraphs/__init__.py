@@ -5,7 +5,8 @@ interrupt. A paused graph checkpoints *its own* state, and on resume LangGraph r
 that raised. Put a gate directly in the parent and the parent is what pauses, so the parent's
 checkpoint becomes the resume point for a question that belongs to one stage of one branch -- and
 every later stage inherits a parent whose status field says `awaiting_approval` about a decision it
-does not own. `remote_resolution` and `self_help` are here for that reason.
+does not own. `remote_resolution`, `self_help`, `field_planning` and `field_execution` are here for
+that reason.
 
 The second is branching. `graph.nodes.PARENT_NODES` is a *sequence*: `builder._plain_edges` draws an
 edge between consecutive entries, so a stage written there is a stage on the main line. A stage that
@@ -13,6 +14,13 @@ is reached from one answer of one decision and fans out internally has no place 
 all -- listing it would invite the plain edge that its position implies. `preventive_maintenance` is
 here for that reason and holds no interrupt at all, which is why this docstring no longer says every
 module here has one.
+
+A stage may have a plain successor without being in that sequence, which is what
+`builder.SUBGRAPH_SUCCESSOR` is for: `field_planning` runs into `field_execution` because the
+specification puts no decision between P16 and P17. The edge fires on all three of planning's exits,
+and `field_execution.route_visit_gate` is what makes that correct rather than merely convenient --
+only `commit_field_dispatch` books a work order, and the arm for finding none is a real arm with a
+real test rather than a case the parent quietly excluded.
 
 Nesting also buys the property `graph.interrupts` documents at length and `graph.inspect` exists to
 work around: a paused subgraph's writes have not reached the parent, so the parent alone understates
@@ -28,6 +36,16 @@ forgotten.
 
 from __future__ import annotations
 
+from lpr_cpe.graph.subgraphs.field_execution import (
+    FIELD_EXECUTION_NODES,
+    build_field_execution_graph,
+    compile_field_execution_graph,
+)
+from lpr_cpe.graph.subgraphs.field_planning import (
+    FIELD_PLANNING_NODES,
+    build_field_planning_graph,
+    compile_field_planning_graph,
+)
 from lpr_cpe.graph.subgraphs.preventive_maintenance import (
     PREVENTIVE_MAINTENANCE_NODES,
     build_preventive_maintenance_graph,
@@ -45,12 +63,18 @@ from lpr_cpe.graph.subgraphs.self_help import (
 )
 
 __all__ = [
+    "FIELD_EXECUTION_NODES",
+    "FIELD_PLANNING_NODES",
     "PREVENTIVE_MAINTENANCE_NODES",
     "REMOTE_RESOLUTION_NODES",
     "SELF_HELP_NODES",
+    "build_field_execution_graph",
+    "build_field_planning_graph",
     "build_preventive_maintenance_graph",
     "build_remote_resolution_graph",
     "build_self_help_graph",
+    "compile_field_execution_graph",
+    "compile_field_planning_graph",
     "compile_preventive_maintenance_graph",
     "compile_remote_resolution_graph",
     "compile_self_help_graph",

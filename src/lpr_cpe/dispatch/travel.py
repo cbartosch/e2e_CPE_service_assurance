@@ -3,8 +3,9 @@
 Travel time has two possible sources and they are not interchangeable, so this module makes the
 caller pick one and records which was picked:
 
-* **`GISTravelModel`** -- distances resolved through `integrations.base.GISAdapter.travel_minutes`,
-  which in production is a routing engine (gap GIS-2). This is a *lookup*.
+* **`MatrixTravelModel`** -- distances resolved through
+  `integrations.base.GISAdapter.travel_minutes`, which in production is a routing engine
+  (gap GIS-2). This is a *lookup*.
 * **`PolicyTravelModel`** -- the pack's `dispatch.archetype_*` numbers. This is an *estimate*, and
   the fallback when the adapter is unavailable or coordinates are missing.
 
@@ -16,7 +17,8 @@ an arrival time.
 **Why the optimizer does not simply call the adapter.** The solve must be deterministic and pure --
 the specification says so twice, and a solver that awaits I/O mid-search cannot be replayed from a
 checkpoint. So the caller resolves travel *first*, into a matrix, and hands the optimizer a plain
-mapping. `GISTravelModel.prefetch` is that step, and it is the only `async` thing in this package.
+mapping. `prefetch_travel` is that step, and it is the only `async` thing in this package. No caller
+in `src` takes it yet -- P15 hands the solve no model at all and gets the estimate; gap FIELD-4.
 
 **The three terms.** Driving, fixed per-visit overhead, and the ferry are separate because they
 behave differently under optimisation. Halving the distance halves the first, does nothing to the

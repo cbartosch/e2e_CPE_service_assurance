@@ -16,8 +16,8 @@ The topology is data, not control flow, and it is spread over exactly four place
   Deliberately *not* in `PARENT_NODES`, and not merely because `graph.nodes` says nothing beyond P11
   lives there: they have no order to be in. Each is reached by name from a branch, never by falling
   off the end of the one before, so listing them in sequence would invite the plain edge that
-  `_plain_edges` draws between consecutive registry entries. Two of the three are here because they
-  own an interrupt and a paused stage should checkpoint its own resume point; the third,
+  `_plain_edges` draws between consecutive registry entries. Three of the four are here because
+  they own an interrupt and a paused stage should checkpoint its own resume point; the fourth,
   `preventive_maintenance`, has none and is here because it fans out internally from one answer of
   one decision, which is a shape the sequence cannot hold. `graph.subgraphs` states both reasons.
 * **`DECISION_AFTER`** -- which decision is asked after which node.
@@ -96,6 +96,8 @@ from lpr_cpe.graph.nodes import PARENT_NODES
 from lpr_cpe.graph.routing import DECISIONS
 from lpr_cpe.graph.state import IncidentState
 from lpr_cpe.graph.subgraphs import (
+    compile_field_execution_graph,
+    compile_field_planning_graph,
     compile_preventive_maintenance_graph,
     compile_remote_resolution_graph,
     compile_self_help_graph,
@@ -124,9 +126,29 @@ if TYPE_CHECKING:
 #: two subgraphs. Sharing one compiled instance across parents would work today and is the kind of
 #: thing that stops working the moment anything is cached on the compiled object.
 SUBGRAPH_NODES: Mapping[str, Callable[[], Any]] = {
+    "field_execution": compile_field_execution_graph,
+    "field_planning": compile_field_planning_graph,
     "preventive_maintenance": compile_preventive_maintenance_graph,
     "remote_resolution": compile_remote_resolution_graph,
     "self_help": compile_self_help_graph,
+}
+
+#: The subgraphs a plain edge leaves, and where it goes. The third way a stage acquires a successor,
+#: alongside a position in `PARENT_NODES` and an entry in `DECISION_AFTER`.
+#:
+#: One entry, and the specification is why there is one rather than none: P16 commits the field
+#: action and P17 briefs the technician, with no decision asked in between. Nothing in
+#: `BRANCH_TARGETS` could express that, because a subgraph is not in `PARENT_NODES` and so has no
+#: consecutive neighbour for `_plain_edges` to find.
+#:
+#: The edge fires on **all** of `field_planning`'s exits, including the two that book nothing, and
+#: that is the design rather than a tolerated imprecision. `field_execution.route_visit_gate` asks
+#: whether a work order is open and answers `no_visit` when none is; only `commit_field_dispatch`
+#: writes `work_orders`, so `queue_for_dispatcher` and `abandon_field_planning` arrive, record that
+#: there was nothing to visit, and stop. Gating here instead would leave that arm unreachable, and
+#: an arm no state can enter is an arm no test can hold to account.
+SUBGRAPH_SUCCESSOR: Mapping[str, str] = {
+    "field_planning": "field_execution",
 }
 
 #: Which decision is asked after which node. A node absent from this mapping is followed by a plain
@@ -228,12 +250,12 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
     },
     "D11": {
         "self_help": "self_help",
-        "field_planning": END,
+        "field_planning": "field_planning",
     },
     "D12": {
         "verify": END,
         "retry_diagnosis": "determine_root_cause",
-        "field_planning": END,
+        "field_planning": "field_planning",
     },
 }
 
@@ -247,15 +269,32 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
 #: incident may be resumed from either by a supervisor re-invoking the thread; neither is waiting on
 #: a stage that is missing.
 PENDING_STAGES: Mapping[str, str] = {
+    f"{ONWARD}:field_execution": (
+        "P21 onwards -- the plant-repair wait, D19's 'has plant repair restored service?' and "
+        "D20's residual-impact check. Not written, and the reason is a missing capability rather "
+        "than a missing afternoon: `jtrack.simulator.create_mr` returns an MR at `submitted`, and "
+        "nothing in `src` calls `update_mr`, which is the only method that moves one. So D19 would "
+        "answer `await_plant` for every incident that ever reached it and the whole of D20 would "
+        "sit behind an arm no state can enter -- the same dead clause the mutation sweep had "
+        "removed from `route_delimiter_evidence`. What is missing is an OSP-side status feed; see "
+        "docs/vendor-integration-gaps.md. The stage's three exits then stop for three different "
+        "reasons. `file_plant_mr` ends with the MR filed and the incident at `mr_raised`, which is "
+        "that wait. `close_clean_boots_visit` writes `validating`, the state Stage 5 begins from, "
+        "so it waits on the same missing stage D10:verify and D12:verify name. `abandon_handover` "
+        "waits on no stage at all -- it writes `diagnosing`, and P07 and P10 both exist -- but on "
+        "an edge back to them, which the parent cannot draw while the specification defines no "
+        "decision at the end of the Clean Boots arm"
+    ),
     f"{ONWARD}:preventive_maintenance": (
-        "field planning for a preventive case -- P14 and D13. The subgraph runs to completion and "
-        "its three dispositions are all real answers, but one of them, "
-        "`plan_preventive_field_work`, records that a visit is warranted and stops there: it "
-        "writes the suspected domain and the crew `boundaries.crew_for` derives, and P14 is what "
-        "turns those into a work order. The "
-        "specification's separate Clean Boots and Dirty Boots arms are that same seam, and it is "
-        "left where its owner is rather than answered twice; see the subgraph's module docstring "
-        "and docs/vendor-integration-gaps.md"
+        "the seam from a preventive disposition into field planning. P14 now exists, but nothing "
+        "routes into it from here: the subgraph runs to completion and its three dispositions are "
+        "all real answers, and one of them, `plan_preventive_field_work`, records that a visit is "
+        "warranted and stops -- it writes the suspected domain and the crew "
+        "`boundaries.crew_for` derives, which is exactly what `build_field_requirement` consumes, "
+        "but the preventive case has no `resolution_plan` and no `ResolutionOption` for P14 to "
+        "select, so the two cannot simply be joined by an edge. The specification's separate Clean "
+        "Boots and Dirty Boots arms are that same seam; see the subgraph's module docstring and "
+        "docs/vendor-integration-gaps.md"
     ),
     "D06:approve_low_confidence": (
         "the L2/SME review interrupt -- a human-approval interruption that resumes the same "
@@ -281,13 +320,7 @@ PENDING_STAGES: Mapping[str, str] = {
         "Stage 5, verify, reconcile, close and learn, which begins at P22 and is where every "
         "successful resolution ends up"
     ),
-    "D11:field_planning": (
-        "P14, build the field-service requirement, and the dispatch path to D15"
-    ),
     "D12:verify": "Stage 5 again, reached from the self-help branch. See D10:verify",
-    "D12:field_planning": (
-        "P14 again, reached once the plan is exhausted. See D11:field_planning"
-    ),
 }
 
 
@@ -316,19 +349,28 @@ def _wired_node_names() -> frozenset[str]:
 
 
 def _plain_edges() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
-    """The consecutive pairs `PARENT_NODES` joins directly, and the nodes with no successor at all.
+    """Every pair joined by a plain edge, and the nodes with no successor at all.
 
     Derived rather than listed. A twelfth node inserted into the registry is wired by that edit
     alone; a hand-written edge list would have had to be found and updated, and the failure mode of
     forgetting is a node that is present in the graph and unreachable.
 
+    Two things produce a pair, and only the first is positional. Consecutive entries in
+    `PARENT_NODES` with no decision between them are the main line. `SUBGRAPH_SUCCESSOR` is the
+    other, and it exists because a subgraph has no position for `pairwise` to read -- see
+    `_wired_node_names` for why that set is a set -- so `field_planning -> field_execution` cannot
+    be expressed by writing the two down next to each other, which is the whole point of keeping
+    them out of the sequence.
+
     **A subgraph may also be terminal, and the two kinds of terminal are found differently.** An
-    ordered step is terminal by being last in the sequence with no decision after it. A subgraph has
-    no position -- `_wired_node_names` says why it is a set -- so the only thing that can make one
-    terminal is the absence of a `DECISION_AFTER` entry, which is exactly what is tested here.
-    `preventive_maintenance` is the first of these: D04's preventive arm creates a case and picks a
-    disposition, and every disposition is the end of that thread's automated work. D10 and D12 keep
-    the other two subgraphs out of this set by existing.
+    ordered step is terminal by being last in the sequence with no decision after it. A subgraph is
+    terminal by having neither a `DECISION_AFTER` entry nor a `SUBGRAPH_SUCCESSOR` one. Two
+    subgraphs are in this set. `preventive_maintenance` is one: D04's preventive arm creates a case
+    and picks a disposition, and every disposition is the end of that thread's automated work.
+    `field_execution` is the other, and for a different reason -- it answers D16, D17 and D18
+    internally, but what follows P20 is the plant branch and Stage 5, which are not written. D10 and
+    D12 keep two more out of this set by existing, and `SUBGRAPH_SUCCESSOR` now keeps
+    `field_planning` out.
 
     Nothing about that absence is silent. A subgraph reaching `END` because somebody *forgot* its
     decision looks identical here to one that ends deliberately, so the distinction is not drawn
@@ -338,8 +380,13 @@ def _plain_edges() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
     names = _node_names()
     pairs = tuple((left, right) for left, right in pairwise(names) if left not in DECISION_AFTER)
     last: tuple[str, ...] = (names[-1],) if names[-1] not in DECISION_AFTER else ()
-    subgraphs = tuple(name for name in SUBGRAPH_NODES if name not in DECISION_AFTER)
-    return pairs, last + subgraphs
+    onward = tuple(SUBGRAPH_SUCCESSOR.items())
+    subgraphs = tuple(
+        name
+        for name in SUBGRAPH_NODES
+        if name not in DECISION_AFTER and name not in SUBGRAPH_SUCCESSOR
+    )
+    return pairs + onward, last + subgraphs
 
 
 def chain_from(identifier: str) -> tuple[str, ...]:
@@ -472,6 +519,37 @@ def _check_tables() -> None:
     if unknown_sources:
         raise GraphTopologyError(
             f"DECISION_AFTER names nodes that are not in the registry: {unknown_sources}"
+        )
+
+    not_subgraphs = sorted(set(SUBGRAPH_SUCCESSOR) - set(SUBGRAPH_NODES))
+    if not_subgraphs:
+        raise GraphTopologyError(
+            f"SUBGRAPH_SUCCESSOR leaves nodes that are not subgraphs: {not_subgraphs}. An ordered "
+            "step gets its successor from its position in PARENT_NODES; this table is only for the "
+            "stages that have no position."
+        )
+
+    unknown_successors = sorted(set(SUBGRAPH_SUCCESSOR.values()) - known)
+    if unknown_successors:
+        raise GraphTopologyError(
+            f"SUBGRAPH_SUCCESSOR routes to nodes that are not in the registry: {unknown_successors}"
+        )
+
+    # Both tables would draw an edge from the same node, and LangGraph would keep both: the plain
+    # one, and the decision's path map. The run would take whichever the second call installed.
+    doubly_wired = sorted(set(SUBGRAPH_SUCCESSOR) & set(DECISION_AFTER))
+    if doubly_wired:
+        raise GraphTopologyError(
+            "these subgraphs have both a plain successor and a decision after them: "
+            f"{doubly_wired}. Pick one -- a stage whose exit is conditional belongs in "
+            "DECISION_AFTER, and one whose exit is unconditional belongs in SUBGRAPH_SUCCESSOR."
+        )
+
+    self_loops = sorted(name for name, target in SUBGRAPH_SUCCESSOR.items() if name == target)
+    if self_loops:
+        raise GraphTopologyError(
+            f"SUBGRAPH_SUCCESSOR sends a subgraph to itself: {self_loops}. The guard's re-entry "
+            "budget would be the only thing stopping the run."
         )
 
     # Both tables, not just `DECISION_AFTER`. A chained decision follows no node, so it reaches

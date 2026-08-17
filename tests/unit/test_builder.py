@@ -213,23 +213,38 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
             "plant_path": END,  # D08
             "remote": "remote_resolution",  # D09
             "self_help": "self_help",  # D11
-            "field_planning": END,  # D11
+            "field_planning": "field_planning",  # D11
             ESCALATED: END,
         },
-        # The terminal subgraph, and the only edge here that carries no question at all. Both keys
-        # end at `END`, which is what `_plain_edges` produces for anything with no `DECISION_AFTER`
-        # entry -- the same edge the last ordered step would get, and the reason the loop that
-        # draws it was dead code until this stage was wired. `preventive_maintenance` picks its own
-        # disposition internally and every disposition is the end of that thread, so there is
-        # nothing for the parent to ask.
+        # P16 -> P17, and the only edge in the graph that comes from neither a decision nor a
+        # position in `PARENT_NODES`. A subgraph has no position, so `_plain_edges` cannot pair it
+        # with a neighbour; `SUBGRAPH_SUCCESSOR` is the third way a stage acquires a successor, and
+        # the warrant for using it here is that the specification puts no decision between the two.
         #
-        # Guarded even so, and this is the one guarded edge in the graph where that buys nothing:
-        # both keys go to `END`, so `guarded` reading `escalated` cannot change where the run goes.
-        # It is here because the terminal loop draws one kind of edge rather than two, and a
-        # special case for "the destinations happen to be equal" would be a branch in the builder
-        # that no run can distinguish. The escalation was recorded inside the subgraph, by that
-        # subgraph's own guarded edges, before the parent saw the state at all.
+        # The edge fires on all three of planning's exits -- `commit_field_dispatch`,
+        # `queue_for_dispatcher` and `abandon_field_planning` -- and that is the design rather than
+        # an oversight. Only the first writes `work_orders`, so the other two reach Stage 4 with
+        # nothing booked and `route_visit_gate` answers `no_visit`. Excluding them in the parent
+        # would have left that arm unreachable, and an arm no state can enter is an arm no test can
+        # hold to account.
+        "field_planning": {ONWARD: "field_execution", ESCALATED: END},
+        # The two terminal subgraphs, and the only edges here that carry no question at all. Both
+        # keys end at `END`, which is what `_plain_edges` produces for anything in neither
+        # `DECISION_AFTER` nor `SUBGRAPH_SUCCESSOR` -- the same edge the last ordered step would
+        # get, and the reason the loop that draws it was dead code until the first of these was
+        # wired. `preventive_maintenance` picks its own disposition internally and every
+        # disposition is the end of that thread; `field_execution` answers D16, D17 and D18
+        # internally and its three exits stop where the missing OSP status feed does. Neither
+        # leaves the parent anything to ask.
+        #
+        # Guarded even so, and these are the two guarded edges in the graph where that buys
+        # nothing: both keys go to `END`, so `guarded` reading `escalated` cannot change where the
+        # run goes. It is here because the terminal loop draws one kind of edge rather than two,
+        # and a special case for "the destinations happen to be equal" would be a branch in the
+        # builder that no run can distinguish. The escalation was recorded inside the subgraph, by
+        # that subgraph's own guarded edges, before the parent saw the state at all.
         "preventive_maintenance": {ONWARD: END, ESCALATED: END},
+        "field_execution": {ONWARD: END, ESCALATED: END},
         # The other two subgraphs. D10 and D12 are asked *here* and not inside them because every
         # destination either answer has is a sibling the subgraph does not contain -- a subgraph
         # cannot route to P07, and `retry_diagnosis` is most of the point of both.
@@ -245,7 +260,7 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         "self_help": {
             "verify": END,
             "retry_diagnosis": "determine_root_cause",
-            "field_planning": END,
+            "field_planning": "field_planning",
             ESCALATED: END,
         },
     }
@@ -254,7 +269,9 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
     assert sorted(graph.edges) == [("__start__", "receive_signal")]
 
 
-def test_the_compiled_graph_contains_the_eleven_steps_the_three_subgraphs_and_nothing_else() -> None:
+def test_the_compiled_graph_contains_the_eleven_steps_the_three_subgraphs_and_nothing_else() -> (
+    None
+):
     """A fifteenth node would be reachable from nowhere; a missing one, an edge to nothing.
 
     The subgraphs are asserted from `SUBGRAPH_NODES` rather than by name, so that this says "the
@@ -828,30 +845,55 @@ def test_a_new_dead_end_has_to_say_why_it_is_one(monkeypatch: pytest.MonkeyPatch
 def test_the_unbuilt_exits_are_the_ones_named() -> None:
     """What is left to build, written down where the builder will not let it go stale.
 
-    Nine, and the list got *longer* when the resolution fork was wired, which is the shape to
-    expect. Wiring a stage deletes one line -- `ONWARD:generate_resolution_options`, P11's old fall
-    off the end -- and adds one for every branch the new stage opens that leads somewhere still
-    unwritten. Stage 3 asks four questions and answers seven of its branches to `END`.
+    Eight, and the count has now moved in both directions, which is the shape to expect. Wiring the
+    resolution fork made it *longer*: a stage deletes one line -- `ONWARD:generate_resolution_
+    options`, P11's old fall off the end -- and adds one for every branch it opens that leads
+    somewhere still unwritten, and Stage 3 asks four questions and answers seven of its branches to
+    `END`.
 
-    Wiring the preventive stage did neither: the count stayed at nine because one entry changed
-    *kind* rather than going away. `D04:preventive` was a decision answer that fell to `END`; it now
-    reaches a subgraph, and that subgraph is what falls to `END`, so the gap is spelled
-    `__onward__:preventive_maintenance`. The stage is built and the thing it does not do -- pick a
-    crew, which is P14/D13's fact -- is still named. A stage can be wired and still owe something.
+    Wiring the preventive stage moved it neither way: one entry changed *kind* rather than going
+    away. `D04:preventive` was a decision answer that fell to `END`; it now reaches a subgraph, and
+    that subgraph is what falls to `END`, so the gap is spelled `__onward__:preventive_maintenance`.
+    A stage can be wired and still owe something.
+
+    Wiring field planning is the first edit that made the list *shorter*, and it did both things at
+    once. Two decision answers went away -- `D11:field_planning` and `D12:field_planning`, which
+    were the same missing stage named twice because two decisions reached it -- and one
+    `__onward__` entry replaced them, because P14/P15/P16 ran and then stopped at Stage 4. Two
+    exits collapsing into one is the whole benefit of a subgraph being a node: the gap became a
+    property of the stage rather than of every branch that points at it.
+
+    `__onward__:preventive_maintenance` survived that edit but no longer says the same thing. It
+    used to mean "P14 does not exist"; P14 exists, and what is missing is narrower and worth having
+    named -- the preventive case reaches a disposition with no `resolution_plan` and no
+    `ResolutionOption`, which is what `build_field_requirement` selects from, so the two stages
+    cannot be joined by an edge alone.
+
+    Wiring field execution moved it neither way, and for a third reason again. This entry did not
+    change kind and it did not collapse anything: it changed *stage*.
+    `__onward__:field_planning` went away because planning now has a successor, and
+    `__onward__:field_execution` took its place because execution does not. The list is a frontier,
+    and a frontier that advances one stage keeps its length.
+
+    Its three exits stop for three different reasons, which is why the entry is one line and not
+    three: `file_plant_mr` waits on the OSP status feed that keeps P21 out of the build,
+    `close_clean_boots_visit` writes `validating` and so waits on the very stage `D10:verify` and
+    `D12:verify` already name, and `abandon_handover` waits on no stage at all -- it writes
+    `diagnosing`, whose destinations P07 and P10 both exist, and what is missing is an edge the
+    parent cannot draw while the specification defines no decision after the Clean Boots arm.
 
     `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
     against the tables in both directions, so an exit that stops reaching `END` fails the build.
     """
     assert set(PENDING_STAGES) == {
+        f"{ONWARD}:field_execution",
         f"{ONWARD}:preventive_maintenance",
         "D06:approve_low_confidence",
         "D07:approve_high_blast_radius",
         "D07:escalate",
         "D08:plant_path",
         "D10:verify",
-        "D11:field_planning",
         "D12:verify",
-        "D12:field_planning",
     }
     assert all(text.strip() for text in PENDING_STAGES.values()), "each has to say what is missing"
 
