@@ -274,9 +274,7 @@ async def assess_predictive_risk(state: IncidentState, ctx: GraphContext) -> Nod
         # The radio read alone, not every ref. A forecast derived from the Wi-Fi snapshot is not
         # evidenced by an optical measurement, and citing both would make the assessment look
         # doubly corroborated to anything counting refs.
-        evidence_refs=(
-            (refs_by_name["cpe.wifi"],) if "cpe.wifi" in refs_by_name else ()
-        ),
+        evidence_refs=((refs_by_name["cpe.wifi"],) if "cpe.wifi" in refs_by_name else ()),
     )
     if prediction is None and "cpe.wifi" in payloads:
         gathered.add_note("the CPE answered but reported no readable Wi-Fi metric")
@@ -431,9 +429,7 @@ async def open_preventive_case(state: IncidentState, ctx: GraphContext) -> NodeU
     }
 
 
-def _priority_of(
-    prediction: PredictionResult | None, findings: list[AnomalyFinding]
-) -> float:
+def _priority_of(prediction: PredictionResult | None, findings: list[AnomalyFinding]) -> float:
     """How this case ranks against the others in the queue. A weight, not a probability.
 
     The worse of two readings rather than their sum: a service with a dying ONT and perfect Wi-Fi
@@ -764,9 +760,9 @@ PREVENTIVE_MAINTENANCE_NODES: tuple[tuple[str, Any], ...] = (
 check_node_registry(PREVENTIVE_MAINTENANCE_NODES, "the preventive-maintenance node registry")
 
 
-def build_preventive_maintenance_graph() -> (
-    StateGraph[IncidentState, GraphContext, IncidentState, IncidentState]
-):
+def build_preventive_maintenance_graph() -> StateGraph[
+    IncidentState, GraphContext, IncidentState, IncidentState
+]:
     """Assemble the subgraph, uncompiled.
 
     The two edges that go somewhere are guarded and the three that go to `END` are plain, which is

@@ -171,7 +171,9 @@ async def _parent_to_p11(initial: Any, ctx: Any, thread: str) -> Any:
         checkpointer=InMemorySaver(),
         interrupt_after=["generate_resolution_options"],
     )
-    return await parent.ainvoke(initial, context=ctx, config={"configurable": {"thread_id": thread}})
+    return await parent.ainvoke(
+        initial, context=ctx, config={"configurable": {"thread_id": thread}}
+    )
 
 
 async def _drive(fixtures: Any, incident_id: str, now: datetime = NOW) -> Any:

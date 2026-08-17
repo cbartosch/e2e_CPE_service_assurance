@@ -237,7 +237,8 @@ def sweep(fixtures: Any) -> dict[str, dict[str, Any]]:
                 name="lpr_cpe_preventive_maintenance"
             )
             final = await graph.ainvoke(
-                entering, context=build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+                entering,
+                context=build_context(clock=_Ticking(NOW)),  # type: ignore[arg-type]
             )
             arms = [node for node in arm_disposition if final["node_visits"].get(node)]
             assert len(arms) == 1, f"{ref} visited {arms}, and the arms are meant to be exclusive"
@@ -503,8 +504,10 @@ def test_the_remote_prevention_arm_selects_levers_and_executes_nothing(
     )
 
 
-def test_the_monitoring_arm_distinguishes_quiet_from_blind(sweep: dict[str, dict[str, Any]]) -> None:
-    """"We looked and it was fine" and "we could not see enough" are the same arm and different
+def test_the_monitoring_arm_distinguishes_quiet_from_blind(
+    sweep: dict[str, dict[str, Any]],
+) -> None:
+    """ "We looked and it was fine" and "we could not see enough" are the same arm and different
     facts, and only one of them is a reason to scan again sooner.
 
     The distinction is carried in the case note rather than in a fourth disposition, because the
@@ -566,8 +569,9 @@ def test_no_fixture_can_miss_the_shipped_evidence_bar(sweep: dict[str, dict[str,
     assert floor >= bar, "the floor fell below the bar, so the bound is live -- delete this test"
     assert floor == 3
 
-    assert not [row for row in sweep.values() if row["final"]["pm_case"].status
-                == INSUFFICIENT_EVIDENCE], (
+    assert not [
+        row for row in sweep.values() if row["final"]["pm_case"].status == INSUFFICIENT_EVIDENCE
+    ], (
         "a fixture now falls below the shipped bar. That is the bound becoming live, which is "
         "good -- but this test and the module docstring both claim it cannot, and they are wrong."
     )
