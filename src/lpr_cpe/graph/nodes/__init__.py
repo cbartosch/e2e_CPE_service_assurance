@@ -1,4 +1,4 @@
-"""The parent graph's eleven nodes, in the order the specification numbers them.
+"""The parent graph's sixteen nodes, in the order the specification numbers them.
 
 `PARENT_NODES` is the registry `graph.builder` iterates. It is a tuple of `(name, callable)` pairs
 rather than a dict for one reason: the builder adds the nodes and then wires the linear edges
@@ -15,10 +15,16 @@ Stage boundaries, for the reader following the specification:
 * **P01-P06** `intake` -- one signal becomes one incident.
 * **P07-P09** `evidence` -- assemble, plan, test. Read-only throughout.
 * **P10-P11** `diagnosis` -- name the fault, offer the remedies.
+* **D06 and D07's own arms** `governance` -- the two gates and the escalation those decisions ask
+  for. Not a specification stage; five nodes belonging to two parent decisions.
 
-Nothing beyond P11 lives here. Stage 3 onwards is subgraphs, because every stage past this point
-contains an interrupt and an interrupt inside the parent would checkpoint the parent's state at a
-point where a subgraph's is what needs resuming.
+Stage 3 onwards is subgraphs, and the reason given here used to be that an interrupt inside the
+parent would checkpoint the parent's state where a subgraph's is what needs resuming. That is true
+of a stage, and it is why `remote_resolution`, `self_help`, `field_planning` and `field_execution`
+own their gates. It is not true of a gate belonging to a parent decision: D06 and D07 are asked by
+conditional edges attached to parent nodes, so there is no subgraph to resume and nesting the
+question would only put it one level below the router that reads the answer.
+`graph.nodes.governance` sets out the rest of that argument.
 """
 
 from __future__ import annotations
@@ -38,6 +44,14 @@ from lpr_cpe.graph.nodes.evidence import (
     create_diagnostic_test_plan,
     execute_read_only_tests,
 )
+from lpr_cpe.graph.nodes.governance import (
+    GOVERNANCE_NODES,
+    prepare_blast_radius_approval,
+    prepare_low_confidence_review,
+    record_escalation,
+    request_blast_radius_approval,
+    request_low_confidence_review,
+)
 from lpr_cpe.graph.nodes.intake import (
     INTAKE_NODES,
     assess_impact_and_priority,
@@ -48,8 +62,17 @@ from lpr_cpe.graph.nodes.intake import (
     resolve_identity_and_topology,
 )
 
-#: Every parent node, P01 to P11, in specification order.
-PARENT_NODES: Sequence[tuple[str, Any]] = (*INTAKE_NODES, *EVIDENCE_NODES, *DIAGNOSIS_NODES)
+#: Every parent node: P01 to P11 in specification order, then D06's and D07's own five.
+#:
+#: The governance five come last because `builder._plain_edges` reads this order as the linear
+#: edges, and appending them is the only edit that wiring needs -- the joins that must *not* be
+#: drawn are suppressed by their entries in `DECISION_AFTER`, not by their position.
+PARENT_NODES: Sequence[tuple[str, Any]] = (
+    *INTAKE_NODES,
+    *EVIDENCE_NODES,
+    *DIAGNOSIS_NODES,
+    *GOVERNANCE_NODES,
+)
 
 
 check_node_registry(PARENT_NODES, "the parent node registry")
@@ -58,6 +81,7 @@ check_node_registry(PARENT_NODES, "the parent node registry")
 __all__ = [
     "DIAGNOSIS_NODES",
     "EVIDENCE_NODES",
+    "GOVERNANCE_NODES",
     "INTAKE_NODES",
     "PARENT_NODES",
     "assemble_case_evidence",
@@ -69,6 +93,11 @@ __all__ = [
     "execute_read_only_tests",
     "generate_resolution_options",
     "normalize_event",
+    "prepare_blast_radius_approval",
+    "prepare_low_confidence_review",
     "receive_signal",
+    "record_escalation",
+    "request_blast_radius_approval",
+    "request_low_confidence_review",
     "resolve_identity_and_topology",
 ]

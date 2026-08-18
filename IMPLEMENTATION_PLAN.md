@@ -117,8 +117,14 @@ Observed signatures and behaviours that the design depends on:
   This matters because the obvious implementation of the specification's state-inspection endpoint
   is `(await app.aget_state(config)).values`, and that implementation would report an incident as
   `dispatch_planning` while it had been sitting on someone's approval queue since Tuesday — the most
-  misleading answer this system could give. It is a property of nesting, and **all six approval
-  gates are nested**.
+  misleading answer this system could give. It is a property of nesting, and **four of the six
+  approval gates are nested** — the ones a subgraph owns. The two D06 and D07 ask are flat in the
+  parent (`graph/nodes/governance.py`, added 2026-08-18), because those decisions are the parent's:
+  the router that reads the answer is a conditional edge on a parent node, so there is no subgraph
+  to resume and nesting the question would only put it a level below its consumer. Their
+  `pending_approval` is therefore on the parent's own state and the naive read finds it — which is
+  the trap in the other direction, since code that reaches straight for `.tasks[0].state.values`
+  finds nothing at all for those two.
 
   `graph/inspect.py` is the response: every reader there takes the compiled app rather than a state
   mapping, because the information is not in the mapping. `effective_state` merges parent-first so
@@ -299,10 +305,16 @@ decision is still worth recording here: it is what the Protocol has to be shaped
 ## 5. Status
 
 "Done" below means the code exists **and** something ran against it, not that it was written.
-Measured on **2026-08-17**, after Stage 4 landed: `ruff check src tests` passes, `ruff format
---check src tests` passes at **122 files already formatted**, `mypy --strict src/lpr_cpe` reports no
-issues in **102** source files, and `pytest` collects and passes **839** tests at **82.65%** line
-coverage. `make lint` therefore passes, which it did not earlier the same day.
+Measured on **2026-08-18**, after D06's and D07's governance nodes landed: `ruff check src tests`
+passes, `ruff format --check src tests` passes at **124 files already formatted**, `mypy --strict
+src/lpr_cpe` reports no issues in **103** source files, and `pytest` collects and passes **853**
+tests at **82.77%** line coverage. `make lint` therefore passes, which it did not on the 17th.
+
+The previous revision of this paragraph was dated 2026-08-17 and read 122 / 102 / 839 / 82.65%.
+Every one of those four had moved by the next morning, from a change that touched five source files
+and one test module. That is the point the paragraph below about staleness is making, so the old
+figures are left here rather than overwritten: the interval over which a count in this section stays
+true is a **day**, not a release.
 
 That format failure is worth keeping a line for rather than deleting, because of what it turned out
 to be. Under ruff 0.16.3 five committed files were reported as **would be reformatted** —
@@ -319,7 +331,7 @@ and it is easy to check the wrong one: `make` uses `.venv` — which is where §
 resolved and the only one with the `optimizer` extra installed — while a bare `python -m pytest`
 from the repository root uses the system interpreter, where `ortools` is absent and `pydantic`,
 `fastapi` and `psycopg` are each a patch behind. Every number above is identical in both — the
-format failure was, while it lasted, and the 122 files and 102 source files are — so nothing here
+format failure was, while it lasted, and the 124 files and 103 source files are — so nothing here
 depends on which is used; §2's versions do, and it says so.
 
 The previous revision of this section claimed the same for 86 files, and it was **wrong**: mypy was
@@ -330,10 +342,12 @@ command run *after* the final state of the tree, which is the only version of th
 making.
 
 That discipline is necessary and it is **not sufficient**, which the same numbers went on to
-demonstrate. 98 and 758 were both correct when written and were both stale within the day — the
+demonstrate — twice now. 98 and 758 were both correct when written and were both stale within the
+day; 102, 122, 839 and 82.65% replaced them under exactly that discipline, were taken from commands
+run after the final state of the tree, and were stale by the following morning all the same. The
 tree moved, and nothing re-read them, because no gate in this repository can. A number in prose has
 no expiry and nothing watches it, so treat every count in this section as a measurement dated
-2026-08-17 rather than as a fact, and re-run the four commands before quoting one. Gap 7 in §6 is
+2026-08-18 rather than as a fact, and re-run the four commands before quoting one. Gap 7 in §6 is
 the general form of this.
 
 Where a row says *mutation-checked*, it means every regression assertion was verified by reinstating
@@ -441,14 +455,15 @@ silent filter, whatever causes it.
 | `graph/subgraphs/self_help.py` — P13 and D12, the customer-response interrupt | done | 22 committed tests, mutation-checked 11/11; three KPI defects found by execution (below) |
 | `graph/subgraphs/field_planning.py` — P14, D13, P15, D14, D15, P16 | done | 20 committed tests; the joint incident driven from the real parent, which since the fork was wired runs into this subgraph by itself — the fixture passes `interrupt_after=["generate_resolution_options"]` to stop it. `is_field_option` was measured wrong for 16 of 50 arrivals and `is_dispatchable_option` written to narrow it |
 | `graph/subgraphs/field_execution.py` — P17, D16, D17, P18, D18, P19, P20 | done | 12 committed tests, mutation-checked 10/10. Driven from the real parent through `interrupt_after=["field_planning"]`, so the arriving state is one the graph actually produces. Two constraints were found by execution rather than reasoned about: the handover-gate router is wired on **two** edges and a state where both answer alike cannot tell a mis-wire from a correct wiring, so that test drives a discriminating pair; and `_Ticking` advances on every read of `local_time`, so a context shared across drives makes a later verdict depend on how many nodes an earlier drive ran — each drive builds its own. The stage's headline finding is that **no fixture reaches its own handover chain**: a contract is incomplete until something is ruled out, no first-cycle RCA rejects a hypothesis, so D18 onwards is unreachable end to end and the tests that cover it seed a rejection to get there. That is gap EXEC-1 in `docs/vendor-integration-gaps.md`, and a test asserts the emptiness rather than leaving it implied |
-| `graph` parent past P11 + the remaining 5 subgraphs | **in progress** | field planning and field execution are both written and wired — `SUBGRAPH_NODES` now holds five entries, and `SUBGRAPH_SUCCESSOR` carries `field_planning → field_execution`, which is why field planning's own exits are no longer a gap. Dispatch, closure, escalation, comms and reconciliation are not written. D09 and D11 route to subgraph nodes on every answer; D06, D07 and D08 do not — `approve_low_confidence`, `approve_high_blast_radius`, `escalate` and `plant_path` still reach `END`, as do both `verify` answers. Field execution and preventive maintenance are the two *terminal* subgraphs and one further entry each: field execution answers D16, D17 and D18 internally, but its three exits stop for three different reasons — `file_plant_mr` on P21's plant wait, `close_clean_boots_visit` on Stage 5 from P22, and `abandon_handover` on no missing stage at all but on a back-edge to P07 or P10 that the specification defines no decision for. `PENDING_STAGES` names all 8 such exits and `_check_pending_stages` fails the build in both directions |
+| `graph/nodes/governance.py` — D06's review gate, D07's blast-radius gate and escalation | done | 12 committed tests, mutation-checked 4/5. Three specification nodes, **five** written, because `interrupts.py` makes every gate a `prepare`/`request` pair: a single node cannot both record that it is waiting and wait, since the interrupt aborts it before its update is checkpointed. Driven from the real parent graph, and getting there is the finding worth keeping. **No fixture reaches either gate on its own.** Both routers were replaced by recording proxies and all 41 services driven under both case types: 134 invocations, 67 at D06 and 67 at D07, and every one of them answers `continue`. Two threads carry policy decisions at the ask and still answer `continue`, because those decisions have no `required_approval_kind` — so the arms are live and unreached rather than dead, which is the distinction the probe was built to draw. The tests therefore seed a `PolicyDecision` through `aupdate_state` at an `interrupt_after` seam, which turned out to **re-evaluate the outgoing branch**: paused after `determine_root_cause` with `next == ('generate_resolution_options',)`, appending a demand moves `next` to `('prepare_low_confidence_review',)` with no node having run. Both new arms are cycles back into their own `prepare`, and both close on `approval_outstanding` comparing `max(answers)` against `max(demands)` rather than on a counter. The fifth mutation **disproved a claim this document made**: reordering `route_rca_confidence`'s clauses was written up as leaving a graph that never halts, and reinstating it turned exactly one test red and no graph run at all, because P10 produces an RCA on every lap. The comment now records the measurement instead of the reasoning |
+| `graph` parent past P11 — Stage 5, D08's plant path, Stage 4's tail | **in progress** | field planning and field execution are both written and wired — `SUBGRAPH_NODES` now holds five entries, and `SUBGRAPH_SUCCESSOR` carries `field_planning → field_execution`, which is why field planning's own exits are no longer a gap. D06's and D07's three single nodes have their own row above and are no longer among the gaps. What is left is **three subgraph-shaped gaps and one edge**. Subgraph-shaped: Stage 5 entire (P22, D21, P23, D22, P24, D23, P25, P26, D24 — nine specification nodes, six of them decisions, and the destination of both `verify` answers); D08's plant path; and Stage 4's tail P21, D19, D20, which is blocked rather than unscheduled. One edge: the preventive-to-field-planning seam. Three earlier readings of this row were wrong and are corrected rather than deleted — **`dispatch` is not among the gaps** (its own row is done at 55 tests, and P15 and P16 are written inside field planning); **escalation was not missing as a capability**, `guards.escalation_update` exists and D02's and D05's `manual_review` arms already ran it, so what D07 lacked was that one arm — though `record_escalation` does **not** reuse that helper, which takes a `BudgetVerdict` and would have stamped `LOOP_LIMIT_REACHED` on a case that never looped; and the row counted D06's and D07's work as **three** nodes when the gate-pair invariant makes it five. Comms is the one that survives scrutiny, narrowly: `self_help` calls `send_self_help` and `fetch_customer_responses`, but `send_notification` has **no caller anywhere in `src`** — only the Protocol at `integrations/base.py:369` and the simulator that implements it. D09 and D11 route to subgraph nodes on every answer; D08 still does not, and `plant_path` reaches `END` as do both `verify` answers. Field execution and preventive maintenance are the two *terminal* subgraphs and one further entry each: field execution answers D16, D17 and D18 internally, but its three exits stop for three different reasons — `file_plant_mr` on P21's plant wait, `close_clean_boots_visit` on Stage 5 from P22, and `abandon_handover` on no missing stage at all but on a back-edge to P07 or P10 that the specification defines no decision for. `PENDING_STAGES` names all **5** remaining such exits — down from 8, the largest shrink so far — and `_check_pending_stages` fails the build in both directions. It now guards terminal *nodes* as well as branch answers: `record_escalation` ends the workflow legitimately, so it is declared in `_DELIBERATE_TERMINALS`, and emptying that table fails the build with `__onward__:record_escalation` |
 | `persistence` checkpointer + serde | done | 14 committed tests, each paired with a control that fails; lazy Postgres import checked in a clean subprocess; the Postgres branch driven without a database and the shipped defect reinstated to watch it fail |
 | `persistence` outbox + migrations | **pending** | — |
 | `api` | **pending** | `src/lpr_cpe/api/` does not exist. `make serve` names the gap and exits non-zero rather than importing it |
 | model provider + deterministic fake | **pending** | no module in `src/` calls a model provider. `ModelProvider` is an enum in `config.settings` with nothing behind it, so the `anthropic` extra changes nothing and D7 above describes an intent, not a running path |
 | `cli.py` + `[project.scripts]` | done | 6 committed tests, each watched red. The declaration shipped naming a module that was never written; the guard reads `[project.scripts]` out of `pyproject.toml` and imports what it names, so it covers a second entry point without being extended |
-| tests | 839 passing | unit only; no integration, contract or scenario tests yet, and none of the 17 required scenarios exist |
-| coverage | **82.65%**, gate is 85% | measured 2026-08-17 after Stage 4 landed, so `make test` and `make check` fail today; `make test-fast` is the target that runs green |
+| tests | 853 passing | unit only; no integration, contract or scenario tests yet, and none of the 17 required scenarios exist |
+| coverage | **82.77%**, gate is 85% | measured 2026-08-18 after the governance nodes landed, so `make test` and `make check` fail today; `make test-fast` is the target that runs green. The 14 new tests moved the aggregate 0.12 points, which is what a stage adds when the module it covers is 64 statements |
 | docs + diagrams | 1 of 9 documents, 0 of 10 diagrams | `docs/vendor-integration-gaps.md` only. `docs/specification.md` is the vendored input, not a deliverable. The other eight documents and every Mermaid diagram the specification requires are unwritten |
 | demo | **pending** | the seven scenarios are unwritten. `make demo` names the gap and exits non-zero rather than invoking a subcommand `cli.py` deliberately does not define |
 | CI | **none exists** | no `.github/`, GitLab, Azure, CircleCI, tox, nox or pre-commit configuration is tracked. Every gate in this repository is manual |
@@ -459,10 +474,10 @@ A gap named here is a gap acknowledged. An empty section at the end of a pass th
 least believable part of the document.
 
 1. **The committed suite is unit-only, and the coverage gate is unmet.** Every row marked *done* in
-   §5 now rests on committed tests rather than on a throwaway script, but all 839 are unit tests.
+   §5 now rests on committed tests rather than on a throwaway script, but all 853 are unit tests.
    There are no integration, contract or scenario tests and none of the 17 required scenarios exist.
    Coverage **has** now been measured against the 85% bar — an earlier revision of this gap said it
-   had not — and it is **82.65%**, so `make test` and `make check` fail today. The 2.35-point
+   had not — and it is **82.77%**, so `make test` and `make check` fail today. The 2.23-point
    shortfall sounds small, and the aggregate is the least informative thing about it, because the
    uncovered lines are not spread evenly. They concentrate in exactly the cross-cutting modules the
    unit tests aim past: `security/redaction.py` at 18% and `security/injection.py` at 34% — the two
@@ -474,9 +489,12 @@ least believable part of the document.
    through it and something now drives one. `jtrack/simulator.py` was at **25%** and is at **33%**,
    and those eight points are Stage 4 filing an MR — measured, not attributed, by re-running the
    suite with `--ignore=tests/unit/test_subgraph_field_execution.py`, which puts jtrack back at 25%
-   and the total back to **79.72%**. So twelve tests are worth 2.93 points of the aggregate, which
-   is the clearest thing this section can say about what the remaining shortfall costs: it is not
-   2.35 points of tidying, it is roughly one more stage driven end to end. Neither module moved
+   and the total back to **79.72%** (measured 2026-08-17, against that day's 82.65% aggregate). So
+   twelve tests are worth 2.93 points, which is the clearest thing this section can say about what
+   the remaining shortfall costs: it is not 2.23 points of tidying, it is roughly one more stage
+   driven end to end. The governance nodes that landed on the 18th are the counter-example that
+   makes the same point from the other side — fourteen tests, 0.12 points — because they added a
+   64-statement module rather than reaching into an untouched integration. Neither module moved
    because anybody set out to raise coverage, and that is the point. Raising the number is the wrong
    objective; those modules are the work, and a scenario test that ran one incident end to end would
    reach most of them at once — as writing the stage that files an MR just did, for jtrack, without

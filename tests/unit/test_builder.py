@@ -46,7 +46,7 @@ from lpr_cpe.graph.builder import (
     compile_parent_graph,
 )
 from lpr_cpe.graph.context import build_context
-from lpr_cpe.graph.nodes import PARENT_NODES
+from lpr_cpe.graph.nodes import GOVERNANCE_NODES, PARENT_NODES
 from lpr_cpe.graph.nodes._runtime import derive_id
 from lpr_cpe.graph.state import make_initial_state, total_steps
 
@@ -194,7 +194,7 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # P10 -> D06. `retry_diagnosis` returns to P07, not to P10: a rejected RCA is not
         # re-derivable from the evidence that produced it.
         "determine_root_cause": {
-            "approve_low_confidence": END,
+            "approve_low_confidence": "prepare_low_confidence_review",
             "retry_diagnosis": "assemble_case_evidence",
             "continue": "generate_resolution_options",
             ESCALATED: END,
@@ -208,14 +208,65 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # D09, and they are absent here -- consumed by `_cascade` rather than routed. An edge
         # labelled `continue` leaving P11 would mean the composition was never applied.
         "generate_resolution_options": {
-            "approve_high_blast_radius": END,  # D07
-            "escalate": END,  # D07
+            "approve_high_blast_radius": "prepare_blast_radius_approval",  # D07
+            "escalate": "record_escalation",  # D07
             "plant_path": END,  # D08
             "remote": "remote_resolution",  # D09
             "self_help": "self_help",  # D11
             "field_planning": "field_planning",  # D11
             ESCALATED: END,
         },
+        # D06's and D07's own gates, and the only place in the graph where a decision's answer
+        # leads to a node that asks the *same* decision again. Both `prepare` nodes reach their
+        # `request` by a plain edge, because a gate pair has nothing to decide between recording
+        # the demand and raising the interrupt.
+        "prepare_low_confidence_review": {ONWARD: "request_low_confidence_review", ESCALATED: END},
+        "prepare_blast_radius_approval": {ONWARD: "request_blast_radius_approval", ESCALATED: END},
+        # The `request` nodes re-ask, and the cycle they close is the assertion worth reading:
+        # `approve_low_confidence` points back at the `prepare` node it came from. That terminates
+        # because `request_approval` writes the human's answer into `approvals` and both routers
+        # consult it before re-testing the condition that opened the gate -- `approval_outstanding`
+        # compares the latest demand's timestamp against the latest answer's, so an answered demand
+        # stops being outstanding. `test_governance_nodes.py` drives the cycle and measures that the
+        # gate is entered exactly once per demand.
+        #
+        # The cycle is spelled out here rather than elided because it is the only one in the graph
+        # where a decision's answer leads to a node that asks the same decision. What this test does
+        # *not* guard is the clause ordering inside `route_rca_confidence`, and that was measured
+        # rather than assumed: moving the `rca is None` clause above the answer check -- the
+        # ordering that would let an unanswerable gate re-open forever -- turns exactly one test in
+        # the suite red, and it is neither this one nor anything that runs the graph::
+        #
+        #     FAILED tests/unit/test_routing.py::
+        #       test_every_declared_branch_is_reached_by_the_state_written_for_it[D06-retry_diagnosis]
+        #     E   AssertionError: assert 'approve_low_confidence' == 'retry_diagnosis'
+        #
+        # No graph run notices, because P10 produces an RCA on every lap, so the state that would
+        # spin cannot survive a retry. The reaching-state table is what holds that ordering; this
+        # edge only holds that the loop is drawn.
+        "request_low_confidence_review": {
+            "approve_low_confidence": "prepare_low_confidence_review",
+            "retry_diagnosis": "assemble_case_evidence",
+            "continue": "generate_resolution_options",
+            ESCALATED: END,
+        },
+        # D07's gate re-enters the same four-question cascade P11 does, not D07 alone: the answer
+        # that releases the gate is `continue`, and `continue` is what `_cascade` consumes to ask
+        # D08. So a granted approval carries on to the plant/remote/self-help fork in one step
+        # rather than needing a node between the gate and the rest of the chain.
+        "request_blast_radius_approval": {
+            "approve_high_blast_radius": "prepare_blast_radius_approval",
+            "escalate": "record_escalation",
+            "plant_path": END,
+            "remote": "remote_resolution",
+            "self_help": "self_help",
+            "field_planning": "field_planning",
+            ESCALATED: END,
+        },
+        # D07's other arm, and the one node in the graph that is terminal on purpose rather than
+        # for want of a successor. `_DELIBERATE_TERMINALS` is what tells `_check_pending_stages`
+        # the difference; without the entry this node would be reported as an unbuilt exit.
+        "record_escalation": {ONWARD: END, ESCALATED: END},
         # P16 -> P17, and the only edge in the graph that comes from neither a decision nor a
         # position in `PARENT_NODES`. A subgraph has no position, so `_plain_edges` cannot pair it
         # with a neighbour; `SUBGRAPH_SUCCESSOR` is the third way a stage acquires a successor, and
@@ -323,6 +374,20 @@ async def test_a_fixture_runs_the_whole_parent_graph_without_writing_anything(
     move into the fork here, and this test should go red when it does -- the number to update is
     then the twelfth and thirteenth visit, not the assertion.
 
+    Wiring D06's and D07's gates added five nodes to `PARENT_NODES` that this run must *not* visit,
+    so the expectation is built from the three linear registries rather than from `PARENT_NODES`,
+    and the governance five are asserted absent rather than left unmentioned. That absence is the
+    measurement, not an accident of these four services: with both routers instrumented at
+    `_cascade`'s call site and all 82 fixture cases driven to completion, D06 and D07 were asked
+    134 times between them and every single answer was `continue`. The fixture corpus records no
+    `PolicyDecision` of either gating kind, and `route_rca_confidence`'s other opening -- `rca is
+    None` -- never fires either, because P10 always produces one. The arms are reachable and the
+    mechanism was watched working (`SVC-SJ-011-B-01-proactive_alarm` re-enters both decisions three
+    times as the retry arm carries it back upstream, seeing 0, then 1, then 2 policy decisions);
+    what the corpus lacks is a decision of the right *kind*. `test_governance_nodes.py` therefore
+    seeds one rather than hoping for it, and this test holds the complementary claim: nothing seeds
+    one by accident.
+
     This run is also what guards `_cascade`. Composing the chain has two halves -- the path map
     (`_terminal_targets`) and the router (`_cascade`) -- and only the map is asserted structurally,
     by `test_langgraph_holds_the_topology_the_specification_numbers`. Reverting the router half
@@ -339,7 +404,8 @@ async def test_a_fixture_runs_the_whole_parent_graph_without_writing_anything(
     """
     final, ctx = await _run(_service(fixtures, health))
 
-    assert final["node_visits"] == {name: 1 for name, _ in PARENT_NODES}
+    gates = {name for name, _ in GOVERNANCE_NODES}
+    assert final["node_visits"] == {name: 1 for name, _ in PARENT_NODES if name not in gates}
     assert total_steps(final) == 11
     assert final["escalated"] is False
     assert final["status"] is IncidentStatus.DIAGNOSING
@@ -818,13 +884,24 @@ def test_wiring_a_pending_stage_forces_its_line_to_be_deleted(
     *remove* one survives indefinitely: the graph is correct, the tests pass, and the documentation
     goes on claiming a stage is missing that has been built. So the check runs both ways, and this
     is the way that matters.
+
+    The mutation used to be `D06:approve_low_confidence`, and wiring D06's gate is what proved the
+    check works for real rather than only under `monkeypatch`: repointing that answer at
+    `prepare_low_confidence_review` and leaving the line in `PENDING_STAGES` failed the build with
+    exactly the message this test asserts. Which then cost this test its subject -- the entry is
+    gone, so the mutation raises nothing::
+
+        E   Failed: DID NOT RAISE <class 'lpr_cpe.graph.builder.GraphTopologyError'>
+
+    `D08:plant_path` took its place, and any surviving entry would do. That is the point: the check
+    is a property of the table, not of whichever gap happened to be open when it was written.
     """
     monkeypatch.setattr(
         builder_module,
         "BRANCH_TARGETS",
         {
             **BRANCH_TARGETS,
-            "D06": {**BRANCH_TARGETS["D06"], "approve_low_confidence": "determine_root_cause"},
+            "D08": {**BRANCH_TARGETS["D08"], "plant_path": "assemble_case_evidence"},
         },
     )
     with pytest.raises(GraphTopologyError, match="no longer reach END"):
@@ -842,10 +919,31 @@ def test_a_new_dead_end_has_to_say_why_it_is_one(monkeypatch: pytest.MonkeyPatch
         build_parent_graph()
 
 
+def test_a_node_that_ends_the_workflow_has_to_say_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The node-shaped half of the same rule, and the only entry in the table that carries it.
+
+    `record_escalation` is terminal on purpose: the incident is a human's, and
+    `IncidentStatus.ESCALATED` moves onward to nine other statuses so a supervisor resumes the
+    thread. `_plain_edges` cannot tell that apart from P11's old fall off the end, which was a
+    missing stage -- both are a node with no successor. `_DELIBERATE_TERMINALS` is the difference,
+    and emptying it shows the check reaches the node half at all::
+
+        E   GraphTopologyError: these exits reach END with nothing to explain them:
+            ['__onward__:record_escalation'].
+
+    Before D07's escalation arm was wired there was nothing in this table, so the branch that reads
+    it ran on every build and excused nothing. That is worth a test rather than a comment: an empty
+    frozenset and a table nobody consults look identical from the outside.
+    """
+    monkeypatch.setattr(builder_module, "_DELIBERATE_TERMINALS", frozenset())
+    with pytest.raises(GraphTopologyError, match=r"__onward__:record_escalation"):
+        build_parent_graph()
+
+
 def test_the_unbuilt_exits_are_the_ones_named() -> None:
     """What is left to build, written down where the builder will not let it go stale.
 
-    Eight, and the count has now moved in both directions, which is the shape to expect. Wiring the
+    Five, and the count has now moved in both directions, which is the shape to expect. Wiring the
     resolution fork made it *longer*: a stage deletes one line -- `ONWARD:generate_resolution_
     options`, P11's old fall off the end -- and adds one for every branch it opens that leads
     somewhere still unwritten, and Stage 3 asks four questions and answers seven of its branches to
@@ -882,15 +980,21 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     `diagnosing`, whose destinations P07 and P10 both exist, and what is missing is an edge the
     parent cannot draw while the specification defines no decision after the Clean Boots arm.
 
+    Wiring D06's and D07's gates is the largest single shrink so far, and the only one that closed
+    exits without adding a stage. Three lines went away at once -- `D06:approve_low_confidence`,
+    `D07:approve_high_blast_radius` and `D07:escalate` -- because all three were answers falling to
+    `END` for want of a node rather than for want of a subgraph, and five plain nodes in
+    `graph.nodes.governance` is the whole of what they were waiting for. Nothing replaced them:
+    the two gates re-enter the decisions they came from, and `record_escalation` is terminal on
+    purpose, which is a different thing from terminal for want of a successor and is spelled out in
+    `_DELIBERATE_TERMINALS` rather than here. An exit can be closed by a node; a stage cannot.
+
     `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
     against the tables in both directions, so an exit that stops reaching `END` fails the build.
     """
     assert set(PENDING_STAGES) == {
         f"{ONWARD}:field_execution",
         f"{ONWARD}:preventive_maintenance",
-        "D06:approve_low_confidence",
-        "D07:approve_high_blast_radius",
-        "D07:escalate",
         "D08:plant_path",
         "D10:verify",
         "D12:verify",

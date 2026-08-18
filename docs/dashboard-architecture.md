@@ -26,7 +26,7 @@ were.
 ## 1. The read layer already exists. The write layer does not.
 
 The single most useful finding of the design pass: `graph/inspect.py` was written for exactly this
-consumer and already provides four of the five reads a dashboard needs.
+consumer and already provides every read a dashboard needs.
 
 | Need | Already there |
 | --- | --- |
@@ -34,7 +34,7 @@ consumer and already provides four of the five reads a dashboard needs.
 | What is being asked | `pending_approval_for(app, config)` |
 | The resume handle | `interrupt_payloads(app, config)` → `[{"id", "value"}]` |
 | Is a human being waited on at all | `is_awaiting_human(app, config)` |
-| **Which node is asking** | **missing — see §3** |
+| **Which node is asking** | `awaiting_node_path(app, config)` — **see §3, and the shape it returns is not uniform** |
 
 Its module docstring already states the case for its own existence in dashboard terms: an endpoint
 built on the parent's `aget_state(config).values` alone "would report 'dispatch planning' for an
@@ -55,7 +55,8 @@ verification effort.
 ## 2. Six measured constraints the design has to survive
 
 These are not style preferences. Each has a failure mode that a plausible naive dashboard walks
-straight into, and each was measured — the first four today, against langgraph 1.2.11.
+straight into, and each was measured — the first four on 2026-08-16, against langgraph 1.2.11. They
+have not been retaken since; the counts in §3 and §6.1 have.
 
 **C1 — A paused subgraph's state is invisible from the parent.** `aget_state(config).values` reports
 `status=dispatch_planning, pending_approval=None` at the exact moment an approval is outstanding.
@@ -116,19 +117,58 @@ root.tasks[0].state.next         ('request_x_approval',)
 [s.next for s in _snapshots(…)]  [('resolution',), ('request_x_approval',)]
 ```
 
-So the full path to the paused node is already inside data the existing walk fetches. The dashboard
-needs **one new function** in `inspect.py`, not a new subsystem:
+So the full path to the paused node is already inside data a walk of that shape fetches. This
+section originally proposed one new function in `inspect.py`. **It has since been written, and this
+is now a description of it rather than a proposal:**
 
 ```
-awaiting_node_path(app, config) -> tuple[str, ...]   # ("resolution", "request_x_approval")
+awaiting_node_path(app, config) -> tuple[str, ...]
 ```
+
+It does not reuse `_snapshots`, and the reason is the sentence above: `_snapshots` merges `values`
+and drops the task it took them from, so the name is precisely what it discards. Two short walks
+answering two different questions was the arrangement chosen over widening `_snapshots` to carry a
+field only one caller reads.
+
+What it follows is the task that **carries the interrupt**, not the snapshot's `.next`, and that is
+the choice worth knowing about: `.next` is also populated for a graph stopped for some other reason,
+so following the interrupt is what makes a non-empty path mean *a human is being waited on* and
+nothing else. `bool(await awaiting_node_path(...))` therefore equals `await is_awaiting_human(...)`,
+and the tests assert that equivalence rather than leaving two spellings of one predicate to drift.
+
+**The returned path is not always two elements long, and a dashboard that assumes it is will be
+wrong on a third of the gates.** Measured on 2026-08-18: there are six approval gates, and the four
+that live inside a subgraph return a 2-tuple — `("self_help", "request_self_help_approval")` — while
+D06's and D07's are flat in the parent and return a 1-tuple, `("request_low_confidence_review",)`.
+The difference costs a renderer more than a length check. For the flat pair the interrupted task has
+**no child state at all** — `tasks == [("request_low_confidence_review", None)]` — so a view
+generalised from the nested case that reaches for `.tasks[0].state.values` gets `None` rather than a
+usable fallback. `awaiting_node_path`'s own docstring is where that asymmetry is written down.
+`test_the_asking_node_is_named_in_full_and_the_parents_next_names_only_the_subgraph` holds the
+nested and flat shapes against each other and has been seen to go red;
+`test_the_flat_gate_needs_no_subgraph_to_be_visible` pins the flat one.
 
 **D1 — the node path is derived from the snapshot walk, not from the interrupt id or from
-`get_graph()`.** The interrupt id is opaque (C4). `get_graph()` is separately known to be lossy: it
-keeps one edge per `(source, target)` pair and drops four of the fourteen declared answers on this
-graph, including both `PENDING_STAGES` exits. `builder.BRANCH_TARGETS` + `DECISION_AFTER` +
-`routing.DECISIONS` are the authoritative topology, and `_check_tables()` already holds them against
-each other at compile time. `tests/unit/test_cli.py::test_topology_names_every_answer_the_builder_declares`
+`get_graph()`.** The interrupt id is opaque (C4). `get_graph()` is separately lossy, and the loss was
+re-measured on 2026-08-18 against langgraph 1.2.11, where two rules in `pregel/_draw.py` cause it:
+`add_edge` returns early when an edge with the same `(source, target)` already exists, and the
+drawing keeps a branch label only when it differs from the target's name
+(`data=label if label != dest else None`). Between them those two rules drop **ten of the
+twenty-nine answers `BRANCH_TARGETS` declares** — six collide with the uniform `__escalated__` edge
+to `END` (D01 `quarantine`, D02 and D05 `manual_review`, D08 `plant_path`, D10 and D12 `verify`),
+three lose a label that happens to equal its target (D11 `self_help`, D11 and D12 `field_planning`),
+and D03 `continue` collides with its sibling `associate` on the pair they share.
+
+**All five `PENDING_STAGES` exits are among the casualties, and two of them are worse than dropped —
+they are mislabelled.** The three answer-shaped exits are in the list above. The other two,
+`__onward__:field_execution` and `__onward__:preventive_maintenance`, leave terminal nodes whose
+`ONWARD` and `ESCALATED` arms both point at `END`; the drawing keeps one edge for the pair and
+labels it `__escalated__`. So a graph rendered from `get_graph()` states that those stages end in a
+budget escalation, when what actually happens is that the next stage was never written.
+
+`builder.BRANCH_TARGETS` + `DECISION_AFTER` + `routing.DECISIONS` are the authoritative topology,
+and `_check_tables()` already holds them against each other at compile time.
+`tests/unit/test_cli.py::test_topology_names_every_answer_the_builder_declares`
 is the existing guard; the dashboard must fall under the same rule.
 
 ---
@@ -205,7 +245,7 @@ is a cheap, honest guard against Option A leaking back in one convenience import
 │   routes/incidents    GET state  (→ inspect.effective_state)      │
 │   routes/approvals    GET pending · POST decision                 │
 │   routes/resume       POST resume  ← C2 and C3 guards live HERE   │
-│   routes/topology     GET the 25-node inventory + 24 decisions    │
+│   routes/topology     GET the 54-node inventory + 24 decisions    │
 └──────────────────────────────────────────────────────────────────┘
      │  in-process
      ▼
@@ -238,16 +278,25 @@ declared and permanently unused.
 
 ## 6. What the two halves of the request actually mean
 
-### 6.1 "Each node visible" — 25 nodes, and a state per node
+### 6.1 "Each node visible" — 54 nodes, and a state per node
 
-The inventory, measured today:
+The inventory, measured on 2026-08-18:
 
 | Registry | Count | Nodes |
 | --- | --- | --- |
-| `graph.nodes.PARENT_NODES` | 11 | `receive_signal` … `generate_resolution_options` |
+| `graph.nodes.PARENT_NODES` | 16 | `receive_signal` … `record_escalation` |
 | `subgraphs.remote_resolution.REMOTE_RESOLUTION_NODES` | 6 | `select_remote_action` … `abandon_remote_action` |
 | `subgraphs.self_help.SELF_HELP_NODES` | 8 | `select_self_help_script` … `abandon_self_help` |
-| **total** | **25** | plus `routing.DECISIONS` — 24 declared, 6 wired |
+| `subgraphs.field_planning.FIELD_PLANNING_NODES` | 8 | `build_field_requirement` … `abandon_field_planning` |
+| `subgraphs.field_execution.FIELD_EXECUTION_NODES` | 11 | `open_field_visit` … `abandon_handover` |
+| `subgraphs.preventive_maintenance.PREVENTIVE_MAINTENANCE_NODES` | 5 | `assess_predictive_risk` … `record_monitoring` |
+| **total** | **54** | plus `routing.DECISIONS` — 24 declared, 12 wired in the parent |
+
+Six registries, not three, and the count is the sum of them rather than of anything the parent
+graph knows: `builder.SUBGRAPH_NODES` adds five compiled graphs to the parent under one name each,
+so the parent itself has 21 nodes and `get_graph()` draws 21 — the 38 steps inside the five
+subgraphs are exactly what that number omits. The dashboard's inventory is the 54, which is why it
+has to be assembled from the registries and not read off the compiled graph.
 
 The per-node state comes from three sources that already exist and are already checkpointed. **No
 streaming API is required for any of it** (C5):
@@ -258,12 +307,34 @@ streaming API is required for any of it** (C5):
 | done (×n) | `node_visits[name]` | written by the `@node` decorator on **every** node, unconditionally — including the budget-escalation path. Reduces per-key `max`, so a replay cannot inflate it |
 | **waiting on a human** | `awaiting_node_path()` (§3) | the only node that can be *currently* paused |
 | what it did | `audit_events` filtered on `.node` | every event carries the node name, and `check_node_registry` guarantees at import that the name in the audit trail equals the name in the topology |
-| unreachable today | `builder.PENDING_STAGES` | the three unwired exits, named rather than hidden |
+| unreachable today | `builder.PENDING_STAGES` | the five unwired exits, named rather than hidden |
 
-That last row is a deliberate inclusion. Six of twenty-four decisions are wired; a dashboard that
-drew only what runs would show a tidy graph and conceal that most of it is unbuilt — the same failure
-the README's "four things this table would otherwise be expected to list" paragraph exists to
-prevent.
+That last row is a deliberate inclusion, and the reason has changed since this section was first
+written — it has got *better*, not weaker. When six of twenty-four decisions were wired, the
+argument was simply that most of the graph was unbuilt and a tidy drawing would hide it. That is no
+longer the shape of it. Measured on 2026-08-18: eighteen of the twenty-four are wired — twelve in
+the parent's `BRANCH_TARGETS` and six more inside the subgraphs, where `field_planning` answers D13,
+D14 and D15 and `field_execution` answers D16, D17 and D18. Only six routers are reachable from no
+graph at all: D19 to D24.
+
+Which makes the concealment *more* dangerous rather than less. Three quarters wired renders as a
+workflow that looks finished, and the six that are missing are not a scattered remainder. The
+specification names five stages; against its own headings, D19 and D20 are Stage 4's Dirty Boots and
+plant half, and D21 to D24 are the whole of Stage 5. So what is unwired is every question between
+"the repair was attempted" and "the incident is closed". `PENDING_STAGES` says as much in its
+entries for `D10:verify` and `D12:verify`: Stage 5 "is where every successful resolution ends up",
+and it does not exist.
+
+**No incident this graph runs can reach closure, and a dashboard drawing only what runs would not
+show that.** It would show four stages that each terminate tidily at `END`, and nothing to say that
+the fifth is where they were all supposed to go. §3 measured what those terminating arrows are
+labelled: two of the five pending exits are drawn `__escalated__`, so a naive rendering does not
+merely omit the gap — it reports it as a budget escalation, which is a different and far more
+reassuring lie.
+
+Naming the unreachable exits is therefore the same failure the README's "four things this table
+would otherwise be expected to list" paragraph exists to prevent, applied to the one part of the
+graph that a plausible rendering makes look complete.
 
 **D5 — per-node progress is reconstructed from the checkpoint, not streamed.** It therefore survives a
 process restart, a browser refresh and a Streamlit rerun, and it is identical for an incident being
@@ -324,13 +395,15 @@ form 2 is built; it is not derivable from the code.
 Five phases. Each ends at a point where the repo is green and something is demonstrably better; none
 depends on a later one.
 
-**Phase 1 — `inspect.awaiting_node_path()`.** One function, in the module that already does the
-walk (§3). Small, self-contained, and useful to the CLI and the API independently of any UI.
-*Gate:* the three commands, plus the red-test in §8.1.
+**Phase 1 — `inspect.awaiting_node_path()`. Done.** One function, in the module that already does
+the walk (§3), useful to the CLI and the API independently of any UI. It landed with the guard §8.1
+asks for, and the 1-tuple/2-tuple asymmetry §3 describes is the part a later phase still has to
+respect.
 
 **Phase 2 — the read-only API.** `src/lpr_cpe/api/` with `lifespan` wrapping `checkpointer_scope`,
 and the read endpoints only: incident state (via `effective_state`), pending approval, interrupt
-payloads, node path, and the topology inventory from the three tables. No writes at all.
+payloads, node path, and the topology — the node inventory from the six registries (§6.1) and the
+decisions from the three tables (§3). No writes at all.
 *Why reads first:* it closes the largest specification gap, it is safe by construction, and it
 unblocks phase 3 without any of the C2/C3 risk. `api/` is `docs/vendor-integration-gaps.md`'s and
 §5's outstanding row; this is that row, not a detour around it.
@@ -356,13 +429,16 @@ instead, that is a new line rather than an edit to the old one.
 ## 8. What must be shown able to go red
 
 The repo's doctrine — stated in `check_node_registry` and throughout `tests/unit/test_persistence.py`
-— is that a guard is not trusted until it has been seen to fail. Six guards, each with the defect to
-reinstate and the failure to record in the test's docstring.
+— is that a guard is not trusted until it has been seen to fail. Seven guards, each with the defect
+to reinstate and the failure to record in the test's docstring. The first is written; the rest wait
+on the phase that introduces the thing they guard.
 
-**8.1 The node path is real.** Pause an incident at a nested gate; assert `awaiting_node_path()`
-returns the two-element path *and* that the parent's own `.next` alone does not name the inner node.
-*Red by:* reading only `root.next` — reports `("resolution",)`, naming the subgraph rather than the
-step.
+**8.1 The node path is real. Written, and seen red.** Pause an incident at a nested gate; assert
+`awaiting_node_path()` returns the two-element path *and* that the parent's own `.next` alone does
+not name the inner node. *Red by:* reading only `root.next` — reimplemented as `tuple(root.next)`,
+the nested case failed with `assert ('gate',) == ('gate', 'ask')` while the flat case and every
+other test in the module passed. That asymmetry is why the test carries a flat control: flattened,
+the naive read is correct, which is how such a bug survives review.
 
 **8.2 The naive read is wrong.** Assert the dashboard's view disagrees with
 `aget_state(config).values` while paused, in the direction §2's table measured. *Red by:* building
@@ -382,8 +458,10 @@ proceeds with a **recorded rejection nobody made**. This is C3, and it is the on
 the UI bypassed entirely. *Red by:* enforcing only in Streamlit — accepted.
 
 **8.6 The dashboard's node list cannot drift from the graph's.** Assert the rendered inventory equals
-the union of the three registries. *Red by:* adding a node to a registry and not to the dashboard.
-The mirror of `check_node_registry`, one layer out.
+the union of the six registries. *Red by:* adding a node to a registry and not to the dashboard.
+The mirror of `check_node_registry`, one layer out. The registry count is itself the thing that
+drifts — this section said "three" while three more subgraphs were landing — so the assertion has to
+derive the union from `builder.SUBGRAPH_NODES` rather than from a list of imports.
 
 **8.7 The import boundary holds (D2).** Assert `lpr_cpe.graph` and `lpr_cpe.persistence` are absent
 from the dashboard package's import graph. *Red by:* one convenience import.
@@ -396,8 +474,9 @@ These need the user, not the code.
 
 - **O1** Who may relay a customer response? (§6.2)
 - **O2** Approval timeout. `ApprovalRequest.expires_at` is populated and
-  `ApprovalRequest.is_expired(now)` is written — and measured today, **`is_expired` has exactly one
-  occurrence in the tree, its own definition. Nothing calls it, in `src` or in `tests`.** So an
+  `ApprovalRequest.is_expired(now)` is written — and re-measured on 2026-08-18, **`is_expired` still
+  has exactly one occurrence in the tree, its own definition. Nothing calls it, in `src` or in
+  `tests`.** So an
   approval that has expired is indistinguishable, to the graph, from one that has not. Should the
   dashboard show it as still actionable, refuse it, or show it as expired and let a supervisor
   override? There is no timeout rule in the pack, and answering this in the UI alone would put the
@@ -430,7 +509,7 @@ one owner for resume validation (C2, C3).
 
 ### 10.2 Docker Desktop
 
-**There is nothing to containerise yet.** Measured: the tracked tree has six files outside
+**There is nothing to containerise yet.** Re-measured on 2026-08-18: the tracked tree has six files outside
 `src/`, `tests/` and `docs/` — `.env.example`, `.gitignore`, `IMPLEMENTATION_PLAN.md`, `Makefile`,
 `README.md`, `pyproject.toml`. **No `Dockerfile`, no `docker-compose.yml`, no `.dockerignore`, and no
 `api/` or dashboard to put in them.** So the question is not "will it run" but "will it run once

@@ -175,6 +175,11 @@ DECISION_AFTER: Mapping[str, str] = {
     "generate_resolution_options": "D07",
     "remote_resolution": "D10",
     "self_help": "D12",
+    # The two parent gates re-ask the decision that sent them the question. That is what closes
+    # each loop: `approval_outstanding` is false once the answer is recorded, so the second pass
+    # falls through to the clause that reads the answer, and the router picks the arm from it.
+    "request_low_confidence_review": "D06",
+    "request_blast_radius_approval": "D07",
 }
 
 #: Where each answer goes. Keys are checked against `Decision.branches`; values against the node
@@ -227,13 +232,13 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
         "continue": "create_diagnostic_test_plan",
     },
     "D06": {
-        "approve_low_confidence": END,
+        "approve_low_confidence": "prepare_low_confidence_review",
         "retry_diagnosis": "assemble_case_evidence",
         "continue": "generate_resolution_options",
     },
     "D07": {
-        "approve_high_blast_radius": END,
-        "escalate": END,
+        "approve_high_blast_radius": "prepare_blast_radius_approval",
+        "escalate": "record_escalation",
         "continue": "D08",
     },
     "D08": {
@@ -295,22 +300,6 @@ PENDING_STAGES: Mapping[str, str] = {
         "select, so the two cannot simply be joined by an edge. The specification's separate Clean "
         "Boots and Dirty Boots arms are that same seam; see the subgraph's module docstring and "
         "docs/vendor-integration-gaps.md"
-    ),
-    "D06:approve_low_confidence": (
-        "the L2/SME review interrupt -- a human-approval interruption that resumes the same "
-        "incident thread with the reviewer's structured response"
-    ),
-    "D07:approve_high_blast_radius": (
-        "the high-blast-radius approval gate -- the interrupt D07's 'require human approval' arm "
-        "needs. `remote_resolution` raises this kind when the pack demands it of a selected "
-        "action, but that is downstream of D09; a demand standing before the branch is chosen has "
-        "nowhere to be answered"
-    ),
-    "D07:escalate": (
-        "the escalation handler -- D07's 'or escalation' arm reaches END with `escalated` still "
-        "false and the status still `diagnosing`, because unlike D02 and D05 nothing on this path "
-        "has run `escalation_update`. The specification's third remedy, 'record the reason', is "
-        "the node that is missing"
     ),
     "D08:plant_path": (
         "the NOC, provisioning and plant branch -- Stage 4's Dirty Boots half, P20 onwards, which "
@@ -623,14 +612,16 @@ def _check_pending_stages() -> None:
         for answer, destination in targets.items()
         if destination == END and answer not in _DELIBERATE_ENDINGS.get(identifier, frozenset())
     }
-    gaps |= {f"{ONWARD}:{name}" for name in terminal_nodes}
+    gaps |= {f"{ONWARD}:{name}" for name in terminal_nodes if name not in _DELIBERATE_TERMINALS}
 
     undeclared = sorted(gaps - set(PENDING_STAGES))
     if undeclared:
         raise GraphTopologyError(
             f"these exits reach END with nothing to explain them: {undeclared}. A run that stops "
             "there looks like a run that finished. Add a PENDING_STAGES entry saying what is "
-            "missing, or add the entry to _DELIBERATE_ENDINGS if the run really does end there."
+            "missing, or -- if the run really does end there -- declare it: an entry named "
+            f"`Dnn:answer` belongs in _DELIBERATE_ENDINGS, one named `{ONWARD}:node` in "
+            "_DELIBERATE_TERMINALS."
         )
 
     stale = sorted(set(PENDING_STAGES) - gaps)
@@ -652,6 +643,20 @@ _DELIBERATE_ENDINGS: Mapping[str, frozenset[str]] = {
     "D02": frozenset({"manual_review"}),
     "D05": frozenset({"manual_review"}),
 }
+
+#: Nodes whose `END` is the real end of the workflow. The node-shaped half of `_DELIBERATE_ENDINGS`.
+#:
+#: Needed because the two halves of `_check_pending_stages` derive their gaps differently. A branch
+#: answer is excused by name; a *terminal node* -- one `_plain_edges` finds no successor for -- had
+#: no way to be excused at all, so the only way to declare one was a `PENDING_STAGES` line saying
+#: work was owed. For `record_escalation` that would be false: nothing is missing after it.
+_DELIBERATE_TERMINALS: frozenset[str] = frozenset(
+    {
+        # The incident is a human's now. `IncidentStatus.ESCALATED` moves onward to nine other
+        # statuses, so a supervisor resumes the thread; there is no next node for the graph to run.
+        "record_escalation",
+    }
+)
 
 
 # ------------------------------------------------------------------------------------------------

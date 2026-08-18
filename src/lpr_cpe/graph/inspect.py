@@ -122,8 +122,14 @@ async def awaiting_node_path(
     pair that drifts.
 
     **If two gates were ever outstanding at once this names one of them.** `interrupt_payloads`
-    stays the complete list. Today the graph cannot produce two: the resolution fork is unwired, and
-    each subgraph has a single gate. When it can, this returns a path per interrupt or it lies.
+    stays the complete list. The graph still cannot produce two, but the reason is no longer "the
+    resolution fork is unwired": the fork is wired, each subgraph has a single gate, and D06's and
+    D07's own gates are sequential and sit upstream of every subgraph -- both are released before
+    one is entered. When that stops holding, this returns a path per interrupt or it lies.
+
+    The path is two elements long for the four nested gates and **one** for D06's and D07's, which
+    are flat in the parent. `("request_low_confidence_review",)` was measured; `graph.interrupts`
+    covers what else that difference costs a caller.
     """
     snapshot: Any = await app.aget_state(config, subgraphs=True)
     path: list[str] = []

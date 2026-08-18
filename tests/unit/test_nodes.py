@@ -41,7 +41,12 @@ from lpr_cpe.domain.enums import (
 from lpr_cpe.domain.governance import ActionRecord
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.context import build_context
-from lpr_cpe.graph.nodes import PARENT_NODES
+from lpr_cpe.graph.nodes import (
+    DIAGNOSIS_NODES,
+    EVIDENCE_NODES,
+    INTAKE_NODES,
+    PARENT_NODES,
+)
 from lpr_cpe.graph.nodes._runtime import preview
 from lpr_cpe.graph.nodes.diagnosis import determine_root_cause, generate_resolution_options
 from lpr_cpe.graph.routing import (
@@ -97,7 +102,15 @@ def _event(service: dict[str, Any]) -> AssuranceEvent:
 
 
 async def _run_parent(service: dict[str, Any]) -> tuple[dict[str, Any], Any]:
-    """P01 through P11 over one fixture service. Returns the final state and the context used."""
+    """P01 through P11 over one fixture service. Returns the final state and the context used.
+
+    The three stage registries and not `PARENT_NODES`, which now holds five more. This helper walks
+    the pipeline straight through, and the governance five are not on it: they sit on branch arms of
+    D06 and D07 that a linear walk has no way to have chosen. Walking them anyway raised
+    `RuntimeError: Called get_config outside of a runnable context` from
+    `request_low_confidence_review`, which is `interrupt()` refusing to be called outside a graph --
+    the honest complaint that this walk is not a graph run.
+    """
     clock = _Frozen(NOW)
     ctx = build_context(clock=clock)  # type: ignore[arg-type]
     state = make_initial_state(
@@ -112,7 +125,7 @@ async def _run_parent(service: dict[str, Any]) -> tuple[dict[str, Any], Any]:
         ),
         now=NOW,
     )
-    for _, fn in PARENT_NODES:
+    for _, fn in (*INTAKE_NODES, *EVIDENCE_NODES, *DIAGNOSIS_NODES):
         clock.advance(timedelta(seconds=3))
         update = await fn.__wrapped__(state, ctx)
         state = preview(state, update)
@@ -348,8 +361,14 @@ def test_the_parent_registry_is_the_eleven_nodes_in_specification_order() -> Non
     `nodes/__init__` already checks at import that each registry key matches the name its `@node`
     decorator stamps into the audit trail. What it cannot check is that the order is the one the
     specification numbers, because nothing in the code knows what P01 means. That is written here.
+
+    The eleven are asserted as a prefix rather than as the whole tuple, because the governance five
+    are appended after them and are not a specification stage -- they belong to D06 and D07, which
+    are asked *between* P10 and P11 and after P11 respectively. Order still matters for all sixteen
+    and `test_the_governance_five_are_appended_in_gate_pair_order` covers the tail; splitting the
+    assertion keeps this one about the numbering the specification actually gives.
     """
-    assert [name for name, _ in PARENT_NODES] == [
+    assert [name for name, _ in PARENT_NODES][:11] == [
         "receive_signal",
         "normalize_event",
         "resolve_identity_and_topology",
@@ -361,4 +380,26 @@ def test_the_parent_registry_is_the_eleven_nodes_in_specification_order() -> Non
         "execute_read_only_tests",
         "determine_root_cause",
         "generate_resolution_options",
+    ]
+
+
+def test_the_governance_five_are_appended_in_gate_pair_order() -> None:
+    """The tail of `PARENT_NODES`, whose order `builder._plain_edges` reads as edges.
+
+    Order is load-bearing in a way it is not for the eleven, and differently: `_plain_edges` draws
+    an edge between each consecutive pair whose left member is absent from `DECISION_AFTER`. Both
+    `request_` nodes are in that table, so the only joins drawn here are the two `prepare ->
+    request` pairs -- and that is what this order buys. Swapping either pair, or interleaving them,
+    would either drop a gate's own edge or draw one from a gate into the next gate's question.
+
+    `record_escalation` is last because a node with no successor is what `_plain_edges` reads as
+    terminal, and `_DELIBERATE_TERMINALS` is what stops `_check_pending_stages` reading that
+    terminal as owed work.
+    """
+    assert [name for name, _ in PARENT_NODES][11:] == [
+        "prepare_low_confidence_review",
+        "request_low_confidence_review",
+        "prepare_blast_radius_approval",
+        "request_blast_radius_approval",
+        "record_escalation",
     ]

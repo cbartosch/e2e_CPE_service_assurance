@@ -61,8 +61,13 @@ So the parent's own state understates what is happening for exactly as long as a
 waited on. Reading the parent alone would report an incident as `dispatch_planning` while it is in
 fact blocked on an approval -- the single most misleading answer this system could give.
 
-This is a property of nesting, not of these functions, and every one of the six gates is nested.
-`graph.inspect.pending_approval_for` is the supported way to ask, and it reads through the boundary.
+This is a property of nesting, not of these functions, and it applies to four of the six gates --
+the ones a subgraph owns. The two D06 and D07 ask are flat in the parent (`graph.nodes.governance`),
+so their `pending_approval` is on the parent's own state and `aget_state(config).values` shows it.
+`graph.inspect.pending_approval_for` is the supported way to ask either way: it reads through the
+boundary when there is one, and `graph.inspect._snapshots` puts the root first so a flat gate is
+found without one. Code that reaches past it to `.tasks[0].state.values` finds nothing for a parent
+gate, which is the mirror image of the failure above and just as misleading.
 """
 
 from __future__ import annotations
