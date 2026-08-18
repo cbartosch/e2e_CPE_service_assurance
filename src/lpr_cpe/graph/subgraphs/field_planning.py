@@ -146,7 +146,13 @@ Where the parent cannot see this
 --------------------------------
 While `request_dispatch_approval` is paused, `pending_approval` and `status=awaiting_approval` are
 in *this* graph's checkpoint and not the parent's. `graph.inspect.pending_approval_for` reads
-through the boundary; the parent alone reports the incident as `dispatch_planning`.
+through the boundary; the parent alone reports the incident as `diagnosing` -- measured at that
+pause on all 40 fixture runs that reach the gate.
+
+Not `dispatch_planning`, which is the plausible guess and the wrong one. This module writes that
+status at three sites and every one of them is on this side of the boundary, so the parent cannot
+be holding it while the gate is open: the write that would set it is precisely what a paused
+subgraph has not delivered.
 """
 
 from __future__ import annotations

@@ -2,15 +2,23 @@
 
 The specification asks for state-inspection endpoints. The naive implementation of one --
 `(await app.aget_state(config)).values` -- is wrong in the single case anybody actually calls it
-for. Measured on langgraph 1.2.11 with the incident paused at a nested approval gate:
+for. Measured on langgraph 1.2.11, driving the real parent graph until it pauses at
+`("field_planning", "request_dispatch_approval")` -- `SVC-SJ-011-A-01` under a proactive alarm, and
+identically on all 40 fixture runs that reach that gate:
 
-    parent  .values                                       status=dispatch_planning  pending=None
+    parent  .values                                       status=diagnosing         pending=None
     task    .tasks[0].state.values (subgraphs=True)        status=awaiting_approval  pending=set
 
 A subgraph's writes reach the parent when the subgraph node completes. A paused one has not
 completed, so for exactly as long as a human is being waited on, the parent's state understates
-what is happening. An endpoint built on the parent alone would report "dispatch planning" for an
-incident that has been sitting on someone's approval queue since Tuesday.
+what is happening. An endpoint built on the parent alone reports "diagnosing" for an incident that
+has been sitting on someone's approval queue since Tuesday -- the stage *before* the one it is in,
+which is plausible enough to go unquestioned.
+
+It cannot report the stage the incident is actually in, and the reason is this claim restating
+itself: `IncidentStatus.DISPATCH_PLANNING` is assigned at three sites and all three are inside
+`subgraphs/field_planning.py`, on the far side of the boundary. Nothing under `graph/nodes/` writes
+it at all, so the parent has no way to be holding it while the gate is open.
 
 Every function here therefore reads through the boundary. They take the compiled app rather than a
 state mapping, because the information simply is not in the mapping.
@@ -105,9 +113,16 @@ async def awaiting_node_path(
 
     The question a console asks first and the one the interrupt itself cannot answer. Measured on
     langgraph 1.2.11: `Interrupt` carries `id` and `value` and nothing else. The `id` is an opaque
-    digest (`5ed6ae3c455c6fcdc2eee48356fbbf12`) that names no node, and `Interrupt.from_ns` -- which
-    reads like the missing field -- is a **classmethod**, so `i.from_ns` yields a bound method
-    rather than a namespace. There is no node name anywhere on the object.
+    32-hex digest that names no node -- `from_ns` builds it as `xxh3_128_hexdigest(ns.encode())`,
+    so the namespace goes in and only its hash comes out -- and `from_ns` itself, which reads like
+    the missing field, is a **classmethod**, so `i.from_ns` yields a bound method rather than a
+    namespace. There is no node name anywhere on the object.
+
+    **No example id is quoted here, deliberately.** The digest holds still across a re-pause within
+    one thread, which is what makes it a usable resume handle, but two runs of the same incident on
+    the same `thread_id` produce different ids -- measured at this gate, three runs, three digests.
+    A literal pasted here would be a number no reader could reproduce, and the one that used to sit
+    here was exactly that. It is also why the id is worthless as a queue key across runs.
 
     It is on the *tasks*, which is why this walks them rather than reusing `_snapshots`. That helper
     merges `values` and drops the task it took them from; the name is exactly what it discards. Two

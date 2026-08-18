@@ -551,8 +551,18 @@ async def test_the_parent_alone_understates_a_paused_incident_and_inspect_correc
 
     A subgraph's writes reach the parent when the subgraph node *completes*, and a paused one has
     not. So the obvious implementation of a state-inspection endpoint -- read `.values` off the
-    parent -- reports an incident as `dispatch_planning` while it has in fact been sitting on
-    someone's approval queue.
+    parent -- reports whatever stage the incident was in when it entered the subgraph, while it has
+    in fact been sitting on someone's approval queue.
+
+    **`dispatch_planning` below is this harness's figure and not the real graph's**, and the
+    distinction is worth keeping because the number looks like a measurement and is not one.
+    `_gate_app` is handed `status=DISPATCH_PLANNING` on the way in, so that is simply what the
+    parent still holds at the pause -- which is what makes it a clean statement of the mechanism:
+    one seeded field, and the paused child disagreeing with it. Driven through the *real* parent the
+    same read returns `diagnosing`, because `DISPATCH_PLANNING` is written only inside
+    `subgraphs/field_planning.py` and a paused subgraph never delivers the write. `graph.inspect`'s
+    module docstring carries that measurement; this test is about the mechanism, and seeding the
+    status is what keeps the two independent rather than two copies of one run.
 
     The naive read is asserted to be wrong as well as the corrected read to be right. Without that
     half, a future LangGraph that started propagating subgraph writes eagerly would leave

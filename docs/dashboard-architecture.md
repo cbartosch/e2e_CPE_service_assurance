@@ -37,8 +37,8 @@ consumer and already provides every read a dashboard needs.
 | **Which node is asking** | `awaiting_node_path(app, config)` — **see §3, and the shape it returns is not uniform** |
 
 Its module docstring already states the case for its own existence in dashboard terms: an endpoint
-built on the parent's `aget_state(config).values` alone "would report 'dispatch planning' for an
-incident that has been sitting on someone's approval queue since Tuesday."
+built on the parent's `aget_state(config).values` alone reports "diagnosing" for an incident "that
+has been sitting on someone's approval queue since Tuesday" — the stage *before* the one it is in.
 
 `security/rbac.py` likewise anticipated a UI in as many words — reason 4 on `_ALLOWLIST` is that the
 structure "serialises into `docs/policy-controls.md` and into an API response for a UI that greys out
@@ -55,35 +55,89 @@ verification effort.
 ## 2. Six measured constraints the design has to survive
 
 These are not style preferences. Each has a failure mode that a plausible naive dashboard walks
-straight into, and each was measured — the first four on 2026-08-16, against langgraph 1.2.11. They
-have not been retaken since; the counts in §3 and §6.1 have.
+straight into, and each was measured. **C1-C4 were retaken on 2026-08-18** against langgraph 1.2.11
+— on the real parent graph this time rather than on a test arrangement, because since the field
+branch landed the fixture corpus reaches a nested approval gate on its own. All four claims held;
+C1's number was wrong, and C2, C3 and C4 each needed a correction to a supporting detail. **C5 and
+C6 were not part of that pass and still date from 2026-08-16.**
 
-**C1 — A paused subgraph's state is invisible from the parent.** `aget_state(config).values` reports
-`status=dispatch_planning, pending_approval=None` at the exact moment an approval is outstanding.
-*Naive failure:* the dashboard shows an empty approval queue while work is blocked. *Mitigation:*
-every read goes through `inspect.py`. Never `aget_state` directly.
+**C1 — A paused subgraph's state is invisible from the parent.** The corpus now walks into this
+unassisted: driven through the real parent, **42 of the 82 fixture runs** (41 services × two case
+types) stop on a human, and 41 of those stop at an approval gate — 40 at the dispatch gate inside
+`field_planning` and one at the remote gate — with the remaining one at self-help's customer wait.
+Counted twice over: by `awaiting_node_path()`, and by `is_awaiting_human()` split on whether
+`pending_approval_for()` is set, which is the same 41/1. On `SVC-SJ-011-A-01` under a proactive
+alarm, paused at `("field_planning", "request_dispatch_approval")`:
 
-**C2 — `Command(resume={})` is a silent no-op.** The graph re-pauses with the interrupt still
-outstanding and the node leaves **no audit trail** — pinned by
-`test_an_empty_resume_map_never_reaches_the_node`. *Naive failure:* a form submitted before a
-selection is made looks to the operator like a click that did nothing, and looks to the audit trail
-like a click that never happened. §2 of the plan already states the obligation: "whatever validates
-resume payloads at the API boundary has to reject `{}` explicitly."
+```
+parent .next                          ('field_planning',)
+parent .values['status']              diagnosing
+parent .values['pending_approval']    None
+tasks[0].state.values['status']       awaiting_approval
+inspect.effective_state()             awaiting_approval, pending kind=dispatch
+```
 
-**C3 — `_decision_from_answer` is deliberately total and never raises.** A non-dict answer, a missing
-`decided_by`, a role that may not approve, or an unrecognised status each produce a **recorded
-rejection**. That is the right behaviour for the graph — an exception there "would leave the incident
-un-resumable at the one moment a human is already involved" — and it is the most dangerous thing in
-this design. *Naive failure:* a Streamlit form that forgets to send `decided_by` does not error. It
-**silently refuses the approval** and the incident proceeds down the refused branch, with an audit
-trail that says a human declined. **This is the single failure the verification plan in §8 is most
+`diagnosing`, not the `dispatch_planning` recorded on 2026-08-16 — and the correction is the
+constraint restating itself. `IncidentStatus.DISPATCH_PLANNING` is written at three sites and all
+three are in `subgraphs/field_planning.py`; nothing under `graph/nodes/` writes it at all. So the
+parent *cannot* be holding that status while the gate is open, because the write that would set it
+is on the far side of the boundary this claim is about. The old figure came from a test graph that
+seeded the status into the parent before entering the subgraph, which is the one arrangement in
+which a parent could report it. What a naive dashboard reports on the real graph is the stage
+*before* the one the incident is in. *Naive failure:* the dashboard shows an empty approval queue
+while work is blocked. *Mitigation:* every read goes through `inspect.py`. Never `aget_state`
+directly.
+
+**C2 — `Command(resume={})` is a silent no-op.** Re-measured at the real dispatch gate: the graph
+re-pauses, one interrupt still outstanding under **the same id**, `awaiting_node_path` unchanged,
+and `approvals` unmoved at zero. `test_an_empty_resume_map_never_reaches_the_node` still pins it and
+still passes. *What the retake changed is the evidence.* That test watches a node which writes an
+audit event when it runs, so an empty trail there proves the resume was dropped before delivery. **A
+gate node writes no audit event at all** — `request_dispatch_approval` is absent from the trail of a
+*successful* approval too, measured, and none of the six `request_*` nodes so much as names
+`audit_events`: all six delegate to `interrupts.request_approval`, whose return is `approvals` /
+`pending_approval` / `updated_at` and nothing else. So at the six gates a dashboard actually cares
+about, the audit trail cannot distinguish a dropped resume from a delivered one. The missing
+**`ApprovalDecision`** is the only sign; the same gate handed a malformed but non-empty answer
+records one immediately. *Naive failure:* a form submitted before a selection is made looks to the
+operator like a click that did nothing, and looks to the audit trail like a click that never
+happened. §2 of the plan already states the obligation: "whatever validates resume payloads at the
+API boundary has to reject `{}` explicitly."
+
+**C3 — `_decision_from_answer` is deliberately total and never raises.** Re-measured against the
+live pending request: a non-dict answer, a missing `decided_by`, a role that may not approve and an
+unrecognised status each return a **recorded rejection** stamped
+`POLICY_ACTION_NOT_PERMITTED_FOR_ROLE`, and not one of the four raises. That is the right behaviour
+for the graph — an exception there "would leave the incident un-resumable at the one moment a human
+is already involved" — and it is the most dangerous thing in this design. *Naive failure:* a
+Streamlit form that forgets to send `decided_by` does not error. Driven end to end at the dispatch
+gate, an answer of `{"status": "approved", "rationale": …}` with no `decided_by` returned no error
+and recorded `dispatch → rejected, decided_by='unknown'`.
+
+**What follows is worse than the 2026-08-16 note said, because the refused branch is not terminal.**
+The subgraph replanned — `optimize_field_schedule → evaluate_dispatch_policy →
+prepare_dispatch_approval` — and paused on the *same question again*, with `is_awaiting_human` back
+to `True`. The control resumed with a named permitted approver instead runs `commit_field_dispatch →
+open_field_visit` and reaches `field_in_progress`. So the operator clicks Approve, is shown no
+error, and watches the question reappear in their own queue; and the trail does not say a human
+declined, it says `unknown` did. **This is the single failure the verification plan in §8 is most
 concerned with.**
 
-**C4 — The interrupt object does not say which node raised it.** Measured: `Interrupt` exposes `id`
-(an opaque 32-hex hash, e.g. `5ed6ae3c455c6fcdc2eee48356fbbf12`) and `value`. `from_ns` is a
-*classmethod*, not data — reading it yields a bound method. So `interrupt_payloads()` alone cannot
-answer "which step is this?", which is the dashboard's central question. §3 shows where the answer
-actually lives.
+**C4 — The interrupt object does not say which node raised it.** Re-measured: `Interrupt` is a slots
+dataclass whose fields are exactly `('value', 'id')`. `from_ns` is a *classmethod*, not data —
+reading it yields a bound method — and its body is why the namespace cannot be recovered:
+`cls(value=value, id=xxh3_128_hexdigest(ns.encode()))`, so the namespace goes in and only its digest
+comes out. The one public attribute the 2026-08-16 pass did not name, `interrupt_id`, is a
+deprecated property that returns `.id` and warns `LangGraphDeprecatedSinceV10`; it is neither a
+third field nor a node name.
+
+**The id is not a name, and it is not stable either.** `9ac9d03841fde52eab6f20d2d87c4230` was
+measured — 32 hex, as before — but two runs of the same incident on the same `thread_id` produced
+`49f83ceb7ce99f9b6ee5444f7fb97e84` and `5ae2c91e59baf23a65a5bfdd998d71b0`. It holds still across a
+re-pause within one thread (C2), which is what makes it a usable resume handle, and it is worthless
+as a queue key across runs. The example quoted here on 2026-08-16 was therefore never reproducible
+and is replaced rather than rechecked. So `interrupt_payloads()` alone cannot answer "which step is
+this?", which is the dashboard's central question. §3 shows where the answer actually lives.
 
 **C5 — No streaming API is used or verified anywhere in this repo.** Every test drives the graph with
 `ainvoke`; `grep` for `astream|stream_mode|stream_events` matches no test file. §2 of the plan
@@ -442,13 +496,15 @@ the naive read is correct, which is how such a bug survives review.
 
 **8.2 The naive read is wrong.** Assert the dashboard's view disagrees with
 `aget_state(config).values` while paused, in the direction §2's table measured. *Red by:* building
-the view on the naive read — reports `dispatch_planning` / no pending approval.
+the view on the naive read — reports `diagnosing` / no pending approval.
 
 **8.3 An empty resume is rejected at the boundary.** *Red by:* removing the check — the endpoint
-returns success, the graph re-pauses, and **no audit event is written**. The absence of the audit
-event is the assertion that matters; a test that only checks the re-pause cannot tell "dropped before
-delivery" from "delivered and found unusable", which is the distinction
-`test_an_empty_resume_map_never_reaches_the_node` was written to preserve.
+returns success and the graph re-pauses having recorded **no `ApprovalDecision`**. The absence of
+the decision is the assertion that matters; a test that only checks the re-pause cannot tell
+"dropped before delivery" from "delivered and found unusable", which is the distinction
+`test_an_empty_resume_map_never_reaches_the_node` was written to preserve. That test asserts on a
+missing *audit event*, which works because the node it watches writes one; C2 records why the same
+assertion is empty at an approval gate, where no gate node writes one either way.
 
 **8.4 A malformed approval answer never reaches the graph.** *Red by:* removing the boundary
 validation and posting an answer with no `decided_by` — the endpoint returns success and the incident

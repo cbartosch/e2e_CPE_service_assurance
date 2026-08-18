@@ -50,16 +50,20 @@ shown*, which LangGraph owns and discards on resume.
 Where the parent cannot see it
 ------------------------------
 `prepare_approval` commits before the pause -- but only into the **subgraph's** state. Measured on
-langgraph 1.2.11, with the gate nested and the incident paused:
+langgraph 1.2.11, driving the real parent graph to the nested dispatch gate (`SVC-SJ-011-A-01`
+under a proactive alarm, and the same on all 40 fixture runs that reach it):
 
-    parent   aget_state(config).values        status=dispatch_planning   pending_approval=None
+    parent   aget_state(config).values        status=diagnosing          pending_approval=None
     subgraph aget_state(config, subgraphs=True).tasks[0].state.values
                                               status=awaiting_approval   pending_approval=set
 
 A subgraph's writes reach the parent when the subgraph node *completes*, and a paused one has not.
 So the parent's own state understates what is happening for exactly as long as a human is being
-waited on. Reading the parent alone would report an incident as `dispatch_planning` while it is in
-fact blocked on an approval -- the single most misleading answer this system could give.
+waited on. Reading the parent alone reports an incident as `diagnosing` while it is in fact blocked
+on an approval -- the single most misleading answer this system could give, and the more so for
+naming a stage the incident has already left rather than an obviously wrong one. The status the
+subgraph is holding never reaches the parent at all: `DISPATCH_PLANNING` is assigned only inside
+`subgraphs/field_planning.py`, so it is not among the answers a parent read can return.
 
 This is a property of nesting, not of these functions, and it applies to four of the six gates --
 the ones a subgraph owns. The two D06 and D07 ask are flat in the parent (`graph.nodes.governance`),

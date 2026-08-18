@@ -222,11 +222,11 @@ async def test_a_policy_demand_diverts_p10_into_the_gate_pair_and_stops_there(
 async def test_the_flat_gate_needs_no_subgraph_to_be_visible(at_rca_gate: Any) -> None:
     """The mirror image of the trap `graph.interrupts` documents, and the reason it says "four".
 
-    For the four nested gates the parent's own `.values` understates the incident -- `status` reads
-    `dispatch_planning` while the paused child reads `awaiting_approval` -- so a caller must go
-    through `graph.inspect`. These two are the opposite case and it is asserted here so the
-    docstring in `interrupts` is not the only record of it: the parent's `.values` is complete, and
-    the interrupted task has **no child state at all**::
+    For the four nested gates the parent's own `.values` understates the incident -- at the real
+    dispatch gate `status` reads `diagnosing` while the paused child reads `awaiting_approval` -- so
+    a caller must go through `graph.inspect`. These two are the opposite case and it is asserted
+    here so the docstring in `interrupts` is not the only record of it: the parent's `.values` is
+    complete, and the interrupted task has **no child state at all**::
 
         tasks == [('request_low_confidence_review', state is None)]
 
