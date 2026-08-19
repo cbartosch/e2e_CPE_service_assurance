@@ -29,16 +29,18 @@ from typing import Any
 
 import pytest
 
+from lpr_cpe.domain.closure import ValidationResult
 from lpr_cpe.domain.enums import (
     ActionOutcome,
     ActionType,
     CaseType,
     EventSource,
     FaultDomain,
+    ReasonCode,
     Severity,
     Technology,
 )
-from lpr_cpe.domain.governance import ActionRecord
+from lpr_cpe.domain.governance import ActionRecord, ActionRequest
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.nodes import (
@@ -48,6 +50,11 @@ from lpr_cpe.graph.nodes import (
     PARENT_NODES,
 )
 from lpr_cpe.graph.nodes._runtime import preview
+from lpr_cpe.graph.nodes.closure import (
+    confirm_customer_outcome,
+    confirmation_required,
+    customer_verdict,
+)
 from lpr_cpe.graph.nodes.diagnosis import determine_root_cause, generate_resolution_options
 from lpr_cpe.graph.routing import (
     route_remote_eligibility,
@@ -55,6 +62,7 @@ from lpr_cpe.graph.routing import (
     route_shared_or_plant,
 )
 from lpr_cpe.graph.state import make_initial_state
+from lpr_cpe.integrations.communications.simulator import SELF_HELP_SCRIPTS
 from lpr_cpe.policies.engine import PolicyEngine
 
 #: Fixed so that every derived id and every KPI duration is reproducible. The simulator's fixtures
@@ -351,6 +359,200 @@ async def test_a_second_lap_of_the_self_help_loop_records_two_of_everything(fixt
 
 
 # ------------------------------------------------------------------------------------------------
+# P23 -- the customer's word
+# ------------------------------------------------------------------------------------------------
+
+
+def test_p23_asks_only_where_the_pack_says_telemetry_cannot_see() -> None:
+    """`confirmation_required` reads the pack's list and does not keep a second one.
+
+    The specification's rule is that a customer is asked only where telemetry and service tests
+    cannot establish the actual experience, and the pack already names those domains. Both
+    directions are asserted over the whole enum, so a domain added to `FaultDomain` without a
+    decision about it shows up here rather than defaulting to "no need to ask".
+
+    The expected set is read from the pack, so this test asserts the *wiring* -- that the node
+    consults the pack -- and not the pack's contents, which are the pack's own business and change
+    without this file being wrong.
+    """
+    ctx = build_context(clock=_Frozen(NOW))  # type: ignore[arg-type]
+    expected = ctx.policy.pack.validation.require_customer_confirmation_for_domains
+
+    asked = {
+        domain for domain in FaultDomain if confirmation_required({"fault_domain": domain}, ctx)
+    }  # type: ignore[arg-type]
+    assert asked == set(expected)
+
+    # And an incident whose domain was never established is not one telemetry has spoken for, so
+    # the default `UNKNOWN` must be decided by the same list rather than assumed either way.
+    assert confirmation_required({}, ctx) is (FaultDomain.UNKNOWN in expected)  # type: ignore[arg-type]
+
+
+def test_the_newest_understood_reply_is_the_customers_current_answer() -> None:
+    """A customer who changes their mind is answered by the change, not by what they said first.
+
+    `customer_verdict` takes the first row it understands and `fetch_customer_responses` returns
+    newest first, so "first" here means "most recent" -- the two facts only compose because of the
+    ordering, which is why the test below pins it against the adapter.
+
+    Rows the vocabulary does not cover are skipped rather than treated as silence, which is the
+    case the middle row covers: a reply about something else must not stop the reader before it
+    reaches the answer underneath.
+
+    `None` is asserted separately from `False` because `route_resolution` treats them oppositely --
+    a `False` goes back to diagnosis, a `None` carries on -- and a reader that collapsed them would
+    re-diagnose every incident nobody needed to phone.
+    """
+    newest_first = [
+        {"response": "still_broken"},
+        {"response": "completed"},
+        {"response": "yes"},
+    ]
+    assert customer_verdict(newest_first) is False
+    assert customer_verdict(newest_first[1:]) is True
+    assert customer_verdict([{"response": " Fixed "}]) is True, "trimmed and case-folded"
+
+    assert customer_verdict([]) is None
+    assert customer_verdict([{"response": None}, {"free_text": "hello"}]) is None
+
+
+async def test_the_adapter_returns_customer_replies_newest_first(fixtures: Any) -> None:
+    """The undocumented ordering two readers depend on, given one place to go red.
+
+    `CommunicationsAdapter.fetch_customer_responses` is typed `list[dict[str, Any]]` and says
+    nothing about order, but `closure.customer_verdict` and `self_help.await_customer_response`
+    both take the *first* matching row and both mean "the most recent". Neither could see this
+    assumption break; the simulator could reorder and both would quietly start answering with a
+    stale reply.
+
+    Sent for real rather than hand-built, because a hand-built list would be asserting that
+    `sorted` sorts. Every script in `SELF_HELP_SCRIPTS` goes out for one incident, which is what
+    makes the timestamps differ: the simulator derives `responded_at` from a roll seeded on the
+    script id.
+
+    Shown red by dropping `reverse=True` from the simulator's sort, and the useful half of that
+    measurement is what stayed green: forty other tests, including the whole of
+    `test_subgraph_self_help.py`, which is the other reader::
+
+        E       AssertionError: newest first, which is what 'first row' means
+        E       assert ['2026-03-02T...187624+00:00'] == ['2026-03-02T...583576+00:00']
+        E         At index 0 diff: '2026-03-02T14:18:56.583576+00:00' != '2026-03-02T14:20:57...
+
+    So nothing else in the suite holds this. Both readers would have gone on answering with the
+    oldest reply and every one of their own tests would have passed.
+
+    The second assertion is the measured open item, not an aside. The simulator's `response` field
+    only ever holds `completed` or `declined` -- the self-help vocabulary, which answers "did you
+    carry out the step?" and not "is your service working?". So against the shipped adapter
+    `customer_verdict` returns `None` for every incident, the validation stays unconfirmed, and an
+    incident in a domain that requires the customer's word cannot get it. The outbound half that
+    would ask is the gap `closure.py` sets out: contacting a customer needs an `ActionRequest`
+    carrying a `PolicyDecision`, and Stage 5 has no `ResolutionOption` to build one from.
+    """
+    ctx = build_context(clock=_Frozen(NOW))  # type: ignore[arg-type]
+    comms = ctx.adapters.communications
+    incident = "INC-P23-ORDERING"
+    for index, script in enumerate(sorted(SELF_HELP_SCRIPTS)):
+        await comms.send_self_help(
+            ActionRequest(
+                action_id=f"ACT-P23-{index}",
+                incident_id=incident,
+                action_type=ActionType.SEND_SELF_HELP,
+                target_ref=_service(fixtures, "hfc_degraded_upstream")["customer_ref"],
+                requested_at=NOW,
+                idempotency_key=f"IDKEY-P23-{index}",
+                actor="test",
+                reason_code=ReasonCode.SELF_HELP_SUCCEEDED,
+                correlation_id=f"COR-{incident}",
+                parameters={"script_id": script, "channel": "sms", "language": "en"},
+            )
+        )
+
+    rows = await comms.fetch_customer_responses(incident)
+    assert len(rows) > 1, "one row cannot show an order"
+    stamps = [str(row["responded_at"]) for row in rows]
+    assert stamps == sorted(stamps, reverse=True), "newest first, which is what 'first row' means"
+
+    assert customer_verdict(rows) is None
+    assert {row["response"] for row in rows} <= {"completed", "declined"}
+
+
+async def test_p23_records_the_customers_denial_without_erasing_the_telemetrys_pass(
+    fixtures: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `passed` record carrying `customer_confirmed=False` reads like a contradiction, and is one.
+
+    That is the whole reason D22 exists: the readings say the service is fine and the customer says
+    it is not, and something has to decide which wins. Overwriting `passed` here would destroy the
+    evidence that they disagreed and leave D22 routing on a record that no longer shows the
+    conflict -- so the node revises one field and leaves the rest of `validate_restoration`'s
+    judgement alone.
+
+    The reply is injected. The simulator cannot produce this vocabulary at all, as the test above
+    measures, so driving it through the shipped adapter would assert nothing: the verdict would be
+    `None` and no copy would be made. Patched at the adapter rather than by passing rows in,
+    because the node's own read is part of what is under test.
+
+    Shown red by adding `"passed": verdict` to the node's `model_copy`, which is the tempting
+    version -- the customer says no, so record that it did not pass::
+
+        E       AssertionError: the telemetry did pass; the disagreement is the record
+        E       assert False is True
+
+    That mutation leaves a record D22 still routes correctly on, which is why it needs a test of
+    its own: the incident goes back to diagnosis either way, and the only thing lost is the reason.
+    """
+    state, ctx = await _run_parent(_service(fixtures, "pon_degraded_optical"))
+    passed = ValidationResult(
+        validation_id="VAL-P23",
+        incident_id=state["incident_id"],
+        validated_at=NOW,
+        window_start=NOW - timedelta(hours=1),
+        stability_window=timedelta(minutes=30),
+        samples_in_window=3,
+        min_samples_required=3,
+        passed=True,
+    )
+
+    async def denied(incident_id: str) -> list[dict[str, Any]]:
+        return [{"incident_id": incident_id, "response": "still_broken"}]
+
+    monkeypatch.setattr(ctx.adapters.communications, "fetch_customer_responses", denied)
+    update = await confirm_customer_outcome.__wrapped__(preview(state, {"validation": passed}), ctx)
+
+    revised = update["validation"]
+    assert revised.customer_confirmed is False
+    assert revised.passed is True, "the telemetry did pass; the disagreement is the record"
+    assert revised.validation_id == passed.validation_id
+    assert revised.model_dump(exclude={"customer_confirmed"}) == passed.model_dump(
+        exclude={"customer_confirmed"}
+    ), "one field revised, and the window this node did not observe left alone"
+
+    (recorded,) = update["audit_events"]
+    assert recorded.outcome == "denied"
+    assert recorded.detail["customer_confirmed"] is False
+    assert recorded.detail["validation_id"] == passed.validation_id
+
+
+async def test_p23_refuses_a_state_that_never_reached_a_verdict(fixtures: Any) -> None:
+    """No validation is a wiring fault, not an incident condition, so it raises rather than routes.
+
+    D21's `confirm_outcome` is the only edge into this node and `route_stability` gives that answer
+    only for a validation that passed, so arriving here without one means the graph was rewired
+    wrongly. Returning a `None` verdict instead would send the incident to D22, which reads an
+    absent validation as `retry_diagnosis` -- a plausible-looking re-diagnosis that hides the
+    rewiring for as long as anyone cares to look.
+    """
+    state, ctx = await _run_parent(_service(fixtures, "pon_degraded_optical"))
+    assert state.get("validation") is None, (
+        "P11 does not produce one, which is what makes this real"
+    )
+
+    with pytest.raises(ValueError, match="no validation record"):
+        await confirm_customer_outcome.__wrapped__(state, ctx)
+
+
+# ------------------------------------------------------------------------------------------------
 # The registry
 # ------------------------------------------------------------------------------------------------
 
@@ -362,11 +564,12 @@ def test_the_parent_registry_is_the_eleven_nodes_in_specification_order() -> Non
     decorator stamps into the audit trail. What it cannot check is that the order is the one the
     specification numbers, because nothing in the code knows what P01 means. That is written here.
 
-    The eleven are asserted as a prefix rather than as the whole tuple, because the governance five
-    are appended after them and are not a specification stage -- they belong to D06 and D07, which
-    are asked *between* P10 and P11 and after P11 respectively. Order still matters for all sixteen
-    and `test_the_governance_five_are_appended_in_gate_pair_order` covers the tail; splitting the
-    assertion keeps this one about the numbering the specification actually gives.
+    The eleven are asserted as a prefix rather than as the whole tuple, because what follows them
+    is not the next specification number. P23 comes next and Stage 5 is where it belongs; then the
+    governance five, which are not a specification stage at all -- they belong to D06 and D07, which
+    are asked *between* P10 and P11 and after P11 respectively. Order still matters for all
+    seventeen, and the next two tests cover the rest of it; splitting the assertion three ways keeps
+    this one about the numbering the specification actually gives.
     """
     assert [name for name, _ in PARENT_NODES][:11] == [
         "receive_signal",
@@ -383,6 +586,26 @@ def test_the_parent_registry_is_the_eleven_nodes_in_specification_order() -> Non
     ]
 
 
+def test_p23_sits_between_the_diagnosis_line_and_the_governance_five() -> None:
+    """One entry, and both of the edges its position implies are ones the builder must not draw.
+
+    A place in this tuple is a pair of plain edges -- one in from the entry before, one out to the
+    entry after -- unless `DECISION_AFTER` suppresses them. Twelfth is the only place P23 can go,
+    and both neighbours say why.
+
+    Before it: `generate_resolution_options`, which is in `DECISION_AFTER` under D07. So no edge is
+    drawn *into* P23 from the diagnosis line, which is correct -- P23 is reached from D21's
+    `confirm_outcome` and from nowhere else. After it: the first of the governance five, and P23 is
+    itself in `DECISION_AFTER` under D22, so no edge is drawn out of it either.
+
+    Last would be the obvious alternative and is the one that is actually unsafe. `record_escalation`
+    ends the tuple because `_plain_edges` reads a node with no successor as terminal and
+    `_DELIBERATE_TERMINALS` vouches for it; appending Stage 5 after it would draw
+    `record_escalation -> confirm_customer_outcome` and resume an incident a human had been handed.
+    """
+    assert [name for name, _ in PARENT_NODES][11:12] == ["confirm_customer_outcome"]
+
+
 def test_the_governance_five_are_appended_in_gate_pair_order() -> None:
     """The tail of `PARENT_NODES`, whose order `builder._plain_edges` reads as edges.
 
@@ -394,9 +617,11 @@ def test_the_governance_five_are_appended_in_gate_pair_order() -> None:
 
     `record_escalation` is last because a node with no successor is what `_plain_edges` reads as
     terminal, and `_DELIBERATE_TERMINALS` is what stops `_check_pending_stages` reading that
-    terminal as owed work.
+    terminal as owed work. Stage 5 arriving in front of these five rather than behind them is that
+    same argument seen from the other side; `test_p23_sits_between_the_diagnosis_line_and_the_
+    governance_five` holds it.
     """
-    assert [name for name, _ in PARENT_NODES][11:] == [
+    assert [name for name, _ in PARENT_NODES][12:] == [
         "prepare_low_confidence_review",
         "request_low_confidence_review",
         "prepare_blast_radius_approval",

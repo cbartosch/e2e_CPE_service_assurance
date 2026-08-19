@@ -56,6 +56,11 @@ from lpr_cpe.graph.subgraphs.remote_resolution import (
     build_remote_resolution_graph,
     compile_remote_resolution_graph,
 )
+from lpr_cpe.graph.subgraphs.restoration_validation import (
+    RESTORATION_VALIDATION_NODES,
+    build_restoration_validation_graph,
+    compile_restoration_validation_graph,
+)
 from lpr_cpe.graph.subgraphs.self_help import (
     SELF_HELP_NODES,
     build_self_help_graph,
@@ -67,15 +72,18 @@ __all__ = [
     "FIELD_PLANNING_NODES",
     "PREVENTIVE_MAINTENANCE_NODES",
     "REMOTE_RESOLUTION_NODES",
+    "RESTORATION_VALIDATION_NODES",
     "SELF_HELP_NODES",
     "build_field_execution_graph",
     "build_field_planning_graph",
     "build_preventive_maintenance_graph",
     "build_remote_resolution_graph",
+    "build_restoration_validation_graph",
     "build_self_help_graph",
     "compile_field_execution_graph",
     "compile_field_planning_graph",
     "compile_preventive_maintenance_graph",
     "compile_remote_resolution_graph",
+    "compile_restoration_validation_graph",
     "compile_self_help_graph",
 ]

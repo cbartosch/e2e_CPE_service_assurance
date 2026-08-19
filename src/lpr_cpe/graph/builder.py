@@ -100,6 +100,7 @@ from lpr_cpe.graph.subgraphs import (
     compile_field_planning_graph,
     compile_preventive_maintenance_graph,
     compile_remote_resolution_graph,
+    compile_restoration_validation_graph,
     compile_self_help_graph,
 )
 
@@ -130,6 +131,7 @@ SUBGRAPH_NODES: Mapping[str, Callable[[], Any]] = {
     "field_planning": compile_field_planning_graph,
     "preventive_maintenance": compile_preventive_maintenance_graph,
     "remote_resolution": compile_remote_resolution_graph,
+    "restoration_validation": compile_restoration_validation_graph,
     "self_help": compile_self_help_graph,
 }
 
@@ -175,6 +177,11 @@ DECISION_AFTER: Mapping[str, str] = {
     "generate_resolution_options": "D07",
     "remote_resolution": "D10",
     "self_help": "D12",
+    # Stage 5. D21 is asked here for the same reason D10 and D12 are: `continue_observation` re-runs
+    # the window, but `retry_diagnosis` and `confirm_outcome` both land on parent nodes the subgraph
+    # does not contain.
+    "restoration_validation": "D21",
+    "confirm_customer_outcome": "D22",
     # The two parent gates re-ask the decision that sent them the question. That is what closes
     # each loop: `approval_outstanding` is false once the answer is recorded, so the second pass
     # falls through to the clause that reads the answer, and the router picks the arm from it.
@@ -250,7 +257,7 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
         "self_help_check": "D11",
     },
     "D10": {
-        "verify": END,
+        "verify": "restoration_validation",
         "retry_diagnosis": "assemble_case_evidence",
     },
     "D11": {
@@ -258,9 +265,18 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
         "field_planning": "field_planning",
     },
     "D12": {
-        "verify": END,
+        "verify": "restoration_validation",
         "retry_diagnosis": "determine_root_cause",
         "field_planning": "field_planning",
+    },
+    "D21": {
+        "continue_observation": "restoration_validation",
+        "retry_diagnosis": "determine_root_cause",
+        "confirm_outcome": "confirm_customer_outcome",
+    },
+    "D22": {
+        "reconcile": END,
+        "retry_diagnosis": "determine_root_cause",
     },
 }
 
@@ -285,10 +301,11 @@ PENDING_STAGES: Mapping[str, str] = {
         "docs/vendor-integration-gaps.md. The stage's three exits then stop for three different "
         "reasons. `file_plant_mr` ends with the MR filed and the incident at `mr_raised`, which is "
         "that wait. `close_clean_boots_visit` writes `validating`, the state Stage 5 begins from, "
-        "so it waits on the same missing stage D10:verify and D12:verify name. `abandon_handover` "
-        "waits on no stage at all -- it writes `diagnosing`, and P07 and P10 both exist -- but on "
-        "an edge back to them, which the parent cannot draw while the specification defines no "
-        "decision at the end of the Clean Boots arm"
+        "and Stage 5 now exists -- what it waits on is D20, the decision that would route a "
+        "restored plant case into it, and D20 is inside this same unwritten stage. "
+        "`abandon_handover` waits on no stage at all -- it writes `diagnosing`, and P07 and P10 "
+        "both exist -- but on an edge back to them, which the parent cannot draw while the "
+        "specification defines no decision at the end of the Clean Boots arm"
     ),
     f"{ONWARD}:preventive_maintenance": (
         "the seam from a preventive disposition into field planning. P14 now exists, but nothing "
@@ -305,11 +322,16 @@ PENDING_STAGES: Mapping[str, str] = {
         "the NOC, provisioning and plant branch -- Stage 4's Dirty Boots half, P20 onwards, which "
         "creates or updates an MR from NOC/plant evidence rather than from a handover contract"
     ),
-    "D10:verify": (
-        "Stage 5, verify, reconcile, close and learn, which begins at P22 and is where every "
-        "successful resolution ends up"
+    "D22:reconcile": (
+        "Stage 5's second half -- P24's reconciliation of the linked systems, D23, P25's "
+        "controlled closure sequence and P26's outcome labelling. The first half is wired: an "
+        "incident now waits out its stability window, is judged against the pre-fix readings and "
+        "has the customer's word recorded, and stops at the point where the linked records would "
+        "be brought into agreement. What is missing is partly a stage and partly a capability -- "
+        "`ReconciliationPolicy.systems` names `service_platform`, which no adapter serves, so P24 "
+        "could reconcile four of the five systems it is asked about; see "
+        "docs/vendor-integration-gaps.md"
     ),
-    "D12:verify": "Stage 5 again, reached from the self-help branch. See D10:verify",
 }
 
 

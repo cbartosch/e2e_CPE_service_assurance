@@ -46,7 +46,7 @@ from lpr_cpe.graph.builder import (
     compile_parent_graph,
 )
 from lpr_cpe.graph.context import build_context
-from lpr_cpe.graph.nodes import GOVERNANCE_NODES, PARENT_NODES
+from lpr_cpe.graph.nodes import CLOSURE_NODES, GOVERNANCE_NODES, PARENT_NODES
 from lpr_cpe.graph.nodes._runtime import derive_id
 from lpr_cpe.graph.state import make_initial_state, total_steps
 
@@ -299,8 +299,11 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # The other two subgraphs. D10 and D12 are asked *here* and not inside them because every
         # destination either answer has is a sibling the subgraph does not contain -- a subgraph
         # cannot route to P07, and `retry_diagnosis` is most of the point of both.
+        #
+        # Both `verify` answers reach the same stage, which is the whole reason Stage 5 shortened
+        # the pending list rather than leaving it level: one subgraph closed two exits.
         "remote_resolution": {
-            "verify": END,
+            "verify": "restoration_validation",
             "retry_diagnosis": "assemble_case_evidence",
             ESCALATED: END,
         },
@@ -309,9 +312,41 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # supports a second opinion, while a remote repair that did not hold means the device has
         # changed since the evidence was gathered.
         "self_help": {
-            "verify": END,
+            "verify": "restoration_validation",
             "retry_diagnosis": "determine_root_cause",
             "field_planning": "field_planning",
+            ESCALATED: END,
+        },
+        # D21, and the only subgraph in the graph that is its own destination.
+        # `continue_observation` re-enters the stage it came from, which is what the specification's
+        # "continue observation when evidence is improving but incomplete" asks for, and the reason
+        # it is allowed here is worth stating because `_check_tables` refuses the same shape one
+        # table over: a `SUBGRAPH_SUCCESSOR` self-loop is a build-time error on the grounds that
+        # "the guard's re-entry budget would be the only thing stopping the run". Here it is not the
+        # only thing. The subgraph's head is `await_service_stability`, which raises an interrupt
+        # while the window is still running, so a lap that arrives early parks instead of reading
+        # again -- and `min_post_fix_samples` stays a count of observations rather than of laps.
+        # The guard's ceiling is still underneath it, six by `attempt_limits.max_subgraph_reentries`,
+        # because `@node` checks budgets on entry like every other node.
+        #
+        # `confirm_outcome` is the answer that makes P23 a parent node rather than a fourth node in
+        # the subgraph. D21 and D22 both answer `retry_diagnosis`, and `_terminal_targets` refuses
+        # two decisions in one chain that share an answer -- one edge would carry both and the
+        # branch could no longer name which question was asked. So the two cannot follow one node,
+        # and P23 sits between them giving each a node of its own to hang from. Sharing an answer
+        # across *different* edges is fine and already happens twice: D10 and D12 both answer
+        # `retry_diagnosis`, to different nodes; D21 and D22 both answer it to the same one.
+        "restoration_validation": {
+            "continue_observation": "restoration_validation",
+            "retry_diagnosis": "determine_root_cause",
+            "confirm_outcome": "confirm_customer_outcome",
+            ESCALATED: END,
+        },
+        # D22 -> the reconciliation stage, and the fourth of the four exits still falling to `END`
+        # for want of something unwritten. `PENDING_STAGES` is where each says what.
+        "confirm_customer_outcome": {
+            "reconcile": END,
+            "retry_diagnosis": "determine_root_cause",
             ESCALATED: END,
         },
     }
@@ -358,25 +393,38 @@ async def test_a_fixture_runs_the_whole_parent_graph_without_writing_anything(
     to exercise, and a run that looped P07 three times would still total eleven if the assertion
     were `len(...) == 11`.
 
-    Since the resolution fork was wired, the exact `node_visits` carries a third claim it did not
-    ask for: **no fixture enters a subgraph**, so the eleven are still eleven. That is the routers
-    answering honestly rather than the fork being broken, and it was measured. Two services divert
-    at D08 (`pon_degraded_optical` and `pon_power_affected`, both `plant_path`) and two run the
-    whole chain to D11 and answer `field_planning` -- `hfc_degraded_upstream` and `hfc_healthy`,
-    both diagnosed `tap_or_odp`, whose only options are `raise_mr` and `create_work_order` and
-    both of those set `requires_truck_roll`. `is_remote_option` and `is_self_help_option` reject a
-    truck roll, so there is nothing for D09 or D11 to choose.
+    Where each of the four stops was measured rather than reasoned about, and the answer is not
+    the same for all four. Two divert at D08 (`pon_degraded_optical` and `pon_power_affected`, both
+    `plant_path`, which is still a pending exit and so ends the run). The other two walk the whole
+    chain to D11 and answer `field_planning` -- `hfc_degraded_upstream` and `hfc_healthy`, both
+    diagnosed `tap_or_odp`, whose only options are `raise_mr` and `create_work_order` and both of
+    those set `requires_truck_roll`. `is_remote_option` and `is_self_help_option` reject a truck
+    roll, so there is nothing for D09 or D11 to choose.
+
+    So two of these runs *do* enter a subgraph, and the eleven are still eleven anyway. This
+    docstring said the opposite until it was re-measured, and how it went stale is the point worth
+    keeping: when it was written, `D11:field_planning` was a pending exit to `END`; wiring the stage
+    changed where the answer goes without changing anything this test asserts. `field_planning`
+    pauses at its dispatch-approval gate, and a paused subgraph's writes have not reached the
+    parent -- `ainvoke` returns with an `__interrupt__` in it and `node_visits` untouched. That is
+    the same property `graph.subgraphs` documents and `graph.inspect` exists to work around, and
+    here it means an assertion counting parent visits cannot see the difference between a stage that
+    is not entered and one that is entered and parks. Only the second is true.
 
     Only these four, and `_service` takes the *first* service of each health profile -- the fork is
     not dead across the fixture set. Swept over all 41 services, two do enter `remote_resolution`
     (`SVC-UT-001-B-01` and `SVC-SJ-011-B-01`) and none reach `self_help`, for a reason the self-help
-    module's docstring records: the budget, not the wiring. So a service that changed profile could
-    move into the fork here, and this test should go red when it does -- the number to update is
-    then the twelfth and thirteenth visit, not the assertion.
+    module's docstring records: the budget, not the wiring.
 
     Wiring D06's and D07's gates added five nodes to `PARENT_NODES` that this run must *not* visit,
-    so the expectation is built from the three linear registries rather than from `PARENT_NODES`,
-    and the governance five are asserted absent rather than left unmentioned. That absence is the
+    and Stage 5 added a sixth, P23. The expectation subtracts both registries by name rather than
+    listing the eleven, so a twelfth node on the linear line still turns this red while a node
+    reachable only through a branch does not. What the two subtracted registries have in common is
+    exactly that: the governance five are reached only from D06's and D07's own arms, and
+    `confirm_customer_outcome` only from D21's `confirm_outcome`, which is three stages past where
+    any of these four gets to.
+
+    The governance five are asserted absent rather than left unmentioned, and that absence is the
     measurement, not an accident of these four services: with both routers instrumented at
     `_cascade`'s call site and all 82 fixture cases driven to completion, D06 and D07 were asked
     134 times between them and every single answer was `continue`. The fixture corpus records no
@@ -404,8 +452,8 @@ async def test_a_fixture_runs_the_whole_parent_graph_without_writing_anything(
     """
     final, ctx = await _run(_service(fixtures, health))
 
-    gates = {name for name, _ in GOVERNANCE_NODES}
-    assert final["node_visits"] == {name: 1 for name, _ in PARENT_NODES if name not in gates}
+    off_the_line = {name for name, _ in (*CLOSURE_NODES, *GOVERNANCE_NODES)}
+    assert final["node_visits"] == {name: 1 for name, _ in PARENT_NODES if name not in off_the_line}
     assert total_steps(final) == 11
     assert final["escalated"] is False
     assert final["status"] is IncidentStatus.DIAGNOSING
@@ -943,7 +991,7 @@ def test_a_node_that_ends_the_workflow_has_to_say_so(monkeypatch: pytest.MonkeyP
 def test_the_unbuilt_exits_are_the_ones_named() -> None:
     """What is left to build, written down where the builder will not let it go stale.
 
-    Five, and the count has now moved in both directions, which is the shape to expect. Wiring the
+    Four, and the count has now moved in both directions, which is the shape to expect. Wiring the
     resolution fork made it *longer*: a stage deletes one line -- `ONWARD:generate_resolution_
     options`, P11's old fall off the end -- and adds one for every branch it opens that leads
     somewhere still unwritten, and Stage 3 asks four questions and answers seven of its branches to
@@ -975,10 +1023,11 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
 
     Its three exits stop for three different reasons, which is why the entry is one line and not
     three: `file_plant_mr` waits on the OSP status feed that keeps P21 out of the build,
-    `close_clean_boots_visit` writes `validating` and so waits on the very stage `D10:verify` and
-    `D12:verify` already name, and `abandon_handover` waits on no stage at all -- it writes
-    `diagnosing`, whose destinations P07 and P10 both exist, and what is missing is an edge the
-    parent cannot draw while the specification defines no decision after the Clean Boots arm.
+    `close_clean_boots_visit` writes `validating` and waits on D20 -- the decision that would route
+    a restored plant case into the stage that reads it, which is inside this same unwritten half --
+    and `abandon_handover` waits on no stage at all: it writes `diagnosing`, whose destinations P07
+    and P10 both exist, and what is missing is an edge the parent cannot draw while the
+    specification defines no decision after the Clean Boots arm.
 
     Wiring D06's and D07's gates is the largest single shrink so far, and the only one that closed
     exits without adding a stage. Three lines went away at once -- `D06:approve_low_confidence`,
@@ -989,6 +1038,19 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     purpose, which is a different thing from terminal for want of a successor and is spelled out in
     `_DELIBERATE_TERMINALS` rather than here. An exit can be closed by a node; a stage cannot.
 
+    Wiring Stage 5's first half is the second edit to make the list shorter, and it is the field
+    planning collapse again: `D10:verify` and `D12:verify` were one missing stage named twice
+    because two decisions reached it, and both now point at `restoration_validation`. What replaced
+    them is one line, not two, and is not an `__onward__` -- the stage runs, D21 and D22 are asked,
+    and it is D22's `reconcile` arm alone that falls to `END`. Two entries out and one in.
+
+    That is a *net* shrink of one and hides a second collapse worth naming, because two of the three
+    things the old pair waited on have now been paid off by the same edit. `D10:verify` and
+    `D12:verify` stopped being pending, and so did the sentence above about `close_clean_boots_visit`
+    -- it writes `validating` and the stage that reads `validating` exists now. What still holds
+    that exit open is D20, one decision inside the field-execution half, not a stage. A frontier
+    entry that survives an edit is worth re-reading rather than re-counting.
+
     `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
     against the tables in both directions, so an exit that stops reaching `END` fails the build.
     """
@@ -996,8 +1058,7 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
         f"{ONWARD}:field_execution",
         f"{ONWARD}:preventive_maintenance",
         "D08:plant_path",
-        "D10:verify",
-        "D12:verify",
+        "D22:reconcile",
     }
     assert all(text.strip() for text in PENDING_STAGES.values()), "each has to say what is missing"
 

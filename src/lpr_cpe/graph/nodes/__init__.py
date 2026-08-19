@@ -33,6 +33,10 @@ from collections.abc import Sequence
 from typing import Any
 
 from lpr_cpe.graph.nodes._runtime import check_node_registry
+from lpr_cpe.graph.nodes.closure import (
+    CLOSURE_NODES,
+    confirm_customer_outcome,
+)
 from lpr_cpe.graph.nodes.diagnosis import (
     DIAGNOSIS_NODES,
     determine_root_cause,
@@ -62,15 +66,21 @@ from lpr_cpe.graph.nodes.intake import (
     resolve_identity_and_topology,
 )
 
-#: Every parent node: P01 to P11 in specification order, then D06's and D07's own five.
+#: Every parent node: P01 to P11 in specification order, then Stage 5's P23, then D06's and D07's
+#: own five.
 #:
-#: The governance five come last because `builder._plain_edges` reads this order as the linear
-#: edges, and appending them is the only edit that wiring needs -- the joins that must *not* be
-#: drawn are suppressed by their entries in `DECISION_AFTER`, not by their position.
+#: `builder._plain_edges` reads this order as the linear edges, so position is wiring. The joins
+#: that must *not* be drawn are suppressed by their entries in `DECISION_AFTER`, not by position --
+#: which is what lets P23 sit between two groups it belongs to neither of: D07 follows the last
+#: diagnosis node and D22 follows P23, so neither of the two edges this position implies is drawn.
+#:
+#: The governance five stay last because the last of them, `record_escalation`, is terminal by
+#: virtue of having nothing after it. See `nodes.closure.CLOSURE_NODES`.
 PARENT_NODES: Sequence[tuple[str, Any]] = (
     *INTAKE_NODES,
     *EVIDENCE_NODES,
     *DIAGNOSIS_NODES,
+    *CLOSURE_NODES,
     *GOVERNANCE_NODES,
 )
 
@@ -79,6 +89,7 @@ check_node_registry(PARENT_NODES, "the parent node registry")
 
 
 __all__ = [
+    "CLOSURE_NODES",
     "DIAGNOSIS_NODES",
     "EVIDENCE_NODES",
     "GOVERNANCE_NODES",
@@ -86,6 +97,7 @@ __all__ = [
     "PARENT_NODES",
     "assemble_case_evidence",
     "assess_impact_and_priority",
+    "confirm_customer_outcome",
     "create_diagnostic_test_plan",
     "create_or_attach_incident",
     "deduplicate_and_correlate",
