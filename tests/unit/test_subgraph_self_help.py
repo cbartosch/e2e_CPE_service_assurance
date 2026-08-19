@@ -70,7 +70,11 @@ from lpr_cpe.graph.builder import build_parent_graph, compile_parent_graph
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.guards import ESCALATED, BudgetKind, check_budgets
 from lpr_cpe.graph.nodes._runtime import derive_id
-from lpr_cpe.graph.routing import first_actionable_option, is_self_help_option
+from lpr_cpe.graph.routing import (
+    DEDICATED_GATE_APPROVAL_KINDS,
+    first_actionable_option,
+    is_self_help_option,
+)
 from lpr_cpe.graph.state import make_initial_state, total_steps
 from lpr_cpe.graph.subgraphs._shared import reachability_verdict
 from lpr_cpe.graph.subgraphs.self_help import (
@@ -801,17 +805,22 @@ async def test_the_gate_router_holds_an_action_that_needs_approving(paused: Any)
     decision = [d for d in state["policy_decisions"] if d.action_type is ActionType.SEND_SELF_HELP][
         -1
     ]
-    held = dict(state)
-    held["policy_decisions"] = [
-        *[d for d in state["policy_decisions"] if d is not decision],
-        decision.model_copy(
-            update={
-                "outcome": PolicyOutcome.REQUIRES_APPROVAL,
-                "required_approval_kind": ApprovalKind.LOW_CONFIDENCE_RCA,
-            }
-        ),
-    ]
-    assert route_self_help_gate(held) == "approve"
+
+    def _demanding(kind: ApprovalKind) -> dict[str, Any]:
+        return {
+            **state,
+            "policy_decisions": [
+                *[d for d in state["policy_decisions"] if d is not decision],
+                decision.model_copy(
+                    update={
+                        "outcome": PolicyOutcome.REQUIRES_APPROVAL,
+                        "required_approval_kind": kind,
+                    }
+                ),
+            ],
+        }
+
+    assert route_self_help_gate(_demanding(ApprovalKind.HIGH_RISK_REMOTE_ACTION)) == "approve"
 
     blocked = dict(state)
     blocked["policy_decisions"] = [
@@ -819,6 +828,60 @@ async def test_the_gate_router_holds_an_action_that_needs_approving(paused: Any)
         decision.model_copy(update={"outcome": PolicyOutcome.BLOCKED}),
     ]
     assert route_self_help_gate(blocked) == "abandon"
+
+
+async def test_this_gate_declines_a_kind_another_gate_owns(paused: Any) -> None:
+    """A variable-kind gate may only ask a kind no other gate asks, because the readers key on kind.
+
+    `latest_decision_of` and `approval_outstanding` match an answer to a question by
+    `ApprovalKind` alone -- `ApprovalDecision` carries no `action_type`, `target_ref` or
+    `policy_decision_id` to narrow it with. That is sound only while exactly one gate raises each
+    kind. This gate takes its kind from the `PolicyDecision`, so without the
+    `DEDICATED_GATE_APPROVAL_KINDS` check it will happily ask `low_confidence_rca` -- and the answer
+    then satisfies `prepare_low_confidence_review`, whose whole job is the `rca is None` fail-closed
+    branch this one knows nothing about.
+
+    Reachable, not hypothetical: `rca.min_for_self_help` demands exactly this kind whenever
+    confidence drops below 0.65, which `test_self_help_needs_a_confident_rca` above pins.
+
+    Deleting the `DEDICATED_GATE_APPROVAL_KINDS` term from `route_self_help_gate` was observed
+    turning this red as
+
+        AssertionError: this gate would ask ['clean_to_dirty_handover', 'dispatch',
+        'high_blast_radius_action', 'low_confidence_rca'], and every one of those has a gate of
+        its own. [...]
+
+    while `test_the_gate_router_holds_an_action_that_needs_approving` above stayed green, because a
+    kind this gate owns routes to `approve` either way. All four are reported together rather than
+    asserted one at a time so the failure names the whole leak, and iteration is sorted so the text
+    is reproducible.
+    """
+    _graph, _ctx, _config, state = paused
+    decision = [d for d in state["policy_decisions"] if d.action_type is ActionType.SEND_SELF_HELP][
+        -1
+    ]
+
+    asked: list[str] = []
+    for kind in sorted(DEDICATED_GATE_APPROVAL_KINDS, key=lambda k: k.value):
+        demanding = {
+            **state,
+            "policy_decisions": [
+                *[d for d in state["policy_decisions"] if d is not decision],
+                decision.model_copy(
+                    update={
+                        "outcome": PolicyOutcome.REQUIRES_APPROVAL,
+                        "required_approval_kind": kind,
+                    }
+                ),
+            ],
+        }
+        if route_self_help_gate(demanding) != "abandon":
+            asked.append(kind.value)
+
+    assert not asked, (
+        f"this gate would ask {asked}, and every one of those has a gate of its own. The answer is "
+        "keyed on kind, so the owning gate reads it as already given and skips itself."
+    )
 
 
 # ------------------------------------------------------------------------------------------------

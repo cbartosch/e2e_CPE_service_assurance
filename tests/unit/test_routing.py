@@ -29,6 +29,7 @@ individually, which they were not.
 
 from __future__ import annotations
 
+import ast
 import re
 import typing
 from datetime import UTC, datetime, timedelta
@@ -78,6 +79,7 @@ from lpr_cpe.domain.resolution import (
 )
 from lpr_cpe.graph.routing import (
     DECISIONS,
+    DEDICATED_GATE_APPROVAL_KINDS,
     Decision,
     approval_outstanding,
     identity_is_resolved,
@@ -94,6 +96,7 @@ LATER = AT + timedelta(hours=1)
 LATEST = AT + timedelta(hours=2)
 
 SPECIFICATION = Path(__file__).resolve().parents[2] / "docs" / "specification.md"
+GRAPH_SOURCE = Path(__file__).resolve().parents[2] / "src" / "lpr_cpe" / "graph"
 
 # ------------------------------------------------------------------------------------------------
 # Builders. Minimal valid instances -- every default here is one the routers do not read, so a test
@@ -1499,3 +1502,107 @@ def test_the_decision_type_is_what_the_builder_will_iterate() -> None:
     assert isinstance(decision, Decision)
     assert callable(decision.route)
     assert isinstance(decision.branches, tuple)
+
+
+# ------------------------------------------------------------------------------------------------
+# Gate ownership, read back out of the source
+# ------------------------------------------------------------------------------------------------
+
+
+def _kinds_hardcoded_by_a_gate() -> dict[str, list[str]]:
+    """`ApprovalKind` member name -> the functions under `graph/` naming it in a `kind=` argument."""
+    sites: dict[str, set[str]] = {}
+    for path in sorted(GRAPH_SOURCE.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                for keyword in call.keywords:
+                    value = keyword.value
+                    if (
+                        keyword.arg == "kind"
+                        and isinstance(value, ast.Attribute)
+                        and isinstance(value.value, ast.Name)
+                        and value.value.id == "ApprovalKind"
+                    ):
+                        sites.setdefault(value.attr, set()).add(node.name)
+    return {kind: sorted(funcs) for kind, funcs in sorted(sites.items())}
+
+
+def test_every_gate_that_names_its_own_kind_is_listed_as_owning_it() -> None:
+    """`DEDICATED_GATE_APPROVAL_KINDS` is maintained by hand, and forgetting an entry is silent.
+
+    The constant is a *deny* list for the two gates that take their kind from the `PolicyDecision`,
+    and it has to be a deny list: a kind with no gate of its own must stay askable there, which is
+    `EXCEPTIONAL_CLOSURE`'s position today. The price of that choice is that a fifth dedicated gate
+    has to be added here by hand, and omitting it fails open -- the new gate simply never fires,
+    because a variable-kind gate raises its kind first and the readers, which match an answer to a
+    question by `ApprovalKind` alone, hand that answer to the gate that never asked.
+    `prepare_low_confidence_review` ran zero times across the whole corpus -- 82 runs, the 41
+    fixture services under both case types -- in exactly that state. Nothing but this test enforces
+    the entry.
+
+    Both directions matter, so this asserts set equality rather than containment: a gate added
+    without its entry is one failure, and an entry left behind by a gate that was removed is the
+    other, which would otherwise leave a pack demanding a kind nothing under `graph/` raises.
+
+    Derived by walking every `*.py` under `src/lpr_cpe/graph` -- 23 files, in which the scan finds
+    26 `kind=` keyword arguments and exactly 4 that name an `ApprovalKind` member literally:
+    `prepare_low_confidence_review` and `prepare_blast_radius_approval` in `nodes/governance.py`,
+    `prepare_dispatch_approval` in `subgraphs/field_planning.py` and `prepare_handover_approval` in
+    `subgraphs/field_execution.py`. The other 22 name something else -- seven `EvidenceKind`
+    members, five `request.kind`, six bare `kind` variables and four other attribute reads -- so
+    the `ApprovalKind` qualifier is load-bearing rather than decorative. Only the 4 is asserted;
+    the rest is a snapshot of a tree that grows, and grew during the writing of it.
+
+    **What this does not catch.** It reads the source, not the behaviour, so it recognises only the
+    literal `ApprovalKind.X` spelling. A gate that computed its kind, aliased the import, or
+    imported the enum under another name would be invisible, and the measurement above shows that
+    is not hypothetical: `route_remote_gate` and `route_self_help_gate` pass a bare `kind` and are
+    precisely the two functions the scan cannot see. This catches the common style -- a new gate
+    written like the four that exist -- and the removal case. It is not a proof of the invariant.
+
+    Deleting `ApprovalKind.LOW_CONFIDENCE_RCA` from `DEDICATED_GATE_APPROVAL_KINDS` was observed
+    turning this red as
+
+        AssertionError: LOW_CONFIDENCE_RCA is hardcoded by ['prepare_low_confidence_review'] but
+        is missing from DEDICATED_GATE_APPROVAL_KINDS, so a variable-kind gate will go on asking
+        it and the gate that owns it will never fire
+
+    and adding `ApprovalKind.EXCEPTIONAL_CLOSURE` to it turning this red as
+
+        AssertionError: EXCEPTIONAL_CLOSURE is in DEDICATED_GATE_APPROVAL_KINDS but no function
+        under graph/ raises it, so a pack that demands it now has no gate at all
+
+    The deletion was run against the whole suite rather than this file alone, and re-run against it
+    after Stage 5 landed: 870 tests, one failure, this one, with the text above reproduced
+    character for character. Both `test_this_gate_declines_a_kind_another_gate_owns` twins stayed
+    green, because they iterate `DEDICATED_GATE_APPROVAL_KINDS` and so shrink with it rather than
+    object -- which is why the deny list needed a check that reads the source, not the constant.
+    Offenders are collected and asserted once over sorted lists, so the text above is reproducible;
+    asserting inside a loop over the frozenset would name an arbitrary kind.
+    """
+    hardcoded = _kinds_hardcoded_by_a_gate()
+    listed = {kind.name for kind in DEDICATED_GATE_APPROVAL_KINDS}
+
+    assert hardcoded, (
+        "the scan found no `kind=ApprovalKind.X` call site anywhere under graph/, so it has stopped "
+        "measuring the source rather than found agreement with it"
+    )
+
+    problems: list[str] = []
+    for kind in sorted(set(hardcoded) - listed):
+        problems.append(
+            f"{kind} is hardcoded by {hardcoded[kind]} but is missing from "
+            "DEDICATED_GATE_APPROVAL_KINDS, so a variable-kind gate will go on asking it and the "
+            "gate that owns it will never fire"
+        )
+    for kind in sorted(listed - set(hardcoded)):
+        problems.append(
+            f"{kind} is in DEDICATED_GATE_APPROVAL_KINDS but no function under graph/ raises it, "
+            "so a pack that demands it now has no gate at all"
+        )
+    assert not problems, "; ".join(problems)

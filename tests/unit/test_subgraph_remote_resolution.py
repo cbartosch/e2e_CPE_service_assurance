@@ -8,9 +8,11 @@ other health either localises to plant (and D08 diverts it) or offers no console
 Finding that out took a sweep of all six healths; it is recorded here so the next reader does not
 repeat it.
 
-The device also *recovers* from the reboot, which is what makes `verification_passed is True`
+The device also *recovers* from the repair, which is what makes `verification_passed is True`
 reachable rather than merely representable. `test_adapters.py` established that the simulator models
-the effect; this module establishes that the graph reads it back and records it.
+the effect; this module establishes that the graph reads it back and records it. All four of the
+domain's `cpe_*` options are in the simulator's recovering set -- measured, not assumed -- which is
+why the `paused` fixture can pick among them on approval-kind grounds without weakening that.
 
 What is deliberately not asserted here
 --------------------------------------
@@ -53,7 +55,7 @@ from lpr_cpe.domain.resolution import RemoteAction
 from lpr_cpe.graph.builder import build_parent_graph
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.guards import ESCALATED
-from lpr_cpe.graph.routing import is_remote_option
+from lpr_cpe.graph.routing import DEDICATED_GATE_APPROVAL_KINDS, is_remote_option
 from lpr_cpe.graph.state import make_initial_state
 from lpr_cpe.graph.subgraphs._shared import (
     attempt_number,
@@ -81,7 +83,7 @@ APPROVAL = {
     "status": "approved",
     "decided_by": "sofia.reyes",
     "decided_by_role": "noc_supervisor",
-    "rationale": "device is unreachable and the plant reads clean; a reboot is the cheapest test",
+    "rationale": "the plant reads clean and the cheap repairs are spent; the firmware is the suspect",
 }
 
 
@@ -141,6 +143,22 @@ async def paused(fixtures: Any) -> Any:
     pre-fork and looked untouched. The sibling self-help fixture has no gate on its path, ran the
     whole branch and escalated on the diagnostic-cycle budget, and thirteen of its tests failed as
     `assert () == ('await_customer_response',)`. Same premise, and only one of the two was told.
+
+    Why the two cheap repairs are marked attempted
+    ----------------------------------------------
+    Left alone this fixture selects `cpe_reboot`, and a reboot is `risk: low,
+    requires_approval: false` in the pack -- so the only thing that ever sent it to a gate was its
+    `low_confidence_rca` demand, raised because the RCA reads 0.50. That kind belongs to D06
+    (`DEDICATED_GATE_APPROVAL_KINDS`), and this gate now declines it, so the reboot no longer pauses
+    here at all. Marking the two reversible repairs attempted promotes `cpe_firmware_update`, whose
+    `risk: high` class demands `high_risk_remote_action` -- the kind this gate owns -- and which the
+    engine was measured demanding even at confidence 0.50, `_most_restrictive` preferring it over the
+    confidence rule. So the pause is now reached by this gate's own question rather than by
+    intercepting another gate's.
+
+    The options are still the ones `generate_resolution_options` produced; only the attempt log is
+    seeded, which is why this does not become the fabricated plan the paragraph above refuses.
+    `cpe_factory_reset` would not serve: the engine returns `blocked` for it here.
     """
     service = fixtures.services[OFFLINE_CPE_SERVICE]
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
@@ -152,6 +170,19 @@ async def paused(fixtures: Any) -> Any:
     parent_final = await parent.ainvoke(
         _initial(service), context=ctx, config={"configurable": {"thread_id": "parent-remote"}}
     )
+    plan = parent_final["resolution_plan"]
+    parent_final = {
+        **parent_final,
+        "resolution_plan": plan.model_copy(
+            update={
+                "attempted_option_ids": [
+                    option.option_id
+                    for option in plan.ranked()
+                    if option.action_type in {ActionType.CPE_REBOOT, ActionType.CPE_RESYNC}
+                ]
+            }
+        ),
+    }
 
     graph = build_remote_resolution_graph().compile(
         name="lpr_cpe_remote_resolution", checkpointer=InMemorySaver()
@@ -235,7 +266,7 @@ def test_the_offline_cpe_fixture_still_reaches_a_remote_repair(fixtures: Any) ->
         "profile would localise to the drop and never offer a CPE action"
     )
     device = fixtures.cpe_for_service(OFFLINE_CPE_SERVICE, system="test")
-    assert device["online"] is False, "an online device gives the reboot nothing to restore"
+    assert device["online"] is False, "an online device gives the repair nothing to restore"
 
 
 # ------------------------------------------------------------------------------------------------
@@ -311,7 +342,11 @@ async def test_the_gate_pauses_with_the_question_committed(paused: Any) -> None:
     assert first["status"] is IncidentStatus.AWAITING_APPROVAL
     request = first["pending_approval"]
     assert request is not None, "the question must be in state, not only in the interrupt payload"
-    assert request.action_type is ActionType.CPE_REBOOT
+    assert request.action_type is ActionType.CPE_FIRMWARE_UPDATE
+    assert request.kind is ApprovalKind.HIGH_RISK_REMOTE_ACTION, (
+        "this gate may only ask a kind it owns; a kind with its own gate elsewhere must be declined "
+        "here, because the readers that match answers to questions key on kind alone"
+    )
 
     payload = state.interrupts[0].value
     assert payload["approval_request"]["approval_id"] == request.approval_id, (
@@ -340,7 +375,7 @@ async def test_selection_does_not_claim_a_stage_the_incident_has_not_entered(pau
     assert first.get("remote_attempt_count", 0) == 0
 
     selected = selected_remote_option(first)
-    assert selected is not None and selected.action_type is ActionType.CPE_REBOOT, (
+    assert selected is not None and selected.action_type is ActionType.CPE_FIRMWARE_UPDATE, (
         "the plan must own which repair this branch is about; re-deriving it in the router would "
         "pick the next option once a BLOCKED decision was recorded"
     )
@@ -351,14 +386,16 @@ async def test_selection_does_not_claim_a_stage_the_incident_has_not_entered(pau
 # ------------------------------------------------------------------------------------------------
 
 
-async def test_an_approved_reboot_executes_and_is_verified_against_a_fresh_read(
+async def test_an_approved_repair_executes_and_is_verified_against_a_fresh_read(
     paused: Any,
 ) -> None:
-    """The whole point of the branch: a device that was offline is rebooted and comes back.
+    """The whole point of the branch: a device that was offline is repaired and comes back.
 
-    `verification_passed is True` is reachable only because the reboot genuinely changes the
+    `verification_passed is True` is reachable only because the flash genuinely changes the
     simulator's world -- the post-read shows `online: True` where the pre-read showed `False`. That
-    is the difference between testing the graph and testing a mock of it.
+    is the difference between testing the graph and testing a mock of it. `CPE_FIRMWARE_UPDATE` is in
+    the simulator's recovering set exactly as `CPE_REBOOT` is, which is what lets this fixture ask
+    the gate's own question without weakening the assertion.
     """
     graph, ctx, config, _first = paused
     final = await graph.ainvoke(Command(resume=APPROVAL), context=ctx, config=config)
@@ -368,11 +405,11 @@ async def test_an_approved_reboot_executes_and_is_verified_against_a_fresh_read(
 
     approvals = final["approvals"]
     assert len(approvals) == 1
-    assert approvals[0].kind is ApprovalKind.LOW_CONFIDENCE_RCA
+    assert approvals[0].kind is ApprovalKind.HIGH_RISK_REMOTE_ACTION
     assert approvals[0].decided_by_role == "noc_supervisor"
 
     verified = final["remote_actions"][-1]
-    assert verified.action_type is ActionType.CPE_REBOOT
+    assert verified.action_type is ActionType.CPE_FIRMWARE_UPDATE
     assert verified.outcome is ActionOutcome.SIMULATED
     assert verified.pre_state["online"] is False
     assert verified.post_state["online"] is True
@@ -393,7 +430,7 @@ async def test_verification_appends_a_revision_rather_than_a_second_action(pause
     `execute_remote_repair` writes the action unverified; `verify_remote_repair` writes the same
     `action_id` back with the verdict filled in. Under `append_unique` the second write would be
     discarded as a duplicate and no incident would ever record a verification; under a plain append
-    the history would show two reboots and `remote_attempt_count` would double-count.
+    the history would show two repairs and `remote_attempt_count` would double-count.
     """
     graph, ctx, config, _first = paused
     final = await graph.ainvoke(Command(resume=APPROVAL), context=ctx, config=config)
@@ -406,7 +443,7 @@ async def test_verification_appends_a_revision_rather_than_a_second_action(pause
 
     assert final["remote_attempt_count"] == 1, (
         "the counter is distinct `action_id`s, not `len(remote_actions)`; counting the list would "
-        "report two attempts for one reboot the moment verification appended its copy"
+        "report two attempts for one repair the moment verification appended its copy"
     )
     assert len(final["action_history"]) == 1, "one ActionRecord per attempt, not per revision"
     assert final["action_history"][0].attempt == 1
@@ -420,8 +457,12 @@ async def test_the_execution_is_audited_and_keyed_for_idempotency(paused: Any) -
     assert record.idempotency_key, "a write with no idempotency key cannot be safely retried"
     assert record.was_attempted is True
     assert executed_idempotency_keys(final) == {record.idempotency_key}
-    assert attempt_number(final, ActionType.CPE_REBOOT) == 2, (
-        "one reboot has been attempted, so the next would be the second"
+    assert attempt_number(final, ActionType.CPE_FIRMWARE_UPDATE) == 2, (
+        "one flash has been attempted, so the next would be the second"
+    )
+    assert attempt_number(final, ActionType.CPE_REBOOT) == 1, (
+        "the count is per action type. The fixture marks the reboot *option* attempted to promote "
+        "the high-risk repair, but no reboot ever reached a device, so its own budget is untouched"
     )
 
     trail = [(e.node, e.action, e.outcome) for e in final["audit_events"]]
@@ -435,7 +476,7 @@ async def test_the_execution_is_audited_and_keyed_for_idempotency(paused: Any) -
 async def test_the_attempt_count_skips_actions_that_never_left_the_process(paused: Any) -> None:
     """`attempt_number` counts `was_attempted`, not rows, and the two only differ off the happy path.
 
-    The end-to-end assertion above cannot tell these apart: one reboot ran, so every row in
+    The end-to-end assertion above cannot tell these apart: one repair ran, so every row in
     `action_history` is an attempted row and both readings give 2. The difference appears the moment
     a row exists that never reached the adapter -- a decision the policy engine refused, an action
     parked awaiting approval. Counting those would consume the `attempt_limits.remote` budget with
@@ -457,8 +498,8 @@ async def test_the_attempt_count_skips_actions_that_never_left_the_process(pause
 
     with_parked = dict(final)
     with_parked["action_history"] = [attempted, parked]
-    assert attempt_number(with_parked, ActionType.CPE_REBOOT) == 2, (
-        "two rows, one attempt: the next reboot is still the second. Counting rows would report "
+    assert attempt_number(with_parked, ActionType.CPE_FIRMWARE_UPDATE) == 2, (
+        "two rows, one attempt: the next flash is still the second. Counting rows would report "
         "the third and burn a retry the customer never received"
     )
 
@@ -536,7 +577,7 @@ async def test_the_verification_read_becomes_evidence_the_next_cycle_can_use(pau
     added = [item for item in final["evidence"] if item.ref not in before]
     assert len(added) == 1, "exactly one new observation: the verification read"
     assert added[0].source_system == "cpe"
-    assert "cpe_reboot" in added[0].summary
+    assert "cpe_firmware_update" in added[0].summary
 
     verified = final["remote_actions"][-1]
     assert added[0].ref in verified.evidence_refs, (
@@ -568,7 +609,7 @@ async def test_a_refused_approval_abandons_without_touching_the_device(paused: A
                 "status": "rejected",
                 "decided_by": "sofia.reyes",
                 "decided_by_role": "noc_supervisor",
-                "rationale": "the customer is on a call; reboot after 18:00",
+                "rationale": "the customer is on a call; flash after 18:00",
             }
         ),
         context=ctx,
@@ -639,7 +680,7 @@ async def test_the_gate_router_abandons_an_action_policy_has_blocked(paused: Any
     incident. Both halves of that were measured rather than reasoned: constructing the model with
     `policy_outcome=BLOCKED` raises
 
-        cpe_reboot was blocked by policy and must not be built into an ActionRequest at all
+        cpe_firmware_update was blocked by policy and must not be built into an ActionRequest at all
 
     and the sibling mutation -- routing past the `REQUIRES_APPROVAL` branch instead -- was observed
     raising its own `ActionRequest` validator inside `execute_remote_repair`, uncaught by `@node`,
@@ -649,7 +690,7 @@ async def test_the_gate_router_abandons_an_action_policy_has_blocked(paused: Any
     incident rather than a refusal.
 
     Reachable rather than hypothetical: `_check_attempts` returns a finding whose `blocks` defaults
-    to `True` once `attempt > attempt_limits.remote`, so the reboot after the ceiling arrives here
+    to `True` once `attempt > attempt_limits.remote`, so the repair after the ceiling arrives here
     blocked. `first_actionable_option` would skip such an option, but the router reads
     `plan.selected` -- by design, per the module docstring -- so this is the check that catches it.
     """
@@ -671,6 +712,64 @@ async def test_the_gate_router_abandons_an_action_policy_has_blocked(paused: Any
     assert route_remote_gate(blocked) == "abandon", (
         "an action the pack has blocked must not be routed to execution on the grounds that a "
         "decision exists; the router has to read what the decision said"
+    )
+
+
+async def test_this_gate_declines_a_kind_another_gate_owns(paused: Any) -> None:
+    """A variable-kind gate may only ask a kind no other gate asks, because the readers key on kind.
+
+    `latest_decision_of` and `approval_outstanding` match an answer to a question by `ApprovalKind`
+    alone -- `ApprovalDecision` carries no `action_type`, `target_ref` or `policy_decision_id` to
+    narrow it with. That is sound only while exactly one gate raises each kind. This gate takes its
+    kind from the `PolicyDecision`, so without the `DEDICATED_GATE_APPROVAL_KINDS` check it will
+    ask whichever kind the pack demanded, including kinds that already have a gate of their own.
+
+    Not hypothetical -- this was the live case. `rca.min_for_remote_action` demands
+    `low_confidence_rca` on the `cpe_reboot` this fixture used to select, and a real-code sweep of
+    all 82 runs -- the 41 fixture services under both case types -- found this gate intercepting
+    it: `prepare_low_confidence_review` ran
+    **zero** times across the corpus before the check was added and once after, because D06's only
+    natural trigger was being consumed here. Worse than duplicated work: `route_rca_confidence`
+    returned `continue` on the answer this gate collected, skipping the `rca is None` fail-closed
+    branch that is the entire reason D06 exists.
+
+    Deleting the `DEDICATED_GATE_APPROVAL_KINDS` term from `route_remote_gate` was observed turning
+    this red as
+
+        AssertionError: this gate would ask ['clean_to_dirty_handover', 'dispatch',
+        'high_blast_radius_action', 'low_confidence_rca'], and every one of those has a gate of
+        its own. [...]
+
+    and turning *nothing else in the suite* red -- measured over the whole of `tests/`, with only
+    this and its `test_subgraph_self_help.py` twin failing. `test_the_gate_router_abandons_every_
+    unset_case` in particular stays green, because the kind this gate does own routes to `approve`
+    either way. All four are reported together rather than asserted one at a time so the failure
+    names the whole leak, and iteration is sorted so the text is reproducible.
+    """
+    _graph, _ctx, _config, first = paused
+    option = selected_remote_option(first)
+    assert option is not None, "the fixture must have selected something for this to mean anything"
+
+    asked: list[str] = []
+    for kind in sorted(DEDICATED_GATE_APPROVAL_KINDS, key=lambda k: k.value):
+        demanding = dict(first)
+        demanding["policy_decisions"] = [
+            PolicyDecision(
+                decision_id=f"POL-DEMANDS-{kind.value}",
+                decided_at=NOW,
+                action_type=option.action_type,
+                outcome=PolicyOutcome.REQUIRES_APPROVAL,
+                required_approval_kind=kind,
+                reason_codes=(ReasonCode.POLICY_APPROVAL_REQUIRED,),
+                policy_version="test",
+            )
+        ]
+        if route_remote_gate(demanding) != "abandon":
+            asked.append(kind.value)
+
+    assert not asked, (
+        f"this gate would ask {asked}, and every one of those has a gate of its own. The answer is "
+        "keyed on kind, so the owning gate reads it as already given and skips itself."
     )
 
 
@@ -703,7 +802,7 @@ async def test_the_branch_records_the_decisions_and_the_actions_it_took(paused: 
     )
     assert gate[0].numerator == pytest.approx(0.0)
     assert gate[0].denominator == pytest.approx(1.0), "one decision was taken, so one is counted"
-    assert gate[0].dimensions["action_type"] == "cpe_reboot"
+    assert gate[0].dimensions["action_type"] == "cpe_firmware_update"
 
     final = await graph.ainvoke(Command(resume=APPROVAL), context=ctx, config=config)
     coverage = [e for e in final["kpi_events"] if e.kpi_name == KPIName.AUTOMATION_COVERAGE_RATE]
@@ -713,7 +812,7 @@ async def test_the_branch_records_the_decisions_and_the_actions_it_took(paused: 
     )
     assert coverage[0].denominator == pytest.approx(1.0)
     assert coverage[0].value == pytest.approx(0.0), (
-        "the reboot carried an `approval_ref`, so it was not unattended. A 1.0 here would mean the "
+        "the repair carried an `approval_ref`, so it was not unattended. A 1.0 here would mean the "
         "rate had stopped noticing that a human was asked -- which is the only thing it measures"
     )
     assert KPIName.AUTOMATION_COVERAGE_RATE not in before, (

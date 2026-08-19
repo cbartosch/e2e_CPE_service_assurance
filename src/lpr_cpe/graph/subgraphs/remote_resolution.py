@@ -33,9 +33,17 @@ Two routers would be two spellings of one question, and the second would be the 
 about rejection.
 
 It keys on `decision.required_approval_kind` rather than naming `HIGH_RISK_REMOTE_ACTION`. The
-firmware update and the factory reset are the high-risk pair today, but a pack that raised a
-`high_blast_radius_action` demand against a reboot would be honoured here without an edit --
-whereas a hard-coded kind would sail past the demand and execute unapproved.
+firmware update and the factory reset are the high-risk pair today, but a pack that raised some
+other kind against a reboot is still honoured -- a hard-coded kind would sail past the demand and
+execute unapproved.
+
+Honoured is not the same as asked here, and the difference is `DEDICATED_GATE_APPROVAL_KINDS`. Four
+kinds belong to a gate of their own, and since the readers in `routing` key on kind alone, asking
+one of them *here* answers the owning gate's question for it -- a `low_confidence_rca` collected at
+this gate was measured satisfying D06, which then skipped its own fail-closed branch. So a demand
+of those four kinds abandons instead: the `PolicyDecision` reaches the parent, D10 sends the
+incident round, and the gate that owns the question asks it. A kind nobody owns -- today,
+`exceptional_closure` -- is still asked here, because the alternative is a demand with no gate.
 
 Why the node records the selection instead of the router re-deriving it
 -----------------------------------------------------------------------
@@ -97,6 +105,7 @@ from lpr_cpe.graph.nodes._runtime import (
     preview,
 )
 from lpr_cpe.graph.routing import (
+    DEDICATED_GATE_APPROVAL_KINDS,
     approval_granted,
     approval_outstanding,
     first_actionable_option,
@@ -258,6 +267,11 @@ def route_remote_gate(state: IncidentState) -> Literal["approve", "execute", "ab
     latest demand's timestamp against the latest answer's rather than asking whether an answer
     exists. Both lists are append-only, so "has anyone ever approved this kind?" would stay true
     into the next diagnostic cycle and wave through a repair nobody had been asked about.
+
+    A demand this gate may not raise abandons rather than asks: see
+    `DEDICATED_GATE_APPROVAL_KINDS`. Only the `approve` branch is affected, so an answer the owning
+    gate has already granted still reaches `execute` on the next pass and the repair is deferred
+    rather than lost.
     """
     option = selected_remote_option(state)
     if option is None:
@@ -274,7 +288,7 @@ def route_remote_gate(state: IncidentState) -> Literal["approve", "execute", "ab
             # with no record of the attempt.
             return "abandon"
         if approval_outstanding(state, kind):
-            return "approve"
+            return "abandon" if kind in DEDICATED_GATE_APPROVAL_KINDS else "approve"
         return "execute" if approval_granted(state, kind) else "abandon"
     return "execute"
 
@@ -416,6 +430,10 @@ async def abandon_remote_action(state: IncidentState, ctx: GraphContext) -> Node
                 else ReasonCode.POLICY_NO_MATCHING_RULE
             ),
         )
+    elif decision is not None and decision.required_approval_kind in DEDICATED_GATE_APPROVAL_KINDS:
+        # Deferred, not exhausted: the same repair runs once the owning gate grants it, and
+        # `REMOTE_FIX_EXHAUSTED` here would record that the branch had nothing left to try.
+        outcome, reason = "approval_deferred_to_owning_gate", ReasonCode.POLICY_APPROVAL_REQUIRED
     else:
         outcome, reason = "no_permitted_remote_action", ReasonCode.REMOTE_FIX_EXHAUSTED
 

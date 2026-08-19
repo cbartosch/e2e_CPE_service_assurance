@@ -106,6 +106,7 @@ from lpr_cpe.graph.nodes._runtime import (
     preview,
 )
 from lpr_cpe.graph.routing import (
+    DEDICATED_GATE_APPROVAL_KINDS,
     approval_granted,
     approval_outstanding,
     first_actionable_option,
@@ -258,6 +259,10 @@ def route_self_help_gate(state: IncidentState) -> Literal["approve", "send", "ab
     Byte-for-byte the shape of `route_remote_gate`, and deliberately so: the two branches ask one
     question about two action classes, and the failure mode of writing it twice is that only one of
     them learns about rejection. Total, and conservative in every unset case.
+
+    That includes declining the kinds a dedicated gate owns (`DEDICATED_GATE_APPROVAL_KINDS`). This
+    gate takes its kind from the `PolicyDecision` too, so it can raise another gate's question just
+    as readily, and the readers that would then honour the answer key on kind alone.
     """
     option = selected_self_help_option(state)
     if option is None:
@@ -272,7 +277,7 @@ def route_self_help_gate(state: IncidentState) -> Literal["approve", "send", "ab
             # Abandoning rather than asserting keeps the router's never-raises promise.
             return "abandon"
         if approval_outstanding(state, kind):
-            return "approve"
+            return "abandon" if kind in DEDICATED_GATE_APPROVAL_KINDS else "approve"
         return "send" if approval_granted(state, kind) else "abandon"
     return "send"
 
@@ -1068,6 +1073,10 @@ async def abandon_self_help(state: IncidentState, ctx: GraphContext) -> NodeUpda
                 else ReasonCode.POLICY_NO_MATCHING_RULE
             ),
         )
+    elif decision is not None and decision.required_approval_kind in DEDICATED_GATE_APPROVAL_KINDS:
+        # Deferred, not declined: nobody has asked the customer anything, and `SELF_HELP_DECLINED`
+        # would put a refusal they never made in the trail.
+        outcome, reason = "approval_deferred_to_owning_gate", ReasonCode.POLICY_APPROVAL_REQUIRED
     else:
         outcome, reason = "no_permitted_self_help_option", ReasonCode.SELF_HELP_DECLINED
 

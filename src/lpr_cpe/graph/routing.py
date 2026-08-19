@@ -67,7 +67,7 @@ wired but undocumented, or renamed in the specification without a test failing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from lpr_cpe.domain.boundaries import BACK_OFFICE_DOMAINS, crew_for
 from lpr_cpe.domain.enums import (
@@ -200,6 +200,40 @@ def latest_policy_decision(
     if action_type is not None:
         decisions = [d for d in decisions if d.action_type is action_type]
     return decisions[-1] if decisions else None
+
+
+DEDICATED_GATE_APPROVAL_KINDS: Final = frozenset(
+    {
+        ApprovalKind.LOW_CONFIDENCE_RCA,
+        ApprovalKind.HIGH_BLAST_RADIUS_ACTION,
+        ApprovalKind.DISPATCH,
+        ApprovalKind.CLEAN_TO_DIRTY_HANDOVER,
+    }
+)
+"""Kinds raised by a gate that exists only to raise them.
+
+The readers below key on `kind` alone, which is sound exactly while one gate asks each kind. Two
+gates do not fit that shape: `route_remote_gate` and `route_self_help_gate` ask for whatever kind
+the `PolicyDecision` names, so either of them can raise a question one of these gates owns -- and
+the answer, keyed on kind, then satisfies the owning gate's `approval_outstanding` without it ever
+asking. `route_rca_confidence` was measured taking `continue` on an answer the remote gate had
+collected, skipping its own `rca is None` fail-closed branch on the way. Those two gates therefore
+decline these kinds instead of asking them; the demand stays in `policy_decisions` and the owning
+gate picks it up on the next pass.
+
+Membership is the *deny* list rather than an allow list of what a variable-kind gate may ask, so a
+kind added to `ApprovalKind` without a gate of its own stays askable there. `EXCEPTIONAL_CLOSURE`
+is already in that position: nothing under `graph/` raises it, and listing it here would leave a
+pack that demanded it with no gate at all.
+
+The cost of that choice is that a *new* dedicated gate has to be added here by hand, and forgetting
+re-opens the leak silently -- the new gate simply never fires, exactly as
+`prepare_low_confidence_review` never fired before this existed. The four kinds above are hardcoded
+at their `build_request(kind=...)` call sites, which is where to look when adding the fifth, and
+`test_every_gate_that_names_its_own_kind_is_listed_as_owning_it` scans `graph/` for exactly those
+call sites and requires this set to equal them. That check reads the literal `ApprovalKind.X`
+spelling, so a gate that computed its kind would still have to be added here by hand.
+"""
 
 
 def latest_decision_of(state: IncidentState, kind: ApprovalKind) -> ApprovalDecision | None:
