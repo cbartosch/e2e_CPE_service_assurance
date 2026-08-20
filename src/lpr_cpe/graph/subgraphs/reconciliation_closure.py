@@ -699,11 +699,14 @@ async def prepare_exceptional_closure_approval(
     """Write the question down, then return. The first half of `graph.interrupts`' pair.
 
     `ApprovalKind.EXCEPTIONAL_CLOSURE` is named directly rather than read from
-    `decision.required_approval_kind`, for `prepare_handover_approval`'s reason:
-    `route_closure_gate` asks `latest_decision_of(state, ApprovalKind.EXCEPTIONAL_CLOSURE)`
-    literally, so a question asked under any other kind would be answered and then never seen. The
-    engine's own demand is recorded in the audit detail, which is where a disagreement between the
-    two would surface.
+    `decision.required_approval_kind`, and the two are equivalent rather than the first being a
+    defence: `route_closure_gate` returns `abandon` unless the demanded kind *is*
+    `EXCEPTIONAL_CLOSURE`, so this node cannot be entered under any other. Measured by swapping the
+    literal for the decision's field, which changed nothing. What naming it buys is that the kind
+    asked here and the kind `route_closure_gate` later looks for with
+    `latest_decision_of(state, ApprovalKind.EXCEPTIONAL_CLOSURE)` are the same token, so no future
+    edit to the engine can make the question unanswerable without the gate changing too. The
+    engine's own demand is recorded in the audit detail either way.
 
     `reversible=False`. A closed incident is reopened as a *new linked incident* --
     `ClosurePolicy.reopen_creates_linked_incident` is `True` in the shipped pack -- so the thing the
