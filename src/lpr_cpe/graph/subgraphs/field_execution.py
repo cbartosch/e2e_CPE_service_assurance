@@ -18,8 +18,9 @@ That reading enumerated `route_plant_outcome`'s (D19's) three answers by MR stat
 * `retry_diagnosis` needs one at `draft`, `rejected` or `cancelled`;
 * `await_plant` is everything `MRRecord.awaiting_osp` covers.
 
-and concluded that since `create_mr` writes `submitted` and nothing calls `update_mr`, D19 would
-answer `await_plant` for every incident and D20 would sit behind an arm no state could enter.
+and concluded that since `create_mr` writes `submitted` and -- as was true when that was written --
+nothing called `update_mr`, D19 would answer `await_plant` for every incident and D20 would sit
+behind an arm no state could enter.
 
 **The enumeration is missing a state, and it is the one this stage reaches most often: no MR at
 all**, which `current_mr_records` returns empty for and the router answers `retry_diagnosis`. Two of
@@ -33,15 +34,15 @@ completion time, post-repair evidence -- which is the crew's own report. That is
 fallback. The OSP-side status feed recorded as EXEC-2 is a real vendor gap and is not this one: it
 would be a *second* channel into the same parser, exactly as FIELD-3 is for `field_submission`.
 
-What does block it is that this subgraph has **one exit and four things to say through it**.
+What blocked it was that this subgraph has **one exit and four things to say through it**.
 `close_clean_boots_visit` writes `validating`, and D16's own specification text sends that case to
 restoration validation; `file_plant_mr` writes `mr_raised` and belongs in the plant wait;
 `abandon_handover` writes `diagnosing` and belongs back at P10; `no_visit` booked nothing at all.
 `graph.builder` may only ask questions that are in `routing.DECISIONS`, so a local gate cannot
-separate them on the parent's edge -- it has to be a numbered one. D16 is that decision, re-read
-on the parent's edge from the same `FieldFinding` this stage already answered it from, which is
-where its `validate` arm can finally reach the restoration validation the specification names for
-it. See `builder.PENDING_STAGES`.
+separate them on the parent's edge -- it has to be a numbered one. D16 is that decision, re-read on
+the parent's edge from the same `FieldFinding` this stage already answered it from, and it is now
+wired: `validate` reaches the restoration validation the specification names for it, and `delimit`
+reaches `subgraphs.plant_execution`, which is P21/D19/D20 built on the reading above.
 
 Eleven nodes, and why it is eleven
 ----------------------------------
@@ -1756,15 +1757,14 @@ async def file_plant_mr(state: IncidentState, ctx: GraphContext) -> NodeUpdate:
     same afternoon must not produce two MRs. The result is recorded whichever way it comes back, so
     an operator can see what we knew before filing.
 
-    **`update_mr` is not called, and its absence is measured rather than an oversight.** The
+    **`update_mr` is not called here, and its absence is measured rather than an oversight.** The
     specification's "update the existing MR when appropriate" needs a reachable state in which an MR
-    already exists, and there is none: nothing upstream of this node files one, and the only path
-    back here is through Stage 4's plant branch, which is the pending work `builder.PENDING_STAGES`
-    names. Writing the branch anyway would put an `update_mr` call behind a condition no state can
-    satisfy -- a branch no test can hold to account. What protects against the duplicate meanwhile
-    is the idempotency key: `mr_idempotency_key` is keyed on the plant object, so a second
-    `create_mr` for the same boundary is returned from the ledger flagged `replayed` rather than
-    filed again.
+    already exists, and nothing upstream of this node files one. The only path that holds one is
+    Stage 4's plant branch, and that is where the call lives: `plant_execution.update_plant_mr`,
+    updating the MR this node filed. A second caller here would sit behind a condition no state
+    arriving at *this* node can satisfy. What protects against the duplicate is the idempotency key:
+    `mr_idempotency_key` is keyed on the plant object, so a second `create_mr` for the same boundary
+    is returned from the ledger flagged `replayed` rather than filed again.
 
     `REQUIRED_MR_FIELDS` is re-checked here before the `ActionRequest` is built, duplicating a check
     the adapter also makes. That is deliberate: `create_mr` raises a **non-retryable**

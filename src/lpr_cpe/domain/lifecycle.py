@@ -102,8 +102,10 @@ TRANSITIONS: dict[S, frozenset[S]] = {
     S.MR_RAISED: frozenset(
         {S.AWAITING_PLANT_REPAIR, S.AWAITING_HANDOVER, S.ESCALATED, S.CANCELLED}
     ),
+    # DIAGNOSING is here for D19's `retry_diagnosis` arm: OSP can reject an MR, or close it having
+    # found nothing, and then the plant theory was wrong and the incident owes itself a new one.
     S.AWAITING_PLANT_REPAIR: frozenset(
-        {S.VALIDATING, S.MR_RAISED, S.DISPATCH_PLANNING, S.ESCALATED, S.CANCELLED}
+        {S.VALIDATING, S.MR_RAISED, S.DIAGNOSING, S.DISPATCH_PLANNING, S.ESCALATED, S.CANCELLED}
     ),
     S.VALIDATING: frozenset(
         {
@@ -168,6 +170,11 @@ STAGE_TRANSITIONS: dict[tuple[S, S], tuple[S, ...]] = {
     # `field_execution`, entered at `dispatch_planning`. Its exits are the four dispositions of a
     # visit, and only `abandon_handover`'s `diagnosing` is reachable in one hop already.
     (S.DISPATCH_PLANNING, S.VALIDATING): (S.FIELD_IN_PROGRESS,),
+    # The same stage's handover exit, which goes two hops further: `open_field_visit` opens the
+    # visit, `build_handover_contract` puts the case at the boundary, `file_plant_mr` raises the MR.
+    # The fourth disposition, `no_visit`, needs no entry at all -- `open_field_visit` returns before
+    # its status write when no work order is open, so the parent sees no hop.
+    (S.DISPATCH_PLANNING, S.MR_RAISED): (S.FIELD_IN_PROGRESS, S.AWAITING_HANDOVER),
 }
 
 

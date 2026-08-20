@@ -98,6 +98,7 @@ from lpr_cpe.graph.state import IncidentState
 from lpr_cpe.graph.subgraphs import (
     compile_field_execution_graph,
     compile_field_planning_graph,
+    compile_plant_execution_graph,
     compile_preventive_maintenance_graph,
     compile_reconciliation_closure_graph,
     compile_remote_resolution_graph,
@@ -130,6 +131,7 @@ if TYPE_CHECKING:
 SUBGRAPH_NODES: Mapping[str, Callable[[], Any]] = {
     "field_execution": compile_field_execution_graph,
     "field_planning": compile_field_planning_graph,
+    "plant_execution": compile_plant_execution_graph,
     "preventive_maintenance": compile_preventive_maintenance_graph,
     "reconciliation_closure": compile_reconciliation_closure_graph,
     "remote_resolution": compile_remote_resolution_graph,
@@ -179,6 +181,15 @@ DECISION_AFTER: Mapping[str, str] = {
     "generate_resolution_options": "D07",
     "remote_resolution": "D10",
     "self_help": "D12",
+    # Stage 4. D16 is asked *twice* -- once inside `field_execution` to pick its own ending, and
+    # again here to pick the parent's. That is not a duplicated question but the only expressible
+    # one: the subgraph has one exit and four dispositions to say through it, and `_check_tables`
+    # admits only decisions that are in `routing.DECISIONS`, so no local gate could separate them
+    # on this edge. The second reading is the first one's answer by construction -- of the four
+    # nodes that can end the stage, none writes a `FieldFinding`, which is the only thing
+    # `route_clean_boots_outcome` reads.
+    "field_execution": "D16",
+    "plant_execution": "D19",
     # Stage 5. D21 is asked here for the same reason D10 and D12 are: `continue_observation` re-runs
     # the window, but `retry_diagnosis` and `confirm_outcome` both land on parent nodes the subgraph
     # does not contain.
@@ -217,6 +228,24 @@ DECISION_AFTER: Mapping[str, str] = {
 #:   changed since the evidence was gathered, so the evidence is re-gathered. D12's is "return to
 #:   diagnosis (P10)": self-help changes nothing the diagnostic reads unless it worked, and it did
 #:   not, so the same evidence supports a second opinion.
+#: * **D16 `delimit` -> `plant_execution` for three of `field_execution`'s four endings.** Only
+#:   `close_clean_boots_visit` answers `validate`; the MR that was just filed, the handover that was
+#:   abandoned and the visit that never opened all arrive at the plant stage. That is correct rather
+#:   than merely total, because `route_plant_gate` asks whether there is an MR with OSP at all and
+#:   answers `no_plant_action` for the two that filed none -- so they cross a stage that does
+#:   nothing and reach D19, which routes them to P10 by the same `retry_diagnosis` arm that a
+#:   rejected MR takes. The alternative was a local gate on this edge, and `_check_tables` refuses
+#:   one: only decisions in `routing.DECISIONS` may sit on a parent edge.
+#: * **D19 `await_plant` -> `plant_execution`, a self-loop.** The stage chases the MR, records what
+#:   OSP said and is re-entered while the answer is still "with OSP". The bound is not here: every
+#:   node in the subgraph calls `check_budgets` on entry, so the loop ends at the guard's ceiling.
+#: * **D20 `reverse_handover` -> `field_planning`, not `field_execution`.** The specification says
+#:   "returning to P17", which is inside `field_execution` -- but it also says, in the same list,
+#:   "create or update a linked Clean Boots work order", and P17 books none. `open_field_visit`
+#:   reads `open_work_order` and returns `no_visit` when there is none, and `file_plant_mr` has
+#:   already completed the previous order, so an edge straight to P17 would arrive at a stage with
+#:   nothing to open and leave through the arm for having nothing to do. `field_planning` books the
+#:   order and `SUBGRAPH_SUCCESSOR` runs it into `field_execution`, which satisfies both lines.
 BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
     "D01": {
         "quarantine": END,
@@ -271,6 +300,19 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
         "retry_diagnosis": "determine_root_cause",
         "field_planning": "field_planning",
     },
+    "D16": {
+        "validate": "restoration_validation",
+        "delimit": "plant_execution",
+    },
+    "D19": {
+        "restored": "D20",
+        "await_plant": "plant_execution",
+        "retry_diagnosis": "determine_root_cause",
+    },
+    "D20": {
+        "reverse_handover": "field_planning",
+        "verify": "restoration_validation",
+    },
     "D21": {
         "continue_observation": "restoration_validation",
         "retry_diagnosis": "determine_root_cause",
@@ -292,28 +334,6 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
 #: incident may be resumed from either by a supervisor re-invoking the thread; neither is waiting on
 #: a stage that is missing.
 PENDING_STAGES: Mapping[str, str] = {
-    f"{ONWARD}:field_execution": (
-        "P21 onwards -- the plant-repair wait, D19's 'has plant repair restored service?' and "
-        "D20's residual-impact check. What is missing is the stage and the edge into it, and not a "
-        "vendor capability. An earlier version of this entry said the opposite: that D19 could "
-        "only ever answer `await_plant`, because `create_mr` returns `submitted` and nothing in "
-        "`src` calls `update_mr`. That enumerated D19's arms by MR status and left out the state "
-        "this stage reaches most often -- **no MR at all**, which `route_plant_outcome` answers "
-        "`retry_diagnosis`, and which both `abandon_handover` and `route_visit_gate`'s `no_visit` "
-        "produce today. `restored` needs a revision at `completed`, and the specification defines "
-        "P21 as a capture list: the crew's own report, the shape `capture_field_evidence` already "
-        "takes through `interrupt()` with no adapter fallback. The OSP status feed is a real gap "
-        "(EXEC-2 in docs/vendor-integration-gaps.md) and is a second channel into that parser, not "
-        "a precondition for it. The blocker is this table. The subgraph has one exit and four "
-        "things to say through it -- `close_clean_boots_visit` at `validating`, which D16's own "
-        "specification text sends to restoration validation; `file_plant_mr` at `mr_raised`, which "
-        "belongs in the wait; `abandon_handover` at `diagnosing`, which belongs back at P10; and "
-        "`no_visit`, which booked nothing -- and `_check_tables` admits only decisions that are in "
-        "`routing.DECISIONS`, so no local gate may separate them here. D16 is the decision that "
-        "can: re-read on this edge from the same `FieldFinding` the subgraph answered it from, "
-        "which is where its `validate` arm reaches the restoration validation the specification "
-        "names for it"
-    ),
     f"{ONWARD}:preventive_maintenance": (
         "the seam from a preventive disposition into field planning. P14 now exists, but nothing "
         "routes into it from here: the subgraph runs to completion and its three dispositions are "
@@ -326,8 +346,19 @@ PENDING_STAGES: Mapping[str, str] = {
         "docs/vendor-integration-gaps.md"
     ),
     "D08:plant_path": (
-        "the NOC, provisioning and plant branch -- Stage 4's Dirty Boots half, P20 onwards, which "
-        "creates or updates an MR from NOC/plant evidence rather than from a handover contract"
+        "the NOC and provisioning entry into the plant branch -- the case that reaches P20 "
+        "*directly*, with no Clean Boots visit behind it. P20, P21, D19 and D20 are built and "
+        "wired now, so what is missing is narrower than this entry used to say: it is the MR "
+        "filing for a case that has no handover. `file_plant_mr` reads its packet from the "
+        "`HandoverContract` and refuses without `REQUIRED_MR_FIELDS` -- plant_object_ref, "
+        "fault_description, evidence_refs, access_notes -- and the specification agrees that a "
+        "D08-direct case has no contract to read them from: the Clean-Boots-specific fields "
+        "'do not apply and may be omitted', with the NOC/plant evidence package supplied instead. "
+        "Nothing assembles that package today. The lifecycle says the same thing a second way: "
+        "D08 is asked in the chain after `generate_resolution_options`, where the incident is at "
+        "`diagnosing`, and neither `mr_raised` nor `awaiting_plant_repair` is one hop from there "
+        "-- so this arm needs a filing node of its own and a `STAGE_TRANSITIONS` seam recording "
+        "the middle it walks, not an edge to the stage that now exists"
     ),
 }
 

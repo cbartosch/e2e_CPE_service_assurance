@@ -10,9 +10,9 @@ why `STAGE_TRANSITIONS` exists.
 the raw `TRANSITIONS` dict, because `can_transition` now consults `STAGE_TRANSITIONS` itself and a
 check routed through it would be asking the seam table to vouch for the seam table.
 
-**The counts are measured, not asserted round.** 18 statuses, so 324 ordered pairs; 96 of them are
-single hops; no status lists itself, so the 18 no-ops are all additional; the seam table adds 1.
-`can_transition` accepts 115. The alternative that was tried first -- accept any pair joined by
+**The counts are measured, not asserted round.** 18 statuses, so 324 ordered pairs; 97 of them are
+single hops; no status lists itself, so the 18 no-ops are all additional; the seam table adds 2.
+`can_transition` accepts 117. The alternative that was tried first -- accept any pair joined by
 *some* path -- accepts 257 of the 324, which is why it was thrown away and why
 `test_can_transition_accepts_the_two_tables_and_nothing_else` names a pair that is reachable and
 still refused.
@@ -125,7 +125,7 @@ def test_can_transition_accepts_the_two_tables_and_nothing_else() -> None:
 
     The first attempt at this fix accepted any pair joined by some path through `TRANSITIONS`. It
     passed every test in the suite, because it is a superset of the correct answer. Sweeping the
-    square is what showed the price: 257 of 324 pairs, against 115 for the table as written --
+    square is what showed the price: 257 of 324 pairs, against 117 for the table as written --
     `triaging -> field_in_progress` among the newly legal ones, which would let triage put a crew on
     a customer's roof without ever diagnosing the fault.
 
@@ -133,7 +133,7 @@ def test_can_transition_accepts_the_two_tables_and_nothing_else() -> None:
     implementation that answers by searching for a path fails, whatever the tables say.
 
     Reinstated by replacing the seam lookup with a reachability walk:
-    `AssertionError: can_transition accepted 146 pairs the two tables do not name, first 8:
+    `AssertionError: can_transition accepted 144 pairs the two tables do not name, first 8:
     ['awaiting_approval -> awaiting_customer', 'awaiting_approval -> awaiting_plant_repair',
     'awaiting_approval -> field_in_progress', 'awaiting_approval -> validating', 'awaiting_customer
     -> awaiting_approval', 'awaiting_customer -> awaiting_handover', 'awaiting_customer ->

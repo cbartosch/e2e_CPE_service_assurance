@@ -289,9 +289,11 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # `DECISION_AFTER` nor `SUBGRAPH_SUCCESSOR` -- the same edge the last ordered step would
         # get, and the reason the loop that draws it was dead code until the first of these was
         # wired. `preventive_maintenance` picks its own disposition internally and every
-        # disposition is the end of that thread; `field_execution` answers D16, D17 and D18
-        # internally and its three exits stop where the missing OSP status feed does. Neither
-        # leaves the parent anything to ask.
+        # disposition is the end of that thread, so it leaves the parent nothing to ask.
+        #
+        # `field_execution` used to be the second of these and is not any more: it now carries D16,
+        # below. Its exits were never a terminal disposition -- they stopped for want of the plant
+        # stage, which is the correction `PENDING_STAGES` records.
         #
         # `reconciliation_closure` is the third, and the only one of the three that is terminal
         # because the workflow is *over* rather than because something is unwritten -- which is why
@@ -306,8 +308,31 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # builder that no run can distinguish. The escalation was recorded inside the subgraph, by
         # that subgraph's own guarded edges, before the parent saw the state at all.
         "preventive_maintenance": {ONWARD: END, ESCALATED: END},
-        "field_execution": {ONWARD: END, ESCALATED: END},
         "reconciliation_closure": {ONWARD: END, ESCALATED: END},
+        # Stage 4's two halves. D16 is asked here *and* inside `field_execution`, which is the one
+        # decision in the graph that appears twice, and it is not a duplicate: the subgraph has a
+        # single exit and four dispositions to say through it, and `_check_tables` admits only
+        # decisions that are in `routing.DECISIONS`, so no local gate can sit on this edge. The
+        # second reading is the first one's answer by construction -- none of the four nodes that
+        # end the stage writes a `FieldFinding`, and that is all `route_clean_boots_outcome` reads.
+        "field_execution": {
+            "validate": "restoration_validation",
+            "delimit": "plant_execution",
+            ESCALATED: END,
+        },
+        # `await_plant` is a self-loop, and unlike `SUBGRAPH_SUCCESSOR`'s -- which `_check_tables`
+        # refuses outright -- this one is a `BRANCH_TARGETS` entry and allowed. What stops it is
+        # `capture_plant_evidence`, which raises an interrupt for OSP's report, so a lap that
+        # arrives with nothing new parks rather than spinning; the guard's ceiling sits underneath.
+        # `restored` is absent because it names D20 rather than a node: `_cascade` follows it inside
+        # the edge function and what reaches the path map is always one of D20's own answers.
+        "plant_execution": {
+            "await_plant": "plant_execution",
+            "retry_diagnosis": "determine_root_cause",
+            "reverse_handover": "field_planning",
+            "verify": "restoration_validation",
+            ESCALATED: END,
+        },
         # The other two subgraphs. D10 and D12 are asked *here* and not inside them because every
         # destination either answer has is a sibling the subgraph does not contain -- a subgraph
         # cannot route to P07, and `retry_diagnosis` is most of the point of both.
@@ -1216,11 +1241,29 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     legitimately stop -- rather than confessed here. That is the difference between a frontier that
     advances and a frontier that closes, and it is the first time this list has recorded the second.
 
-    What is left is three entries and two distinct causes, which is worth reading as a shape rather
-    than a count. `__onward__:field_execution` and `D08:plant_path` are both the plant branch: one
-    is where the Clean Boots arm stops for want of the OSP status feed, the other where the Dirty
-    Boots arm was never entered. `__onward__:preventive_maintenance` is the odd one out and is the
-    only entry on the list that names a *seam* rather than a stage.
+    Wiring the plant branch is the second edit to add a stage and put nothing in its place, and the
+    first where the stage that was added is not itself terminal. `plant_execution` is followed by
+    D19, whose three answers reach `plant_execution`, `determine_root_cause` and D20, and D20's two
+    reach `field_planning` and `restoration_validation` -- five destinations that all already
+    existed. So the frontier did not advance one stage this time; it closed.
+
+    Two of the three sentences at the top of this docstring were also wrong, and this is where they
+    are paid off rather than edited away. `file_plant_mr` was said to wait on the OSP status feed:
+    it waits on nothing, because P21 takes the crew's report through `interrupt()` and the feed is a
+    second channel into the same parser. `close_clean_boots_visit` was said to wait on D20: it
+    answers D16 `validate` and goes to restoration validation, which is what D16's own specification
+    text says, and D20 is nowhere on that path. Only the third sentence held -- `abandon_handover`
+    really was waiting on an edge rather than a stage, and D16 re-read on the parent's edge is that
+    edge.
+
+    `D08:plant_path` survived and, like `__onward__:preventive_maintenance` before it, no longer
+    says what it used to. It meant "the plant branch is unwritten"; the branch is written, and what
+    is left is one filing node -- a D08-direct case has no `HandoverContract` for `file_plant_mr` to
+    read `REQUIRED_MR_FIELDS` from, which the specification itself says is correct for that case.
+
+    What is left is two entries and one cause, which is the first time this list has had one. Both
+    name a *seam*: a stage that exists on each side and no edge that may join them, because in each
+    case the receiving stage reads a model the sending one never builds.
 
     `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
     against the tables in both directions, so an exit that stops reaching `END` fails the build.
@@ -1229,7 +1272,6 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     END: ['D22:reconcile']", which is the stale direction, the one nothing else would have caught.
     """
     assert set(PENDING_STAGES) == {
-        f"{ONWARD}:field_execution",
         f"{ONWARD}:preventive_maintenance",
         "D08:plant_path",
     }

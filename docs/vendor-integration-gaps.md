@@ -719,12 +719,20 @@ everything about what a visit needs beyond a crew type, and how far ahead this s
   is made, the approval chain is exercised from state with one hypothesis rejected, and a test pins
   the zero measurement so this entry cannot go quietly stale.
 
-* **EXEC-2** — **An MR never leaves `submitted`: there is no OSP-side status feed.**
-  `create_mr` returns `MRStatus.SUBMITTED`, and `update_mr` — declared on the Protocol in
-  `integrations/base.py`, implemented in the simulator, and `allowed: true` in the pack — has **no
-  caller anywhere in `src` or `tests`**. It is the only adapter method that moves one. **What moves
-  an MR — a jTrack webhook, a poll, or an operator's own screen?** All three are real deployments and
-  the pack would permit any of them. Inherits JTRACK-1.
+* **EXEC-2** — **Nothing pushes OSP's progress at us, so a repair's status is only ever asked for.**
+  `create_mr` returns `MRStatus.SUBMITTED` and `JTrackAdapter` has no method that reports what OSP
+  did next: it can be asked about an MR and told to append to one, and that is all. So
+  `plant_execution.capture_plant_evidence` takes the report through `interrupt()` with **no adapter
+  fallback**, for the reason FIELD-3 records — a fallback written against this Protocol would be a
+  branch that cannot produce a report. **What should move an MR — a jTrack webhook, a poll, or an
+  operator's own screen?** All three are real deployments and the pack would permit any of them.
+  Inherits JTRACK-1.
+
+  **The half of this entry that said an MR never leaves `submitted` is now closed.**
+  `graph/subgraphs/plant_execution.py` is P21/D19/D20 built and wired, and its `update_plant_mr` is
+  the only caller of `update_mr` in `src`. What is left is the feed, not the wait: when it exists,
+  `capture_plant_evidence` gains a second channel and `plant_report` is the one parser both go
+  through — exactly as FIELD-3 says a WFM completion feed would be for `field_submission`.
 
   **This entry used to claim more than it could measure, and the correction is the useful half.** It
   said P21, D19 and D20 were unwritten *because* of this gap — that D19 would answer `await_plant`
@@ -736,11 +744,11 @@ everything about what a visit needs beyond a crew type, and how far ahead this s
   collapses to latest-by-id. The enumeration that produced the original claim was keyed on MR status
   and had no row for the empty case — which is the case that arm is mostly reached through.
 
-  So this gap does not block P21. The specification defines P21 as a **capture** list — acceptance,
-  assignment, dispatch, measurements, repair actions, components changed, photos, resolution code,
-  completion time, post-repair evidence — which is the crew's own report, and `capture_field_evidence`
-  is already that node for the Clean Boots half: `interrupt()` with **no adapter fallback**, for the
-  reason FIELD-3 records. A jTrack status feed would be the *second* channel into the same parser,
-  exactly as FIELD-3 says a WFM completion feed would be for `field_submission`. What blocks P21 is
-  a topology question rather than a vendor one — `field_execution` has one exit and four things to
-  say through it — and `builder.PENDING_STAGES` now states it in those terms.
+  So this gap did not block P21, and P21 has since been built on exactly that reading: the
+  specification defines it as a **capture** list — acceptance, assignment, dispatch, measurements,
+  repair actions, components changed, photos, resolution code, completion time, post-repair evidence
+  — which is the crew's own report, and `capture_plant_evidence` takes it the way
+  `capture_field_evidence` takes the Clean Boots half. The topology question that was named as the
+  real blocker turned out to be answerable the same way `field_execution` answers its own: the four
+  dispositions are separated by a **local** gate inside the subgraph, where `_check_tables` does not
+  require them to be members of `routing.DECISIONS`, rather than on the parent's edge where it does.
