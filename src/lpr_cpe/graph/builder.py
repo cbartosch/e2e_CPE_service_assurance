@@ -99,6 +99,7 @@ from lpr_cpe.graph.subgraphs import (
     compile_field_execution_graph,
     compile_field_planning_graph,
     compile_preventive_maintenance_graph,
+    compile_reconciliation_closure_graph,
     compile_remote_resolution_graph,
     compile_restoration_validation_graph,
     compile_self_help_graph,
@@ -130,6 +131,7 @@ SUBGRAPH_NODES: Mapping[str, Callable[[], Any]] = {
     "field_execution": compile_field_execution_graph,
     "field_planning": compile_field_planning_graph,
     "preventive_maintenance": compile_preventive_maintenance_graph,
+    "reconciliation_closure": compile_reconciliation_closure_graph,
     "remote_resolution": compile_remote_resolution_graph,
     "restoration_validation": compile_restoration_validation_graph,
     "self_help": compile_self_help_graph,
@@ -275,7 +277,7 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
         "confirm_outcome": "confirm_customer_outcome",
     },
     "D22": {
-        "reconcile": END,
+        "reconcile": "reconciliation_closure",
         "retry_diagnosis": "determine_root_cause",
     },
 }
@@ -321,16 +323,6 @@ PENDING_STAGES: Mapping[str, str] = {
     "D08:plant_path": (
         "the NOC, provisioning and plant branch -- Stage 4's Dirty Boots half, P20 onwards, which "
         "creates or updates an MR from NOC/plant evidence rather than from a handover contract"
-    ),
-    "D22:reconcile": (
-        "Stage 5's second half -- P24's reconciliation of the linked systems, D23, P25's "
-        "controlled closure sequence and P26's outcome labelling. The first half is wired: an "
-        "incident now waits out its stability window, is judged against the pre-fix readings and "
-        "has the customer's word recorded, and stops at the point where the linked records would "
-        "be brought into agreement. What is missing is partly a stage and partly a capability -- "
-        "`ReconciliationPolicy.systems` names `service_platform`, which no adapter serves, so P24 "
-        "could reconcile four of the five systems it is asked about; see "
-        "docs/vendor-integration-gaps.md"
     ),
 }
 
@@ -677,6 +669,12 @@ _DELIBERATE_TERMINALS: frozenset[str] = frozenset(
         # The incident is a human's now. `IncidentStatus.ESCALATED` moves onward to nine other
         # statuses, so a supervisor resumes the thread; there is no next node for the graph to run.
         "record_escalation",
+        # The last stage of the lifecycle. Its main line ends at `update_kpis_and_learning`, which
+        # writes `IncidentStatus.CLOSED` -- and `domain.lifecycle` gives `closed` no outward
+        # transition, so there is not merely no next node but no legal one. Its other two exits end
+        # for reasons of their own: `abandon_closure` has escalated, and D23's exhausted-retry arm
+        # escalates through the same guard.
+        "reconciliation_closure",
     }
 )
 

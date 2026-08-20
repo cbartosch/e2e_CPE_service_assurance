@@ -346,19 +346,31 @@ closure:
 # 14. Reconciliation retries
 # -------------------------------------------------------------------------------------------------
 reconciliation:
-  # Linked records live in five systems that fail independently, so a first mismatch is usually a
+  # Linked records live in six systems that fail independently, so a first mismatch is usually a
   # timing artefact rather than a real disagreement.
   max_retries: 3
   retry_backoff_seconds: [30, 120, 600]
   # After the retries, a persisting mismatch is a data-integrity finding and goes to a human. It is
   # never resolved by closing the incident and hoping.
   escalate_on_persistent_mismatch: true
+  # One entry per adapter P24 has to ask, derived from the eleven records the specification lists
+  # under "P24 -- Reconcile linked systems": NXT alarm state; the TMF642 alarm, TMF621 customer
+  # ticket, TMF724 incident, TMF656 service problem and TMF653 tests; Clean Boots and Dirty Boots
+  # work orders; the jTrack MR; customer communications; parts usage. Six adapters cover the eleven.
+  #
+  # This read tmf/wfm/jtrack/inventory/service_platform until 2026-08-19, and it was wrong in both
+  # directions at once. `service_platform` appears nowhere in P24 and `SimulatedAdapters` has no
+  # such member, so P24 could only ever report it unreachable -- and `ReconciliationResult`
+  # counts unreachable as inconsistent, so D23 would have held every incident short of closure
+  # forever. Meanwhile `nxt` and `communications` are named by P24, do have adapters, and were not
+  # being asked at all.
   systems:
+    - nxt
     - tmf
     - wfm
     - jtrack
+    - communications
     - inventory
-    - service_platform
 
 # -------------------------------------------------------------------------------------------------
 # 15. Escalation rules

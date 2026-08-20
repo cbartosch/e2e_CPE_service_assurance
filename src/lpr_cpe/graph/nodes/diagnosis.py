@@ -77,6 +77,7 @@ from lpr_cpe.detectors.localisation import DelimiterLocaliser, FaultDomainClassi
 from lpr_cpe.domain.diagnosis import AnomalyFinding, RCAResult
 from lpr_cpe.domain.enums import (
     FaultDomain,
+    IncidentStatus,
     KPIName,
     Technology,
 )
@@ -230,6 +231,14 @@ async def determine_root_cause(state: IncidentState, ctx: GraphContext) -> NodeU
     scope = scope_for_fault_domain(rca.fault_domain)
     common = scope is not BlastRadiusScope.SINGLE_PREMISES
     update: NodeUpdate = {
+        # P07 sets this too, and says there that it does so because every path into stage 2 runs
+        # through it. That was true when it was written and is not any more: D21's and D22's
+        # `retry_diagnosis` arms both re-enter stage 2 *here*, at P10, and neither passes P07. So an
+        # incident sent back from Stage 5 re-ran diagnosis while still reading `validating`, and the
+        # first approval gate it reached refused `validating -> awaiting_approval` and killed the
+        # run. Written unconditionally because `can_transition` allows the no-op: on the main line
+        # the incident already holds `diagnosing` and this costs nothing.
+        "status": IncidentStatus.DIAGNOSING,
         "rca": rca,
         "fault_domain": rca.fault_domain,
         "delimiter": rca.delimiter_kind,

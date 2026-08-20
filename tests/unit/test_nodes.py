@@ -36,11 +36,13 @@ from lpr_cpe.domain.enums import (
     CaseType,
     EventSource,
     FaultDomain,
+    IncidentStatus,
     ReasonCode,
     Severity,
     Technology,
 )
 from lpr_cpe.domain.governance import ActionRecord, ActionRequest
+from lpr_cpe.domain.lifecycle import can_transition
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.nodes import (
@@ -201,6 +203,52 @@ async def test_p10_reclassifies_instead_of_reusing_the_evidence_stage_verdict(
         "P07's classifier no longer says `distribution` for this fixture, so this test is no "
         "longer demonstrating that P10 re-classifies. Check the fixture before relaxing it."
     )
+
+
+async def test_p10_puts_the_incident_back_in_the_diagnostic_stage_when_a_retry_returns_it(
+    fixtures: Any,
+) -> None:
+    """P10 is a second door into stage 2, and a door has to set the status of the room.
+
+    P07 sets `diagnosing` and its comment used to say it did so because every path into the stage
+    ran through it. That stopped being true when Stage 5 was wired: D21's and D22's
+    `retry_diagnosis` arms both re-enter at P10 and neither passes P07. An incident sent back that
+    way therefore re-ran the whole diagnosis still reading `validating`, and died at the first
+    approval gate it reached -- `IllegalTransitionError: validating -> awaiting_approval`, raised
+    from `prepare_remote_approval`, several nodes downstream of the node that was actually wrong.
+
+    The two `can_transition` assertions are what make this a test of the *reason* rather than of a
+    line of code. Without them a reader cannot tell whether P10's write is load-bearing or
+    decorative, and the answer is that `validating` is one of the few statuses from which
+    `awaiting_approval` is not reachable at all.
+
+    Shown red by deleting P10's `"status": IncidentStatus.DIAGNOSING`::
+
+        >       assert update["status"] is IncidentStatus.DIAGNOSING
+                       ^^^^^^^^^^^^^^^^
+        E       KeyError: 'status'
+
+    -- and it was the only one of the suite's 878 to go red, which is the measurement that says the
+    write had no other guard.
+
+    The write is unconditional rather than guarded on the incoming status, because
+    `can_transition(x, x)` is legal by design: on the main line the incident already holds
+    `diagnosing` and re-writing it costs nothing.
+    """
+    service = _service(fixtures, "hfc_degraded_upstream")
+    state, ctx = await _run_parent(service)
+
+    # Where a retry arm leaves an incident: past restoration validation, holding `validating`, and
+    # routed to P10 rather than to P07. Applied through `preview` so the lifecycle reducer sees it.
+    returned = preview(state, {"status": IncidentStatus.VALIDATING})
+    assert returned["status"] is IncidentStatus.VALIDATING
+
+    update = await determine_root_cause.__wrapped__(returned, ctx)
+    assert update["status"] is IncidentStatus.DIAGNOSING
+
+    # The gate that used to die, before and after. This is the whole cost of the missing write.
+    assert not can_transition(IncidentStatus.VALIDATING, IncidentStatus.AWAITING_APPROVAL)
+    assert can_transition(preview(returned, update)["status"], IncidentStatus.AWAITING_APPROVAL)
 
 
 # ------------------------------------------------------------------------------------------------

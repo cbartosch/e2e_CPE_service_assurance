@@ -841,11 +841,17 @@ class PolicyEngine:
                 _Finding(
                     reason_code=ReasonCode.RECONCILIATION_MISMATCH,
                     explanation=(
-                        "linked records in the five systems of record have not been reconciled; "
-                        "closing now leaves an open work order or MR behind a closed incident"
+                        "linked records in the systems of record named by "
+                        "policy.reconciliation.systems ("
+                        + ", ".join(pack.reconciliation.systems)
+                        + ") have not been reconciled; closing now leaves an open work order or "
+                        "MR behind a closed incident"
                     ),
                     rule="closure.require_reconciliation",
-                    inputs={"reconciled": request.reconciled},
+                    inputs={
+                        "reconciled": request.reconciled,
+                        "systems": list(pack.reconciliation.systems),
+                    },
                 )
             )
         return out

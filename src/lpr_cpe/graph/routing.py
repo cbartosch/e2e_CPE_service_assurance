@@ -208,6 +208,7 @@ DEDICATED_GATE_APPROVAL_KINDS: Final = frozenset(
         ApprovalKind.HIGH_BLAST_RADIUS_ACTION,
         ApprovalKind.DISPATCH,
         ApprovalKind.CLEAN_TO_DIRTY_HANDOVER,
+        ApprovalKind.EXCEPTIONAL_CLOSURE,
     }
 )
 """Kinds raised by a gate that exists only to raise them.
@@ -222,17 +223,28 @@ decline these kinds instead of asking them; the demand stays in `policy_decision
 gate picks it up on the next pass.
 
 Membership is the *deny* list rather than an allow list of what a variable-kind gate may ask, so a
-kind added to `ApprovalKind` without a gate of its own stays askable there. `EXCEPTIONAL_CLOSURE`
-is already in that position: nothing under `graph/` raises it, and listing it here would leave a
-pack that demanded it with no gate at all.
+kind added to `ApprovalKind` without a gate of its own stays askable there. Measured 2026-08-19,
+this set is now five of `ApprovalKind`'s six members and the one omission is the load-bearing one:
+`HIGH_RISK_REMOTE_ACTION` is what `PolicyEngine` falls back to when a rule demands approval without
+naming a kind (`engine.py`'s `or ApprovalKind.HIGH_RISK_REMOTE_ACTION`), so it is the *default* a
+variable-kind gate reads out of `decision.required_approval_kind`. Adding it here would leave the
+remote and self-help gates declining the only kind they were built to ask.
+
+`EXCEPTIONAL_CLOSURE` was in that position until `reconciliation_closure` was written, and the
+transition is the case this set is built for. `prepare_exceptional_closure_approval` hardcodes it,
+so from that moment a variable-kind gate could collect the answer first and
+`route_closure_gate` would read an `ApprovalKind.EXCEPTIONAL_CLOSURE` decision it had never asked
+for. Nothing about that is subtle in practice:
+`test_every_gate_that_names_its_own_kind_is_listed_as_owning_it` went red on the new call site
+before this line was added, naming the gate and the omission.
 
 The cost of that choice is that a *new* dedicated gate has to be added here by hand, and forgetting
 re-opens the leak silently -- the new gate simply never fires, exactly as
-`prepare_low_confidence_review` never fired before this existed. The four kinds above are hardcoded
-at their `build_request(kind=...)` call sites, which is where to look when adding the fifth, and
-`test_every_gate_that_names_its_own_kind_is_listed_as_owning_it` scans `graph/` for exactly those
-call sites and requires this set to equal them. That check reads the literal `ApprovalKind.X`
-spelling, so a gate that computed its kind would still have to be added here by hand.
+`prepare_low_confidence_review` never fired before this existed. The five kinds above are hardcoded
+at their `build_request(kind=...)` call sites, which is where to look when adding the sixth, and
+that test scans `graph/` for exactly those call sites and requires this set to equal them. It reads
+the literal `ApprovalKind.X` spelling, so a gate that computed its kind would still have to be
+added here by hand.
 """
 
 

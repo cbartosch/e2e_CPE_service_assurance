@@ -568,10 +568,15 @@ async def assemble_case_evidence(state: IncidentState, ctx: GraphContext) -> Nod
 
     ran = [r for r in results if r.ran]
     return {
-        # Set here rather than in P10 because this is where the stage begins, and every path into
-        # stage 2 -- first pass, D05's `gather_more`, D06's `retry_diagnosis` -- comes through this
-        # node. A retry that skipped evidence assembly would be re-testing yesterday's readings.
-        # `can_transition` allows the no-op, so a second cycle re-writing `diagnosing` is legal.
+        # Set here because this is where the stage begins for every path that gathers evidence --
+        # first pass, D05's `gather_more`, D06's `retry_diagnosis`. A retry that skipped evidence
+        # assembly would be re-testing yesterday's readings. `can_transition` allows the no-op, so a
+        # second cycle re-writing `diagnosing` is legal.
+        #
+        # P10 writes it as well, and that is not a duplicate owner but a second door. D21's and
+        # D22's `retry_diagnosis` arms re-enter stage 2 at P10 and never reach this node, so
+        # this write alone left a case sent back from Stage 5 reading `validating` while it
+        # re-diagnosed. See P10 for the failure that found it.
         "status": IncidentStatus.DIAGNOSING,
         "diagnostic_cycles": cycle,
         "evidence": evidence,

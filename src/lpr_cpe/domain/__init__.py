@@ -96,6 +96,7 @@ from lpr_cpe.domain.governance import (
     PolicyDecision,
 )
 from lpr_cpe.domain.lifecycle import (
+    STAGE_TRANSITIONS,
     TERMINAL_STATUSES,
     TRANSITIONS,
     can_transition,
@@ -155,6 +156,7 @@ __all__ = [
     "WifiBand",
     "WorkOrderStatus",
     # lifecycle
+    "STAGE_TRANSITIONS",
     "TERMINAL_STATUSES",
     "TRANSITIONS",
     "can_transition",

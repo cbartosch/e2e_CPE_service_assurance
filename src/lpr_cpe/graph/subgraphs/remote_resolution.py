@@ -37,13 +37,18 @@ firmware update and the factory reset are the high-risk pair today, but a pack t
 other kind against a reboot is still honoured -- a hard-coded kind would sail past the demand and
 execute unapproved.
 
-Honoured is not the same as asked here, and the difference is `DEDICATED_GATE_APPROVAL_KINDS`. Four
-kinds belong to a gate of their own, and since the readers in `routing` key on kind alone, asking
-one of them *here* answers the owning gate's question for it -- a `low_confidence_rca` collected at
-this gate was measured satisfying D06, which then skipped its own fail-closed branch. So a demand
-of those four kinds abandons instead: the `PolicyDecision` reaches the parent, D10 sends the
-incident round, and the gate that owns the question asks it. A kind nobody owns -- today,
-`exceptional_closure` -- is still asked here, because the alternative is a demand with no gate.
+Honoured is not the same as asked here, and the difference is `DEDICATED_GATE_APPROVAL_KINDS`.
+Five kinds belong to a gate of their own, and since the readers in `routing` key on kind alone,
+asking one of them *here* answers the owning gate's question for it -- a `low_confidence_rca`
+collected at this gate was measured satisfying D06, which then skipped its own fail-closed branch.
+So a demand of those five kinds abandons instead: the `PolicyDecision` reaches the parent, D10
+sends the incident round, and the gate that owns the question asks it.
+
+`exceptional_closure` used to be named here as the kind nobody owned and so one this gate would
+still ask. `reconciliation_closure` owns it now and it joined the deny list with that stage. What
+is left outside the list is `high_risk_remote_action`, which is not an oversight but the kind this
+gate exists to ask -- and the one `PolicyEngine` falls back to when a rule demands approval without
+naming one.
 
 Why the node records the selection instead of the router re-deriving it
 -----------------------------------------------------------------------

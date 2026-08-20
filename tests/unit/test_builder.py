@@ -15,10 +15,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from typing import Any
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END
+from langgraph.types import Command
 
 import lpr_cpe.graph.builder as builder_module
 from lpr_cpe.config.clock import FrozenClock
@@ -33,6 +36,8 @@ from lpr_cpe.domain.enums import (
     Severity,
     Technology,
 )
+from lpr_cpe.domain.field_ops import HandoverContract
+from lpr_cpe.domain.lifecycle import STAGE_TRANSITIONS, TRANSITIONS
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.builder import (
     BRANCH_TARGETS,
@@ -288,7 +293,13 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # internally and its three exits stop where the missing OSP status feed does. Neither
         # leaves the parent anything to ask.
         #
-        # Guarded even so, and these are the two guarded edges in the graph where that buys
+        # `reconciliation_closure` is the third, and the only one of the three that is terminal
+        # because the workflow is *over* rather than because something is unwritten -- which is why
+        # it is the second name in `_DELIBERATE_TERMINALS` and has no `PENDING_STAGES` line. Its
+        # main line ends at P26, which writes `IncidentStatus.CLOSED`, and `domain.lifecycle` gives
+        # `closed` no outward transition: there is not merely no next node here but no legal one.
+        #
+        # Guarded even so, and these are the three guarded edges in the graph where that buys
         # nothing: both keys go to `END`, so `guarded` reading `escalated` cannot change where the
         # run goes. It is here because the terminal loop draws one kind of edge rather than two,
         # and a special case for "the destinations happen to be equal" would be a branch in the
@@ -296,6 +307,7 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # that subgraph's own guarded edges, before the parent saw the state at all.
         "preventive_maintenance": {ONWARD: END, ESCALATED: END},
         "field_execution": {ONWARD: END, ESCALATED: END},
+        "reconciliation_closure": {ONWARD: END, ESCALATED: END},
         # The other two subgraphs. D10 and D12 are asked *here* and not inside them because every
         # destination either answer has is a sibling the subgraph does not contain -- a subgraph
         # cannot route to P07, and `retry_diagnosis` is most of the point of both.
@@ -342,10 +354,11 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
             "confirm_outcome": "confirm_customer_outcome",
             ESCALATED: END,
         },
-        # D22 -> the reconciliation stage, and the fourth of the four exits still falling to `END`
-        # for want of something unwritten. `PENDING_STAGES` is where each says what.
+        # D22 -> the reconciliation stage, which is now written. This edge used to be the fourth of
+        # four exits falling to `END` for want of something unwritten; the remaining three are in
+        # `PENDING_STAGES`, which says what each waits on.
         "confirm_customer_outcome": {
-            "reconcile": END,
+            "reconcile": "reconciliation_closure",
             "retry_diagnosis": "determine_root_cause",
             ESCALATED: END,
         },
@@ -591,6 +604,149 @@ async def test_a_predictive_case_on_a_quiet_service_actually_reaches_the_prevent
     # about the case type and not about this service being unable to get past P05 at all.
     active, _ = await _run(quiet, case_type=CaseType.PROACTIVE_ALARM)
     assert active["node_visits"]["create_or_attach_incident"] == 1
+
+
+# ------------------------------------------------------------------------------------------------
+# Running it *through* a subgraph, which is not the same as running it up to one
+# ------------------------------------------------------------------------------------------------
+
+#: Answered to every approval gate on the way through, so the run reaches the boundary at all. Which
+#: gate is being answered does not matter here -- `test_graph_foundations.py` owns who may decide
+#: what; this section owns what the parent sees once they have.
+SEAM_APPROVAL = {
+    "status": "approved",
+    "decided_by": "sofia.reyes",
+    "decided_by_role": "noc_supervisor",
+    "rationale": "driving the incident across the stage boundary",
+}
+
+
+def _clean_boots_submission(service: dict[str, Any]) -> dict[str, Any]:
+    """A visit that fixed the fault and owes no plant work -- the exit that leaves `validating`.
+
+    The measurement keys come out of `REQUIRED_BY_TECHNOLOGY` rather than being spelled here, for
+    `test_subgraph_field_execution.py`'s reason: the key is the thing the contract checks, and a
+    hand-copied list would drift away from the contract it has to match.
+    """
+    required = HandoverContract.REQUIRED_BY_TECHNOLOGY[service["technology"]]
+    return {
+        "fault_domain": "drop",
+        "delimiter_kind": "tap" if service["technology"] == "hfc" else "odp",
+        "delimiter_ref": service["delimiter_ref"],
+        "fault_confirmed": True,
+        "no_fault_found": False,
+        "work_completed": True,
+        "requires_plant_work": False,
+        "requires_permit": False,
+        "measurements": dict.fromkeys(required, -14.5),
+        "parts_replaced": ["drop cable"],
+        "evidence_refs": ["PHOTO-1"],
+        "technician_note": "replaced the drop; the premises test clean",
+        "recorded_by": "t.nguyen",
+        "last_clean_point": "drop at premises",
+        "first_failed_point": service["delimiter_ref"],
+        "customer_confirmed": True,
+    }
+
+
+async def _walk(service: dict[str, Any], *, thread: str, laps: int = 10) -> tuple[Any, list[Any]]:
+    """Drive the parent to a standstill, answering every pause, and report the statuses it held.
+
+    `_run` cannot be reused: it compiles without a checkpointer, and without one an interrupt is not
+    resumable -- `ainvoke` returns an `__interrupt__` and the run is over. Every existing test in
+    this module therefore stops at the first gate, which is upstream of every stage boundary.
+
+    The walk is read off `aget_state_history`, consecutive duplicates removed, so it is the sequence
+    of values the *parent's* `status` channel actually took. That is a different list from the one
+    the incident lived through, and the difference is the whole point.
+    """
+    ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+    parent = build_parent_graph().compile(name="lpr_cpe_parent", checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": thread}}
+    await parent.ainvoke(_initial(service), context=ctx, config=config)
+    for _ in range(laps):
+        snapshot = await parent.aget_state(config)
+        if not snapshot.interrupts:
+            break
+        payload = snapshot.interrupts[0].value
+        answer: Any = (
+            _clean_boots_submission(service)
+            if isinstance(payload, dict) and "briefing" in payload
+            else SEAM_APPROVAL
+        )
+        await parent.ainvoke(Command(resume=answer), context=ctx, config=config)
+
+    history = [snap.values.get("status") async for snap in parent.aget_state_history(config)]
+    walk: list[Any] = []
+    for status in reversed(history):
+        if status is not None and (not walk or walk[-1] is not status):
+            walk.append(status)
+    return (await parent.aget_state(config)).values, walk
+
+
+async def test_the_parent_is_shown_one_status_per_subgraph_not_the_ones_it_walked(
+    fixtures: Any,
+) -> None:
+    """The stage boundary, crossed for real. This is the test whose absence cost a production run.
+
+    A compiled subgraph shares the parent's `status` channel, so a reader expects the parent to see
+    every value the child wrote. It does not: it is handed one write per channel, the child's last.
+    Nothing in the suite noticed, because the three modules that cross a boundary all cross it the
+    same careful way -- `interrupt_after=["field_planning"]`, then the seam state handed to a
+    *standalone* compile of the child. That arrangement is the one in which the boundary is never
+    exercised. Driven through the real parent instead, 20 of the 41 fixture services died here on
+    `IllegalTransitionError: dispatch_planning -> validating`, and no service had ever reached
+    `closed`.
+
+    Two facts are asserted, and the second is the one that dates.
+
+    **The run completes.** Reverting `domain.lifecycle`'s `STAGE_TRANSITIONS` to `{}` fails this
+    test in `_walk` rather than at an assertion::
+
+        E   lpr_cpe.domain.lifecycle.IllegalTransitionError: illegal incident transition
+        E   dispatch_planning -> validating; permitted from dispatch_planning:
+        E   ['awaiting_approval', 'cancelled', 'diagnosing', 'escalated', 'field_in_progress']
+        E   During task with name 'field_execution' and id '...'
+
+    **`field_in_progress` never appears.** That is the mechanism, not a consequence, and it is why
+    the seam table is a fix rather than a workaround. If a LangGraph release starts forwarding a
+    child's intermediate writes, this assertion goes red while everything else stays green -- and
+    the correct response then is to delete `STAGE_TRANSITIONS`, not to update this line.
+
+    That absence needs a control, or it proves only that nothing wrote the status. The control is
+    `open_field_visit`, which is one of the three nodes in `field_execution.py` that writes
+    `FIELD_IN_PROGRESS`, and which the parent's own `node_visits` records as having run once. So the
+    same run reports the node and not its write -- and the difference is the reducer, not the graph:
+    `node_visits` merges, so the child's last value contains every earlier one, while
+    `advance_status` replaces, so the child's last value is all there is.
+
+    The seam is asserted to be exactly one pair, because `field_planning` collapses too and its
+    collapse is invisible: `diagnosing -> dispatch_planning` happens to be a legal single hop, so
+    the same mechanism has been running unnoticed at that boundary since the stage was wired -- and
+    `awaiting_approval`, which that stage really does pass through at its dispatch gate, is missing
+    from the walk for the same reason. A test that only asserted "no exception" would distinguish
+    neither, and would pass on a run that crossed no boundary at all.
+    """
+    service = _service(fixtures, "hfc_degraded_upstream")
+    final, walk = await _walk(service, thread="seam-hfc")
+
+    assert final["status"] is IncidentStatus.VALIDATING
+    assert walk == [
+        IncidentStatus.NEW,
+        IncidentStatus.TRIAGING,
+        IncidentStatus.DIAGNOSING,
+        IncidentStatus.DISPATCH_PLANNING,
+        IncidentStatus.VALIDATING,
+    ]
+    assert IncidentStatus.FIELD_IN_PROGRESS not in walk
+    assert IncidentStatus.AWAITING_APPROVAL not in walk
+
+    # The control: the node whose write is missing did run, and the parent knows it did.
+    assert final["node_visits"]["open_field_visit"] == 1
+
+    crossed = [(a, b) for a, b in pairwise(walk) if b not in TRANSITIONS[a]]
+    assert crossed == [(IncidentStatus.DISPATCH_PLANNING, IncidentStatus.VALIDATING)]
+    assert all(pair in STAGE_TRANSITIONS for pair in crossed)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1051,14 +1207,31 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     that exit open is D20, one decision inside the field-execution half, not a stage. A frontier
     entry that survives an edit is worth re-reading rather than re-counting.
 
+    Wiring Stage 5's second half took `D22:reconcile` off the list and put **nothing** in its place,
+    which no earlier edit managed. Every previous stage that closed an exit opened another, because
+    a new subgraph is terminal until whatever follows it is written, and a terminal subgraph owes an
+    `__onward__` line. `reconciliation_closure` owes none: its main line ends at P26, which writes
+    `IncidentStatus.CLOSED`, and `domain.lifecycle` gives `closed` no outward transition. So it is
+    declared in `_DELIBERATE_TERMINALS` beside `record_escalation` -- the two ways this workflow can
+    legitimately stop -- rather than confessed here. That is the difference between a frontier that
+    advances and a frontier that closes, and it is the first time this list has recorded the second.
+
+    What is left is three entries and two distinct causes, which is worth reading as a shape rather
+    than a count. `__onward__:field_execution` and `D08:plant_path` are both the plant branch: one
+    is where the Clean Boots arm stops for want of the OSP status feed, the other where the Dirty
+    Boots arm was never entered. `__onward__:preventive_maintenance` is the odd one out and is the
+    only entry on the list that names a *seam* rather than a stage.
+
     `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
     against the tables in both directions, so an exit that stops reaching `END` fails the build.
+    Seen to go red on this very edit -- routing `D22:reconcile` at the new subgraph while leaving
+    its line in place failed the build with "PENDING_STAGES still lists exits that no longer reach
+    END: ['D22:reconcile']", which is the stale direction, the one nothing else would have caught.
     """
     assert set(PENDING_STAGES) == {
         f"{ONWARD}:field_execution",
         f"{ONWARD}:preventive_maintenance",
         "D08:plant_path",
-        "D22:reconcile",
     }
     assert all(text.strip() for text in PENDING_STAGES.values()), "each has to say what is missing"
 
