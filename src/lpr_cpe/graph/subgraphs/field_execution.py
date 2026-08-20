@@ -8,21 +8,40 @@ and P18/P19 the handover contract when Clean Boots hands to Dirty."
 
 Where this stage stops, and why it is not P21
 ---------------------------------------------
-P21, D19 and D20 are deliberately not here, and the reason is measured rather than a matter of
-appetite. `route_plant_outcome` (D19) has three answers and only one of them can be reached from
-anything this codebase can produce today:
+P21, D19 and D20 are not here, and what stops them is the *entry decision*, not a missing vendor
+capability. An earlier reading of this claimed otherwise and it was measured wrong; the correction
+is kept here because the wrong reading is the more persuasive of the two.
+
+That reading enumerated `route_plant_outcome`'s (D19's) three answers by MR status:
 
 * `restored` needs an MR at `completed` or `closed`;
 * `retry_diagnosis` needs one at `draft`, `rejected` or `cancelled`;
 * `await_plant` is everything `MRRecord.awaiting_osp` covers.
 
-`SimulatedJTrackAdapter.create_mr` writes `status=submitted` -- "filing an MR is our act, accepting
-it is OSP's" -- and nothing in `src` calls `update_mr`, which is the only method that can move an MR
-to any other state. So D19 answers `await_plant` for every incident, and the whole of D20 sits
-behind the `restored` arm that no state can enter. That is exactly the dead clause
-`route_delimiter_evidence` had removed from it by the mutation sweep, and shipping three nodes
-behind it would be shipping the same defect one stage later. `PENDING_STAGES` now names P21 onwards,
-with the missing capability -- an OSP-side status feed -- written down instead.
+and concluded that since `create_mr` writes `submitted` and nothing calls `update_mr`, D19 would
+answer `await_plant` for every incident and D20 would sit behind an arm no state could enter.
+
+**The enumeration is missing a state, and it is the one this stage reaches most often: no MR at
+all**, which `current_mr_records` returns empty for and the router answers `retry_diagnosis`. Two of
+the four ways out of this subgraph produce exactly that -- `abandon_handover` refuses the handover
+before any MR is filed, and `route_visit_gate`'s `no_visit` never opened a visit -- so
+`retry_diagnosis` is enterable with no new capability whatever. `restored` needs a revision at
+`completed`, and the specification says where one comes from: P21 is a *capture* list -- acceptance,
+assignment, dispatch, measurements, repair actions, components changed, photos, resolution code,
+completion time, post-repair evidence -- which is the crew's own report. That is the same thing
+`capture_field_evidence` takes for the Clean Boots half, through `interrupt()` with no adapter
+fallback. The OSP-side status feed recorded as EXEC-2 is a real vendor gap and is not this one: it
+would be a *second* channel into the same parser, exactly as FIELD-3 is for `field_submission`.
+
+What does block it is that this subgraph has **one exit and four things to say through it**.
+`close_clean_boots_visit` writes `validating`, and D16's own specification text sends that case to
+restoration validation; `file_plant_mr` writes `mr_raised` and belongs in the plant wait;
+`abandon_handover` writes `diagnosing` and belongs back at P10; `no_visit` booked nothing at all.
+`graph.builder` may only ask questions that are in `routing.DECISIONS`, so a local gate cannot
+separate them on the parent's edge -- it has to be a numbered one. D16 is that decision, re-read
+on the parent's edge from the same `FieldFinding` this stage already answered it from, which is
+where its `validate` arm can finally reach the restoration validation the specification names for
+it. See `builder.PENDING_STAGES`.
 
 Eleven nodes, and why it is eleven
 ----------------------------------

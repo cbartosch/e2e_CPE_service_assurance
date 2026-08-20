@@ -1311,6 +1311,30 @@ def test_an_mr_still_with_osp_is_not_read_as_a_failed_repair() -> None:
         assert DECISIONS["D19"].route(_state(mr_records=[_mr(status)])) == branch, status
 
 
+def test_an_incident_that_never_filed_an_mr_is_a_failed_plant_action_not_a_pending_one() -> None:
+    """The empty case, which the status table above has no row for.
+
+    `builder.PENDING_STAGES` used to give this as the reason P21, D19 and D20 were unwritten: that
+    since `create_mr` returns `submitted` and nothing calls `update_mr`, D19 could only ever answer
+    `await_plant`, and `restored` and `retry_diagnosis` were therefore arms no state could enter.
+    The reasoning enumerated D19's answers by `MRStatus`, exactly as the test above does -- and an
+    enumeration keyed on status has no row for a state holding no MR at all.
+
+    `field_execution` produces that state on two of its four ways out. `abandon_handover` refuses
+    the handover before `file_plant_mr` ever runs, and `route_visit_gate`'s `no_visit` never opened
+    a visit. Both leave `mr_records` empty, and in both the plant action restored nothing -- so
+    `retry_diagnosis` is enterable today, with no OSP status feed and no caller for `update_mr`.
+
+    Shown red by restoring the belief, `route_plant_outcome`'s empty clause answering `await_plant`:
+
+        AssertionError: an incident with no MR is not one waiting on OSP
+        assert 'await_plant' == 'retry_diagnosis'
+    """
+    assert DECISIONS["D19"].route(_state(mr_records=[])) == "retry_diagnosis", (
+        "an incident with no MR is not one waiting on OSP"
+    )
+
+
 def test_the_current_mr_revision_decides_not_the_first_one_recorded() -> None:
     """`mr_records` is an `append_revision` list: a submitted MR that later completed appears twice
     and the second entry is the truth. Reading the list head would leave every completed repair

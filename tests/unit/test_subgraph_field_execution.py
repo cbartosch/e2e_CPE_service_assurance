@@ -33,8 +33,10 @@ next from identical state. `_drive` therefore builds its own context.
 What is deliberately not asserted here
 --------------------------------------
 The parent's edge into this subgraph is `test_builder.py`'s, and P21/D19/D20 are unwritten for the
-reason `builder.PENDING_STAGES` gives and gap EXEC-2 measures: nothing calls `update_mr`, so an MR
-never leaves `submitted`.
+reason `builder.PENDING_STAGES` gives: this subgraph has one exit and four things to say through it,
+and `_check_tables` admits only decisions that are in `routing.DECISIONS`, so no local gate may
+separate them on the parent's edge. That an MR never leaves `submitted` is a separate gap (EXEC-2)
+and is not that reason.
 """
 
 from __future__ import annotations
@@ -661,7 +663,8 @@ async def test_one_rejected_hypothesis_completes_the_packet_and_files_the_mr(
     See `_with_one_rejection` for why the seed is constructed rather than copied.
 
     The MR is left at `submitted`: `create_mr` returns it that way and nothing calls `update_mr`,
-    which is gap EXEC-2 and the reason P21, D19 and D20 are unwritten.
+    which is gap EXEC-2. That is the state `route_plant_outcome` reads as `await_plant` -- the wait
+    P21 is written around, rather than a reason P21 cannot be written.
 
     Shown red by flipping the seeded hypothesis back to `rejected=False`, which returns the
     state to the one every fixture produces and the run to the six-lap escalation above:
@@ -694,7 +697,8 @@ async def test_one_rejected_hypothesis_completes_the_packet_and_files_the_mr(
     filed = list(current_mr_records(values).values())
     assert [m.status for m in filed] == [MRStatus.SUBMITTED], (
         "EXEC-2: `create_mr` returns `submitted` and nothing calls `update_mr`, so an MR never "
-        "moves. When it does, P21/D19/D20 become writable and this assertion should change."
+        "moves on its own. P21's capture is what moves it; until that node exists, `submitted` is "
+        "where the Clean Boots handover leaves it and what D19 reads as `await_plant`."
     )
     assert values["status"] is IncidentStatus.MR_RAISED
     assert not values.get("escalated")

@@ -719,14 +719,28 @@ everything about what a visit needs beyond a crew type, and how far ahead this s
   is made, the approval chain is exercised from state with one hypothesis rejected, and a test pins
   the zero measurement so this entry cannot go quietly stale.
 
-* **EXEC-2** — **An MR never leaves `submitted`, which is why P21, D19 and D20 are not written.**
+* **EXEC-2** — **An MR never leaves `submitted`: there is no OSP-side status feed.**
   `create_mr` returns `MRStatus.SUBMITTED`, and `update_mr` — declared on the Protocol in
   `integrations/base.py`, implemented in the simulator, and `allowed: true` in the pack — has **no
-  caller anywhere in `src` or `tests`**. It is the only method that moves one. So D19's "has plant
-  repair restored service?" would answer `await_plant` for every incident that ever reached it,
-  `restored` and `retry_diagnosis` would be arms no state can enter, and the whole of D20 would sit
-  behind them — the same dead-clause shape the mutation sweep removed from
-  `route_delimiter_evidence`. `builder.PENDING_STAGES` names the stage and points here. **What moves
-  an MR — a jTrack webhook, a poll, or an operator's own screen?** The answer decides whether P21 is
-  a wait state in this graph or a separate thread that resumes it, which is a topology question and
-  not an afternoon's work. Inherits JTRACK-1.
+  caller anywhere in `src` or `tests`**. It is the only adapter method that moves one. **What moves
+  an MR — a jTrack webhook, a poll, or an operator's own screen?** All three are real deployments and
+  the pack would permit any of them. Inherits JTRACK-1.
+
+  **This entry used to claim more than it could measure, and the correction is the useful half.** It
+  said P21, D19 and D20 were unwritten *because* of this gap — that D19 would answer `await_plant`
+  for every incident that reached it, and that `restored` and `retry_diagnosis` were arms no state
+  could enter. Measured against the shipped `route_plant_outcome`, **all three arms are enterable**.
+  `retry_diagnosis` is reached with **no MR at all**, which is the state `abandon_handover` and
+  `route_visit_gate`'s `no_visit` both produce today, and again from `rejected`. `restored` is
+  reached from `completed` or `closed`, including across a revision, because `current_mr_records`
+  collapses to latest-by-id. The enumeration that produced the original claim was keyed on MR status
+  and had no row for the empty case — which is the case that arm is mostly reached through.
+
+  So this gap does not block P21. The specification defines P21 as a **capture** list — acceptance,
+  assignment, dispatch, measurements, repair actions, components changed, photos, resolution code,
+  completion time, post-repair evidence — which is the crew's own report, and `capture_field_evidence`
+  is already that node for the Clean Boots half: `interrupt()` with **no adapter fallback**, for the
+  reason FIELD-3 records. A jTrack status feed would be the *second* channel into the same parser,
+  exactly as FIELD-3 says a WFM completion feed would be for `field_submission`. What blocks P21 is
+  a topology question rather than a vendor one — `field_execution` has one exit and four things to
+  say through it — and `builder.PENDING_STAGES` now states it in those terms.

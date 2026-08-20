@@ -432,23 +432,45 @@ contract. P21 is the unbuilt step, and the two questions after it are D19 *"Did 
 plant action restore the affected network domain?"* and D20 *"Is customer service still degraded
 after plant restoration?"* Both are declared in `routing.DECISIONS` and wired nowhere.
 
-**`__onward__:field_execution`** — the same branch seen from the other side, and the entry that
-records why it is a missing *capability* rather than a missing afternoon.
-`jtrack.simulator.create_mr` returns an MR at `submitted`, and nothing in `src` calls `update_mr`,
-which is the only method that moves one. So D19 would answer `await_plant` for every incident that
-ever reached it, and the whole of D20 would sit behind an arm no state can enter — the same dead
-clause the mutation sweep had removed from `route_delimiter_evidence`. What is missing is an
-OSP-side status feed; see `docs/vendor-integration-gaps.md`.
+**`__onward__:field_execution`** — the same branch seen from the other side. **This entry said
+something measurably wrong until 2026-08-20, and the correction is the part worth reading.** It said
+the blocker was a missing *capability*: that since `create_mr` returns an MR at `submitted` and
+nothing in `src` calls `update_mr`, D19 would answer `await_plant` for every incident that ever
+reached it, and D20 would sit behind an arm no state could enter.
 
-The stage's three exits then stop for three different reasons, which is worth separating:
+Measured against the shipped `route_plant_outcome`, **all three of D19's arms are enterable**. The
+enumeration behind the old claim was keyed on MR status and had no row for the empty case:
+
+| state | D19 answers |
+| --- | --- |
+| no MR at all | `retry_diagnosis` |
+| `submitted`, `in_progress` | `await_plant` |
+| `completed`, `closed`, or a revision ending there | `restored` |
+| `rejected` | `retry_diagnosis` |
+
+No MR at all is what two of this subgraph's four ways out already produce, so `retry_diagnosis` is
+enterable today with no new capability. `restored` needs a revision at `completed`, and the
+specification says where one comes from: P21 is a *capture* list — acceptance, assignment, dispatch,
+measurements, repair actions, components changed, photos, resolution code, completion time,
+post-repair evidence — which is the crew's own report, the same shape `capture_field_evidence`
+already takes through `interrupt()` with no adapter fallback. The OSP status feed is a real gap
+(EXEC-2) and would be a *second* channel into that parser, exactly as FIELD-3 is for
+`field_submission`.
+
+What actually blocks it is that **the subgraph has one exit and four things to say through it**:
 
 * `file_plant_mr` ends with the MR filed and the incident at `mr_raised` — that is the wait above.
-* `close_clean_boots_visit` writes `validating`, the state Stage 5 begins from, and **Stage 5 now
-  exists**. What it waits on is D20, the decision that would route a restored plant case into it,
-  and D20 is inside this same unwritten stage.
-* `abandon_handover` waits on no stage at all. It writes `diagnosing`, and P07 and P10 both exist —
-  what is missing is an edge back to them, which the parent cannot draw while the specification
-  defines no decision at the end of the Clean Boots arm.
+* `close_clean_boots_visit` writes `validating`, and D16's own specification text — *"if yes, route
+  to restoration validation"* — names the destination. **Stage 5 exists**; a subgraph simply cannot
+  reach a sibling from inside itself.
+* `abandon_handover` writes `diagnosing`, and P07 and P10 both exist.
+* `route_visit_gate`'s `no_visit` booked nothing at all — the two `field_planning` exits that
+  deliberately book nothing arrive here and stop.
+
+`_check_tables` admits only decisions that are in `routing.DECISIONS`, so a local gate cannot
+separate them on the parent's edge; it has to be a numbered one. **D16 is that decision**, re-read on
+the parent's edge from the same `FieldFinding` the subgraph answered it from — and no terminal node
+writes a `FieldFinding`, so the second reading is the first one's answer by construction.
 
 **`__onward__:preventive_maintenance`** — the seam from a preventive disposition into field planning.
 P14 exists, but nothing routes into it from here. `plan_preventive_field_work` records that a visit
