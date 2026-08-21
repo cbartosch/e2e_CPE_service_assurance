@@ -70,21 +70,30 @@ def report_topology(out: TextIO) -> None:
 
     The node list is read off the compiled graph; **the branches are not**, and the difference is
     not a stylistic one. `get_graph()` renders for drawing and keeps one edge per
-    `(source, target)` pair, so an answer that shares a destination with an earlier answer keeps the
-    edge and loses its label. Measured on the graph as it stands: 31 drawn edges, 31 distinct pairs,
-    and **14 of the 26 declared answers named nowhere in it** -- every `END`-bound answer, because
-    each shares `END` with the uniform escalation edge; D03's `continue`, which `builder` documents
-    as deliberately distinct from `associate`; and D07's `self_help`, which is dropped for a second
-    reason worth knowing, that LangGraph omits a label equal to its target's name. Six of the
-    fourteen are `PENDING_STAGES` exits, so a report built on the rendering would hide precisely the
-    branches that most need naming. `BRANCH_TARGETS` is therefore read directly, which
-    `_check_tables` has already held against `Decision.branches` in both directions.
+    `(source, target)` pair -- 77 edges over 77 distinct pairs, so exactly one each -- and an answer
+    that shares a destination with an earlier answer keeps the edge and loses its label. Re-measured
+    on 2026-08-21, and in the unit this report prints rather than a global one, because an earlier
+    revision of this paragraph mixed the two: the loss is per `(source, answer)`, so `continue` is
+    drawn elsewhere in the graph and still missing where D03 asks it. This report prints **53** rows
+    of source, decision and answer. Forty-six of them are offered to `add_conditional_edges` at all,
+    and **nine of those are lost** -- the three `END`-bound answers, each sharing `END` with the
+    uniform escalation edge; D03's `continue`, which `builder` documents as deliberately distinct
+    from `associate`; and five where LangGraph omits a label equal to its target's name, which are
+    D11's `self_help` and `field_planning` from each of two sources and D12's `field_planning`. The
+    other **seven are never offered as edges**, and they are the group worth knowing about: each
+    names another decision rather than a node, so `_cascade` flattens it away before the drawing
+    sees it. Those seven are the chain links themselves -- D07 to D08 to D09 to D11 from each of two
+    sources, and D19's `restored` to D20 -- so the rendering loses precisely the structure the next
+    paragraph is about. `BRANCH_TARGETS` is therefore read directly, which `_check_tables` has
+    already held against `Decision.branches` in both directions.
 
-    `DECISION_AFTER` is not sufficient either, for an unrelated reason: it names the nine decisions
-    that follow a node, and D08, D09 and D11 are reached only by another decision's answer.
-    `chain_from` is what takes the report from nine questions to twelve. Both omissions have the
-    same shape -- a structure that reads as the whole topology and is a projection of it -- so
-    neither the drawing nor either table is trusted to be complete on its own.
+    `DECISION_AFTER` is not sufficient either, for an unrelated reason: it names the thirteen
+    decisions that follow a node, and D08, D09, D11 and D20 are reached only by another decision's
+    answer. `chain_from` is what takes the report from thirteen questions to seventeen -- and no
+    further, which the header line below admits by printing seventeen wired against twenty-four
+    declared, the other seven being wired inside subgraphs this report does not descend into. Both
+    omissions have the same shape -- a structure that reads as the whole topology and is a
+    projection of it -- so neither the drawing nor either table is trusted to be complete alone.
 
     The pending exits are printed rather than kept behind a flag, for the reason `PENDING_STAGES`
     exists at all: an `END` reached for want of a subgraph is otherwise indistinguishable from a

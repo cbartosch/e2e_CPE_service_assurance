@@ -395,7 +395,7 @@ def _wired_node_names() -> frozenset[str]:
 def _plain_edges() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
     """Every pair joined by a plain edge, and the nodes with no successor at all.
 
-    Derived rather than listed. A twelfth node inserted into the registry is wired by that edit
+    Derived rather than listed. An eighteenth node inserted into the registry is wired by that edit
     alone; a hand-written edge list would have had to be found and updated, and the failure mode of
     forgetting is a node that is present in the graph and unreachable.
 
@@ -409,17 +409,22 @@ def _plain_edges() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
     **A subgraph may also be terminal, and the two kinds of terminal are found differently.** An
     ordered step is terminal by being last in the sequence with no decision after it. A subgraph is
     terminal by having neither a `DECISION_AFTER` entry nor a `SUBGRAPH_SUCCESSOR` one. Two
-    subgraphs are in this set. `preventive_maintenance` is one: D04's preventive arm creates a case
-    and picks a disposition, and every disposition is the end of that thread's automated work.
-    `field_execution` is the other, and for a different reason -- it answers D16, D17 and D18
-    internally, but what follows P20 is the plant branch and Stage 5, which are not written. D10 and
-    D12 keep two more out of this set by existing, and `SUBGRAPH_SUCCESSOR` now keeps
-    `field_planning` out.
+    subgraphs are in this set, and re-measured on 2026-08-21 they are a different two than when this
+    was written. `preventive_maintenance` is still one: D04's preventive arm creates a case and
+    picks a disposition, and every disposition is the end of that thread's automated work.
+    `reconciliation_closure` is the other, and it joined by being built rather than by lacking
+    anything. `field_execution` has left: it answers D16, whose `validate` and `delimit` arms reach
+    `restoration_validation` and `plant_execution`, and it was called terminal here because those
+    two were unwritten, not because it ends anything. Five subgraphs are now kept out of the set by
+    a `DECISION_AFTER` entry -- D10, D12, D16, D19 and D21 -- and two by `SUBGRAPH_SUCCESSOR`.
 
     Nothing about that absence is silent. A subgraph reaching `END` because somebody *forgot* its
     decision looks identical here to one that ends deliberately, so the distinction is not drawn
     here at all -- it is drawn in `PENDING_STAGES`, which `_check_pending_stages` requires an entry
-    in for every terminal node and refuses to let go stale.
+    in for every terminal node and refuses to let go stale. The two above are one of each kind,
+    which is the clearest that distinction has been: `reconciliation_closure` is declared in
+    `_DELIBERATE_TERMINALS`, and `preventive_maintenance` is the single remaining `PENDING_STAGES`
+    entry.
     """
     names = _node_names()
     pairs = tuple((left, right) for left, right in pairwise(names) if left not in DECISION_AFTER)
@@ -439,6 +444,7 @@ def chain_from(identifier: str) -> tuple[str, ...]:
     A target that is itself a key of `BRANCH_TARGETS` names a question rather than a destination, so
     the chain is read off the table by following exactly those. `("D07", "D08", "D09", "D11")` for
     Stage 3's opening; `("D01",)` for a decision that chains to nothing, which is most of them.
+    There are two chains rather than one: `("D19", "D20")` joined when the plant stages landed.
 
     Breadth-first and de-duplicating, because a chain is a graph and not a list: two answers of one
     decision may name the same next question, and D09's two arms already diverge. The de-duplication
@@ -446,10 +452,15 @@ def chain_from(identifier: str) -> tuple[str, ...]:
     from being walked twice.
 
     Public, unlike the rest of this section, because chaining made `DECISION_AFTER` an incomplete
-    answer to "which questions does this graph ask?" -- it names nine of twelve. Anything describing
-    the topology needs this to finish the sentence, and `cli.report_topology` is the first such
-    reader. The module docstring's "a reader wanting the diagram reads those four" now means: reads
-    those four, following the targets that name decisions.
+    answer to "which questions does this graph ask?" -- re-measured on 2026-08-21 it names thirteen
+    of the seventeen wired here, and chaining recovers exactly D08, D09, D11 and D20. It no longer
+    finishes that sentence, which is worth stating rather than renumbering past: seven of the
+    twenty-four declared decisions -- D13 to D15, D17, D18, D23 and D24 -- are wired on a subgraph's
+    own `add_conditional_edges` and appear in neither table, so `DECISION_AFTER` plus this function
+    is complete for the parent and silent about the rest. `cli.report_topology` is the first reader
+    and says so by printing both counts. The module docstring's "a reader wanting the diagram reads
+    those four" now means: reads those four, following the targets that name decisions, and then
+    reads the nine subgraphs.
     """
     order: list[str] = []
     pending = [identifier]
