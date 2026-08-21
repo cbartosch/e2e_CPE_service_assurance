@@ -82,7 +82,9 @@ from lpr_cpe.graph.subgraphs.reconciliation_closure import (
     reconcile_nxt,
     reconcile_wfm,
 )
+from lpr_cpe.policies.engine import PolicyEngine
 from lpr_cpe.policies.loader import load_pack
+from lpr_cpe.policies.models import PolicyPack
 from lpr_cpe.simulation.loader import build_simulated_adapters
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
@@ -92,8 +94,9 @@ NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 #: 13 are `*_healthy`.
 CONFIDENT = "SVC-UT-001-A-01"
 
-#: RCA 0.2891 at P11. Under the bar, so the engine demands an approval for every closure and *which*
-#: approval depends on the validation. See the table in the module docstring.
+#: RCA 0.2891 at P11. Under the bar, so the engine demands an approval for every closure, and it is
+#: `exceptional_closure` whether the validation passed or failed -- only the reason codes differ, and
+#: with them the question. See the table in the module docstring.
 UNCONFIDENT = "SVC-UT-001-A-03"
 
 APPROVE = {
@@ -594,33 +597,140 @@ async def test_a_refused_exceptional_closure_leaves_no_closure_record(unconfiden
     assert "update_kpis_and_learning" not in out["node_visits"]
 
 
-async def test_a_demand_this_gate_does_not_own_goes_to_a_human_rather_than_through(
+async def test_a_weak_rca_on_a_validated_incident_asks_rather_than_abandoning(
     unconfident: Any,
 ) -> None:
-    """The measured awkward case: everything is fine and the incident still cannot be closed here.
+    """The case that used to be unclosable: the repair worked and the diagnosis behind it was thin.
 
-    A validated, reconciled incident whose RCA is 0.2891. The engine demands `low_confidence_rca`,
-    whose gate is D06's -- on the parent, and upstream of this stage. No node on this path can ask
-    it, and `route_closure_gate` refuses to ask it under its own kind, because the kind is hardcoded
-    and `EXCEPTIONAL_CLOSURE` is in `DEDICATED_GATE_APPROVAL_KINDS` precisely so that no
-    variable-kind gate answers a question this one owns.
+    A validated, reconciled incident whose RCA is 0.2891. This asked for `low_confidence_rca` until
+    `PolicyEngine._check_confidence` learned to raise `exceptional_closure` for `CLOSE_INCIDENT`,
+    and `low_confidence_rca` is D06's kind -- on the parent, upstream of this stage, and never
+    reached again. So the incident was abandoned to a human, while the *same* incident with a
+    **failed** validation closed over one supervisor's signature. Proving the service restored made
+    it less closable than failing to prove it, for every RCA under the 0.75 bar.
 
-    So the incident goes to a human. That is the honest answer rather than a gap, and this test
-    exists to stop it quietly becoming a close: a gate that fell through to `close` here would put
-    a `CLOSED_NORMAL` on an incident the policy engine had explicitly refused to allow.
+    The reason codes are asserted as an exact set, and that is the assertion that separates this
+    test from `test_a_failed_validation_closes_only_over_a_named_signature` above. Both now reach
+    `exceptional_closure`; only the *reasons* differ, and only the reasons decide what the approver
+    is told. A remap that fired on every closure regardless of the validation would leave both tests
+    green on the kind and be caught here.
+
+    Hence the question is asserted whole rather than by substring. It is the operator-visible half
+    of the fix: the old sentence was fixed text naming a failed restoration validation, which for
+    this incident was simply untrue.
+
+    `validated is True` on a `CLOSED_EXCEPTIONAL` record is not a contradiction and is asserted to
+    pin that. `close_linked_records` keys the code on `outcome is REQUIRES_APPROVAL` -- did this
+    closure need a signature -- while `validated` records what the window measured. This incident
+    was restored *and* closed exceptionally, and the record says both.
+
+    The two halves are separately breakable and were measured red separately. Reverting
+    `_check_confidence` to `approval_kind=ApprovalKind.LOW_CONFIDENCE_RCA`::
+
+        assert decision.required_approval_kind is ApprovalKind.EXCEPTIONAL_CLOSURE
+        E       AssertionError: assert <ApprovalKind.LOW_CONFIDENCE_RCA: 'low_confidence_rca'> is
+                <ApprovalKind.EXCEPTIONAL_CLOSURE: 'exceptional_closure'>
+
+    and putting the old fixed sentence back at the `build_request` call site::
+
+        E       AssertionError: assert 'Approve clos...own restored.' == 'Approve clos...nfidence bar.'
+        E         - Approve closing INC-SVC-UT-001-A-03 on the exceptional path? The linked records
+                    reconcile, but the root cause behind it is below the confidence bar.
+        E         + Approve closing INC-SVC-UT-001-A-03 without a passing restoration validation? The
+                    linked records reconcile, but the service has not been shown restored.
+
+    -- which is the defect stated in the approver's own words: the incident whose validation had
+    just passed, described to the supervisor as one that had not been shown restored.
+
+    Both times the two neighbouring closure tests stayed green, which is the point: the defect lived
+    only on the arm nothing exercised.
+    """
+    state, ctx = unconfident
+    graph, config, out = await _run(_validated(state, passed=True), ctx, thread="weak-rca")
+
+    assert out["validation"].passed is True
+    assert out["reconciliation"].consistent is True
+
+    decision = latest_policy_decision(out, ActionType.CLOSE_INCIDENT)
+    assert decision is not None
+    assert decision.blocked is False
+    assert decision.required_approval_kind is ApprovalKind.EXCEPTIONAL_CLOSURE
+    assert {code.value for code in decision.reason_codes} == {"RCA_LOW_CONFIDENCE"}
+
+    assert out["status"] is IncidentStatus.AWAITING_APPROVAL
+    assert out["node_visits"]["prepare_exceptional_closure_approval"] == 1
+    assert out.get("closure") is None
+
+    (pause,) = out["__interrupt__"]
+    request = pause.value["approval_request"]
+    assert request["question"] == (
+        f"Approve closing {out['incident_id']} on the exceptional path? The linked records "
+        "reconcile, but the root cause behind it is below the confidence bar."
+    )
+    assert request["context"]["validation_passed"] is True
+
+    out = await graph.ainvoke(Command(resume=APPROVE), context=ctx, config=config)
+
+    assert out["status"] is IncidentStatus.CLOSED
+    closure = out["closure"]
+    assert closure.closure_code is ReasonCode.CLOSED_EXCEPTIONAL
+    assert closure.validated is True
+    assert closure.approval_ref
+    assert closure.closed_by == "sofia.reyes"
+
+
+def _pack_demanding(kind: ApprovalKind) -> PolicyPack:
+    """The shipped pack with `close_incident` naming `kind`, round-tripped through validation.
+
+    Dumped and re-validated rather than `model_copy`-ed, because the claim being tested is that a
+    *valid* pack can still reach the abandon arm. `model_copy` skips every validator, so a pack it
+    produced would prove nothing about what the loader would accept.
+    """
+    data = load_pack().model_dump()
+    data["remote_actions"][ActionType.CLOSE_INCIDENT]["approval_kind"] = kind.value
+    return PolicyPack.model_validate(data)
+
+
+async def test_a_demand_this_gate_does_not_own_goes_to_a_human_rather_than_through(
+    confident: Any,
+) -> None:
+    """An unanswerable demand escalates instead of falling through to a close.
+
+    This used to be reachable on the shipped pack, by the RCA route the test above now owns. It is
+    not any more: swept over 32,256 combinations of the inputs `evaluate_closure_policy` varies,
+    nothing the shipped pack produces for `CLOSE_INCIDENT` demands a kind other than
+    `exceptional_closure`. Deleting the arm was the alternative and was rejected -- the pack is
+    data, and `ActionRule.approval_kind` is a field an operator can set on any row -- so the driver
+    here is a pack that sets it, which is exactly the shape of the configuration the arm defends
+    against.
+
+    A 0.95-RCA service, so `_check_confidence` and `_check_closure` both stay silent and the
+    risk-class finding is the only one on the decision. That matters: with a weak RCA the engine
+    raises `exceptional_closure` too and `_most_restrictive` prefers it -- measured, the demand
+    comes back `exceptional_closure` and the gate answers it -- so this test would quietly stop
+    testing its own arm.
 
     `outcome == "unanswerable"` is asserted because it is the audit trail's only way to distinguish
     this from the two other things that reach `abandon_closure`. An operator reading `blocked` would
     go looking for a policy rule; the answer is that the question needs a different gate.
 
     Reinstated by deleting the `required_approval_kind is not EXCEPTIONAL_CLOSURE` clause from
-    `route_closure_gate`, so an unowned demand falls through to `approve`:
-    `AssertionError: assert '__interrupt__' not in {'__interrupt__': [Interrupt(value=
-    {'approval_request': {'approval_id': 'APR-bd4cb5a3f939868a2355', ...`. The stage paused, asking
-    a supervisor to approve an *exceptional closure* for an incident that had validated perfectly
-    well -- a question naming a risk the engine never raised, under a kind it never demanded.
+    `route_closure_gate`, so an unowned demand falls through to `approve`::
+
+        assert "__interrupt__" not in out
+        E       AssertionError: assert '__interrupt__' not in {'__interrupt__': [Interrupt(value=
+                {'approval_request': {'approval_id': 'APR-141227696383c4365cf7', 'incident_id':
+                'IN...
+
+    The stage paused, asking a supervisor to approve an *exceptional closure* for an incident that
+    had validated perfectly well, under a kind the engine never demanded.
     """
-    state, ctx = unconfident
+    state, _ = confident
+    clock = _Ticking(NOW)
+    ctx = build_context(
+        clock=clock,
+        policy=PolicyEngine(_pack_demanding(ApprovalKind.DISPATCH), clock=clock),
+    )
     _, _, out = await _run(_validated(state, passed=True), ctx, thread="unownable")
 
     assert out["validation"].passed is True
@@ -629,7 +739,7 @@ async def test_a_demand_this_gate_does_not_own_goes_to_a_human_rather_than_throu
     decision = latest_policy_decision(out, ActionType.CLOSE_INCIDENT)
     assert decision is not None
     assert decision.blocked is False
-    assert decision.required_approval_kind is ApprovalKind.LOW_CONFIDENCE_RCA
+    assert decision.required_approval_kind is ApprovalKind.DISPATCH
 
     assert "__interrupt__" not in out
     assert "prepare_exceptional_closure_approval" not in out["node_visits"]
@@ -639,7 +749,7 @@ async def test_a_demand_this_gate_does_not_own_goes_to_a_human_rather_than_throu
 
     (abandoned,) = _audit(out, "abandon_closure")
     assert abandoned.outcome == "unanswerable"
-    assert abandoned.detail["required_approval_kind"] == ApprovalKind.LOW_CONFIDENCE_RCA.value
+    assert abandoned.detail["required_approval_kind"] == ApprovalKind.DISPATCH.value
     assert "no gate on the closure path owns" in out["escalation_reason"]
 
 

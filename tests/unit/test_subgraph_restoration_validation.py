@@ -30,6 +30,8 @@ from langgraph.graph import END, START
 from langgraph.types import Command
 
 from lpr_cpe.config.clock import FrozenClock
+from lpr_cpe.detectors.base import DetectorResult
+from lpr_cpe.domain.diagnosis import AnomalyFinding
 from lpr_cpe.domain.enums import (
     ActionOutcome,
     ActionType,
@@ -397,6 +399,95 @@ async def test_a_wake_that_arrives_after_the_deadline_is_taken(diagnosed: Any) -
     (waited,) = [event for event in out["audit_events"] if event.node == WAIT_NODE]
     assert waited.outcome == "resumed"
     assert waited.detail["paused"] is True
+
+
+# ------------------------------------------------------------------------------------------------
+# What goes into the comparison
+# ------------------------------------------------------------------------------------------------
+
+
+def _finding(name: str, score: float) -> AnomalyFinding:
+    return AnomalyFinding(
+        detector_name=name,
+        detector_version="1.0.0",
+        observed_at=NOW,
+        score=score,
+        confidence=0.9,
+        severity=Severity.HIGH,
+        explanation=f"{name} scored {score}",
+    )
+
+
+#: One real detector and one derived one, on both sides. The derived detector's score *rises* across
+#: the repair, which is the case the exclusion exists for: `no_fault_found_risk` scores highest
+#: exactly when there is no fault left to find.
+_STUB_RESULTS = [
+    DetectorResult(
+        detector_name="hfc_rf_pnm_degradation",
+        detector_version="1.0.0",
+        ran=True,
+        findings=[_finding("hfc_rf_pnm_degradation", 0.05)],
+    ),
+    DetectorResult(
+        detector_name="no_fault_found_risk",
+        detector_version="1.0.0",
+        ran=True,
+        findings=[_finding("no_fault_found_risk", 0.95)],
+        derived=True,
+    ),
+]
+
+
+async def test_derived_detectors_are_dropped_from_both_sides_of_the_comparison(
+    diagnosed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finding that restates the other findings is not a reading of the service, on either side.
+
+    `run_detectors` is stubbed rather than driven off a fixture, because the whole point is what
+    `assess_restoration` does with a *known* pair of results, and a fixture that happened to leave
+    every derived detector silent would let the filter be deleted without this going red.
+
+    The two sides fail differently when the filter is removed, so both are asserted. The before-side
+    is seeded with one finding per detector and `findings_before` counts what survives
+    `_comparable_before`; the after-side is the stub's own two findings and `findings_after` counts
+    what survives the comprehension. Both were measured red separately -- passing `ran_after` rather
+    than `measured_after` to `_comparable_before`::
+
+        assert judged.detail["findings_before"] == 1
+        E       assert 2 == 1
+
+    and dropping the `DERIVED_DETECTORS` clause from `findings_after`::
+
+        assert judged.detail["findings_after"] == 1
+        E       assert 2 == 1
+
+    `detectors_ran_after` keeps both names while `detectors_excluded_as_derived` names the dropped
+    one: a trail that narrowed the first would report the derived detector as never having looked.
+    """
+    state, ctx = diagnosed
+
+    async def _stub(_context: Any) -> list[DetectorResult]:
+        return _STUB_RESULTS
+
+    monkeypatch.setattr("lpr_cpe.graph.subgraphs.restoration_validation.run_detectors", _stub)
+    seeded = {
+        **_with_repair(state, minutes_ago=90, action=ActionType.CPE_REBOOT),
+        "anomaly_findings": [
+            _finding("hfc_rf_pnm_degradation", 1.0),
+            _finding("no_fault_found_risk", 1.0),
+        ],
+    }
+
+    _, _, out = await _run(seeded, ctx, thread="derived-excluded")
+
+    (judged,) = [event for event in out["audit_events"] if event.node == "assess_restoration"]
+    assert judged.detail["detectors_ran_after"] == [
+        "hfc_rf_pnm_degradation",
+        "no_fault_found_risk",
+    ]
+    assert judged.detail["detectors_excluded_as_derived"] == ["no_fault_found_risk"]
+    assert judged.detail["findings_before"] == 1
+    assert judged.detail["findings_after"] == 1
 
 
 # ------------------------------------------------------------------------------------------------

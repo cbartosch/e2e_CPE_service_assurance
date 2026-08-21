@@ -72,23 +72,30 @@ built from `ctx.policy.pack.reconciliation.systems` against `ctx.adapters.all_ad
 system added to the pack without a reader here appears in the result instead of being skipped. That
 is what the old `service_platform` entry did silently.
 
-The closure policy table, measured against the shipped pack on 2026-08-19
+The closure policy table, measured against the shipped pack on 2026-08-20
 -------------------------------------------------------------------------
-With `actor_role=automation`, six evidence sources 0.5 min old, reconciled and validated:
+With `actor_role=automation` and six evidence sources 0.5 min old:
 
-| inputs | outcome | approval kind |
-| --- | --- | --- |
-| rca 0.82 | allowed | -- |
-| rca 0.50 or absent | requires_approval | `low_confidence_rca` |
-| rca 0.82, validation failed | requires_approval | `exceptional_closure` |
-| rca 0.50, validation failed | requires_approval | `exceptional_closure` |
-| rca 0.82, not reconciled | **blocked** | `RECONCILIATION_MISMATCH` |
+| inputs | outcome | approval kind | reason codes |
+| --- | --- | --- | --- |
+| rca 0.82 | allowed | -- | `POLICY_ALLOWED` |
+| rca 0.50, or absent | requires_approval | `exceptional_closure` | `RCA_LOW_CONFIDENCE` |
+| rca 0.82, validation failed | requires_approval | `exceptional_closure` | `VALIDATION_FAILED` |
+| rca 0.50, validation failed | requires_approval | `exceptional_closure` | both, RCA first |
+| rca 0.82, not reconciled | **blocked** | -- | `RECONCILIATION_MISMATCH` |
+
+Rows two and three used to demand different kinds, and only one of them was answerable here: a weak
+RCA raised `low_confidence_rca`, which this gate does not own, so *proving* the service restored
+made an incident less closable than failing to prove it for every RCA below the 0.75 bar.
+`PolicyEngine._check_confidence` now raises `exceptional_closure` for `CLOSE_INCIDENT` -- see its
+docstring for the measurement -- which is why every `requires_approval` row above names the one kind
+this stage owns.
 
 Three things follow. `evaluate_closure_policy` **must** pass `rca_confidence`, or every closure
-demands `low_confidence_rca`. `_most_restrictive` prefers `exceptional_closure` over
-`low_confidence_rca`, so the exceptional path stays reachable for a low-confidence RCA. And D23 has
-to have answered `close` before the engine is asked at all, because the alternative is a blocked
-decision, which `route_closure_gate` sends to `abandon_closure`.
+takes the exceptional path rather than the ordinary one. The reason codes are what the approver's
+question is built from, so row four asks about both objections in one sentence -- see
+`_closure_question`. And D23 has to have answered `close` before the engine is asked at all, because
+the alternative is a blocked decision, which `route_closure_gate` sends to `abandon_closure`.
 
 Why `route_closure_gate` names its kind instead of reading the decision's
 -------------------------------------------------------------------------
@@ -100,10 +107,15 @@ its own kind would decline to ask its own question. So the kind is hardcoded her
 `build_request(kind=...)` call site, which is what
 `test_every_gate_that_names_its_own_kind_is_listed_as_owning_it` scans for.
 
-The consequence is that a demand for any *other* kind routes to `abandon_closure`. That is the
-honest answer rather than a gap: a low-confidence RCA at closure raises `low_confidence_rca`, D06's
-gate owns it, D06 is on the parent and upstream of here, and no node on this path can answer it. An
-unanswerable demand belongs with a human.
+The consequence is that a demand for any *other* kind routes to `abandon_closure`: an unanswerable
+demand belongs with a human. That arm was the common case until the engine stopped raising
+`low_confidence_rca` here, and is now a defence rather than a live path. Swept over 32,256
+combinations of the inputs `evaluate_closure_policy` varies -- rca, validation, reconciliation,
+blast radius, severity, actor role, attempt and one data-quality flag -- against the shipped pack on
+2026-08-20: 24,192 blocked, 6,912 demanded `exceptional_closure`, 1,152 were allowed outright, and
+**nothing** demanded a kind this gate does not own. The arm stays because the pack is data: a
+`close_incident` rule that named an `approval_kind`, or a future check raising one, would reach it,
+and abandoning is the right answer when it does.
 
 There is deliberately no `approval_outstanding` clause, for `route_handover_gate`'s measured reason:
 `interrupt()` means the pause *is* the wait, so a router asking "is an answer outstanding?" would
@@ -133,7 +145,7 @@ from lpr_cpe.domain.enums import (
     ReasonCode,
     Severity,
 )
-from lpr_cpe.domain.governance import ActionRecord, ActionRequest
+from lpr_cpe.domain.governance import ActionRecord, ActionRequest, PolicyDecision
 from lpr_cpe.graph.context import GraphContext
 from lpr_cpe.graph.guards import ESCALATED, ONWARD, guarded, straight_on
 from lpr_cpe.graph.interrupts import build_request, prepare_approval, request_approval
@@ -600,8 +612,11 @@ async def evaluate_closure_policy(state: IncidentState, ctx: GraphContext) -> No
     `graph.nodes.closure` records against synthesising one to contact a customer.
 
     `rca_confidence` is supplied and must be. Measured against the shipped pack: omitted, every
-    closure comes back `requires_approval` naming `low_confidence_rca`, which this stage's gate does
-    not own, so the close arm would be unreachable for every incident.
+    closure comes back `requires_approval` on `RCA_LOW_CONFIDENCE`, so the unattended `allowed` arm
+    would be unreachable for every incident and each one would stop for a supervisor's signature.
+    Until `_check_confidence` learned to raise `exceptional_closure` here the symptom was worse --
+    the demand named `low_confidence_rca`, which this stage's gate does not own, and every closure
+    was abandoned rather than asked.
 
     `validation_passed` is `validation.passed` and not `True`. That is the input that decides
     between the two closure codes, and hardcoding it would make `_check_closure`'s
@@ -673,9 +688,9 @@ def route_closure_gate(state: IncidentState) -> Literal["approve", "close", "aba
       `RECONCILIATION_MISMATCH` and `_check_evidence` on stale evidence; neither is a question a
       human can be asked, so both go to a human wholesale.
     * an outcome that is not `requires_approval` -> `close`. `allowed` is the ordinary path.
-    * a demand for a kind this gate does not own -> `abandon`. Measured: an RCA below 0.75 makes the
-      engine demand `low_confidence_rca`, whose gate is D06's, on the parent and upstream. Nothing
-      here can answer it.
+    * a demand for a kind this gate does not own -> `abandon`. No shipped-pack input reaches this
+      any more -- see the module docstring's sweep -- but the kind is data, and nothing here could
+      answer a question belonging to a gate in an earlier stage.
     * a demand for `exceptional_closure` with no answer yet -> `approve`, which asks.
     * an answer -> `close` or `abandon` by its status.
     """
@@ -690,6 +705,39 @@ def route_closure_gate(state: IncidentState) -> Literal["approve", "close", "aba
     if answer is None:
         return "approve"
     return "close" if answer.status is ApprovalStatus.APPROVED else "abandon"
+
+
+#: What a signature on the exceptional path is accepting, one clause per reason the engine demanded
+#: it. Every reason code that can carry `EXCEPTIONAL_CLOSURE` needs an entry here, which
+#: `test_every_exceptional_closure_reason_has_a_question_clause` is what keeps true.
+_CLOSURE_CONCERNS = {
+    ReasonCode.RCA_LOW_CONFIDENCE: "the root cause behind it is below the confidence bar",
+    ReasonCode.RCA_CONFLICTING_EVIDENCE: "its two leading root causes are too close to rank",
+    ReasonCode.VALIDATION_FAILED: "the service has not been shown restored",
+}
+
+
+def _closure_question(incident_id: str, decision: PolicyDecision) -> str:
+    """The question, built from the objections the engine actually raised.
+
+    This was a fixed sentence naming a failed validation, which became a lie the moment
+    `_check_confidence` learned to raise `EXCEPTIONAL_CLOSURE` for a weak root cause: the commonest
+    exceptional closure is now one where the validation *passed* and the diagnosis was thin, and the
+    approver was being told the opposite of what the decision said.
+
+    Read off `decision.reason_codes` rather than re-derived from state. The approver is answering
+    one specific evaluation, and re-reading `validation.passed` here would let the question describe
+    a later reading than the one being signed for. The codes keep the order the checks ran in, which
+    `PolicyEngine._decision` preserves deliberately as the decision's own narrative, so two
+    identical decisions produce the same sentence.
+    """
+    concerns = [
+        _CLOSURE_CONCERNS[code] for code in decision.reason_codes if code in _CLOSURE_CONCERNS
+    ]
+    return (
+        f"Approve closing {incident_id} on the exceptional path? "
+        f"The linked records reconcile, but {' and '.join(concerns)}."
+    )
 
 
 @node("prepare_exceptional_closure_approval")
@@ -727,14 +775,11 @@ async def prepare_exceptional_closure_approval(
         state,
         ctx,
         kind=ApprovalKind.EXCEPTIONAL_CLOSURE,
-        question=(
-            f"Approve closing {subject.incident_id} without a passing restoration validation? "
-            f"The linked records reconcile, but the service has not been shown restored."
-        ),
+        question=_closure_question(subject.incident_id, decision),
         attempt=attempt,
         action_type=ActionType.CLOSE_INCIDENT,
         target_ref=subject.service_ref or subject.incident_id,
-        recommendation="close as exceptional, recording why the validation could not pass",
+        recommendation="close as exceptional, recording which precondition was waived and why",
         risk_summary=decision.explanation,
         reversible=False,
         policy_decision_id=decision.decision_id,

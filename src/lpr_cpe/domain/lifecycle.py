@@ -175,6 +175,21 @@ STAGE_TRANSITIONS: dict[tuple[S, S], tuple[S, ...]] = {
     # The fourth disposition, `no_visit`, needs no entry at all -- `open_field_visit` returns before
     # its status write when no work order is open, so the parent sees no hop.
     (S.DISPATCH_PLANNING, S.MR_RAISED): (S.FIELD_IN_PROGRESS, S.AWAITING_HANDOVER),
+    # `reconciliation_closure`, entered at `validating`. P24 writes `reconciling`, P25b `resolved`
+    # and P26 `closed` -- three hops for the one write the parent is shown. Its other exit,
+    # `abandon_closure`'s `escalated`, needs no entry: `validating` reaches it in one step already.
+    #
+    # The exceptional path passes `awaiting_approval` between `reconciling` and `resolved`, and
+    # that walk is legal too; the pair recorded is the one both closes share. The approval is
+    # invisible to the parent for the ordinary reason -- an interrupt inside a child leaves the
+    # parent node incomplete, so the only write it ever receives is the child's last.
+    #
+    # Unreachable until 2026-08-20 and therefore unmeasured: every incident escalated out of this
+    # stage, on a `validating -> escalated` hop that was legal without any of this. What was
+    # holding them there was the closure demanding an approval kind the stage's own gate does not
+    # own, and fixing that in `PolicyEngine._check_confidence` is what first drove a parent run
+    # into the write below.
+    (S.VALIDATING, S.CLOSED): (S.RECONCILING, S.RESOLVED),
 }
 
 

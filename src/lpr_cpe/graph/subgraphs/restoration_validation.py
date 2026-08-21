@@ -32,6 +32,31 @@ detectors that actually *ran* in the after-pass, so a detector whose source was 
 time is excluded from both sides rather than counted as cleared. When nothing ran at all the pass
 contributes no sample, which leaves the record pending instead of passing it on an empty comparison.
 
+Why derived detectors are excluded from the comparison
+------------------------------------------------------
+`DERIVED_DETECTORS` -- the detectors whose `derives_from_prior` is set -- are dropped from both
+sides. Their findings restate the other findings rather than measuring the service, which
+`DetectionContext.findings_from` already refuses to double-count for the same reason. Here it is
+worse than double-counting, because two of them move *against* the service's health: a repair is
+exactly the condition under which `no_fault_found_risk` scores highest.
+
+Measured on SVC-SJ-011-A-01 with the tap repaired and every independent detector clean, against the
+shipped pack's `min_anomaly_reduction` of 0.7:
+
+| comparison | peak before | peak after | reduction | verdict |
+| --- | --- | --- | --- | --- |
+| derived counted | 1.0 | 0.95 (`no_fault_found_risk`) | 0.05 | fails |
+| derived excluded | 1.0 | 0.0 | 1.0 | passes |
+
+`anomaly_reduction` takes the peak on each side, so a single derived finding at 0.95 holds the
+after-peak up on its own however clean the real detectors are. That is why the exclusion is applied
+to the finding lists rather than to the verdict: there is no threshold that survives a measure whose
+worst reading is produced by success.
+
+`detectors_ran_after` in the audit detail stays the full set, and
+`detectors_excluded_as_derived` names what was dropped. A trail that recorded only the narrowed set
+would imply the derived detectors had not run.
+
 What this stage does not ask
 ----------------------------
 D21 is **not** wired here. All three of its answers -- keep observing, back to diagnosis, confirm
@@ -71,6 +96,7 @@ from lpr_cpe.graph.nodes._runtime import (
     preview,
 )
 from lpr_cpe.graph.nodes.evidence import (
+    DERIVED_DETECTORS,
     SOURCES,
     place_payloads,
     reads_for,
@@ -218,14 +244,19 @@ def post_fix_looks(state: IncidentState, window_start: datetime) -> int:
 
 
 def _comparable_before(
-    findings: list[AnomalyFinding], ran_after: frozenset[str]
+    findings: list[AnomalyFinding], measured_after: frozenset[str]
 ) -> list[AnomalyFinding]:
     """The pre-fix findings from detectors that ran again, so both sides measure the same thing.
 
     See the module docstring: a detector that scored before and could not look after would otherwise
     have its score vanish from the numerator and be reported as anomaly that had cleared.
+
+    `measured_after` is already free of derived detectors, so passing it here excludes them from
+    this side too. `AnomalyFinding` carries no `derived` flag -- only `DetectorResult` does -- so
+    filtering the before-side by name against a set that has been narrowed once is the only way to
+    drop the same detectors from both sides.
     """
-    return [finding for finding in findings if finding.detector_name in ran_after]
+    return [finding for finding in findings if finding.detector_name in measured_after]
 
 
 def _sources_read_before(state: IncidentState) -> tuple[str, ...]:
@@ -449,8 +480,14 @@ async def assess_restoration(state: IncidentState, ctx: GraphContext) -> NodeUpd
         )
     )
     ran_after = frozenset(result.detector_name for result in results if result.ran)
-    findings_after = [finding for result in results for finding in result.findings]
-    findings_before = _comparable_before(list(state.get("anomaly_findings", [])), ran_after)
+    measured_after = ran_after - DERIVED_DETECTORS
+    findings_after = [
+        finding
+        for result in results
+        for finding in result.findings
+        if result.detector_name not in DERIVED_DETECTORS
+    ]
+    findings_before = _comparable_before(list(state.get("anomaly_findings", [])), measured_after)
 
     fixed_at = fix_completed_at(state)
     # No recorded repair means nothing to measure a window from. Starting it at `now` keeps the
@@ -501,6 +538,7 @@ async def assess_restoration(state: IncidentState, ctx: GraphContext) -> NodeUpd
                     "samples_in_window": samples,
                     "min_samples_required": result.min_samples_required,
                     "detectors_ran_after": sorted(ran_after),
+                    "detectors_excluded_as_derived": sorted(ran_after & DERIVED_DETECTORS),
                     "findings_before": len(findings_before),
                     "findings_after": len(findings_after),
                     "customer_confirmed": result.customer_confirmed,

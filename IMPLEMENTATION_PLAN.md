@@ -507,13 +507,28 @@ least believable part of the document.
    That is why `test_subgraph_field_planning.py` stops the parent with
    `interrupt_after=["generate_resolution_options"]` and `test_subgraph_field_execution.py` stops it
    with `interrupt_after=["field_planning"]` — each at its own seam, each driving on from the state
-   the parent actually produced rather than one assembled by hand. That is still not closure. A work
-   order is booked, a technician is briefed, evidence comes back, a delimiter is fixed and an MR is
-   filed — and then it stops, because the MR never leaves `submitted` (gap EXEC-2 in
-   `docs/vendor-integration-gaps.md`), so P21's
-   plant-repair wait is unwritten and Stage 5 from P22 behind it. So there is still no *incident*
-   that runs from event to closure, and what is missing is now the plant wait and reconciliation
-   rather than field execution.
+   the parent actually produced rather than one assembled by hand.
+
+   **One incident now runs from event to closure**, which is new on 2026-08-21 and replaces this
+   paragraph's previous claim that none did. Sweeping all 41 fixture services through the real
+   parent graph — answering every approval, submitting every field report, letting each stability
+   window elapse — `SVC-UT-001-B-01` reaches `closed` in five laps and the sweep raises no error
+   anywhere. It gets there on the remote path rather than the field one. Thirty services escalate
+   and ten stop at `diagnosing` having raised no pause at all; neither group has been investigated,
+   so neither is claimed here to share a cause with the other or with anything below.
+
+   Three defects stood in the way, and they were in series — each invisible until the one above it
+   was fixed. Derived detectors were counted into the restoration comparison, where they hold the
+   after-peak up on their own. `_check_confidence` demanded an approval kind `route_closure_gate`
+   does not own, so a validated incident was abandoned where an unvalidated one was asked about.
+   And the closure stage's exit collapsed onto a `validating -> closed` hop that `STAGE_TRANSITIONS`
+   had no entry for. All three are fixed and each is guarded by a test seen red.
+
+   One defect the closing run makes visible is *not* fixed: `SVC-UT-001-B-01` laps
+   `diagnosing -> remote_resolution -> validating` three times before it closes. `Fixtures.telemetry`
+   is keyed on a static `health` field with ten readers in `src` and no writer, so a completed repair
+   changes nothing a later read sees and the validation stage re-measures what it measured before
+   the fix.
 
    The standard those tests are held to is worth stating, because it was learned by being caught out.
    The first detector regression test **passed with the defect reinstated**: it asserted

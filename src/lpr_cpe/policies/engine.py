@@ -526,6 +526,39 @@ class PolicyEngine:
         return out
 
     def _check_confidence(self, request: PolicyInput, pack: PolicyPack) -> list[_Finding]:
+        """Is the root cause strong enough to act on, and if not, whose signature fixes that?
+
+        Which kind is raised depends on the action, because a demand names a gate and not every gate
+        is still reachable. `LOW_CONFIDENCE_RCA` is D06's, which sits in the diagnosis stage; a
+        `CLOSE_INCIDENT` evaluated in stage 5 that demanded it would name a gate three stages
+        upstream, and `route_closure_gate` returns `abandon` for any kind other than
+        `EXCEPTIONAL_CLOSURE`. Nor does D06 pick the demand up on a later pass: it asks only when a
+        demand is *already* outstanding or `rca is None`, so a demand first raised at closure never
+        reaches it.
+
+        Measured over the shipped pack on 2026-08-20, `reconciled=True`, `actor_role=automation`,
+        six evidence sources 0.5 min old -- the kind demanded for `CLOSE_INCIDENT`, before this
+        remap existed:
+
+        | rca | validation passed | kind demanded | closure gate owns it? |
+        | --- | --- | --- | --- |
+        | 0.2952 | True | `low_confidence_rca` | no -- abandoned |
+        | 0.2952 | False | `exceptional_closure` | yes |
+        | 0.74 | True | `low_confidence_rca` | no -- abandoned |
+        | 0.74 | False | `exceptional_closure` | yes |
+        | 0.75 | True | -- (allowed) | closes |
+
+        The first two rows are the reason for the remap: *proving* the service restored made the
+        incident less closable than failing to prove it, for every RCA below the 0.75 bar. The
+        exceptional path already exists to ask a supervisor "close anyway?", and "the diagnosis
+        behind this closure is weak" is that same question with a different reason attached, so the
+        remap adds no new authority -- `EXCEPTIONAL_CLOSURE`'s approver set is the narrower of the
+        two, and `_most_restrictive` already preferred it whenever both were raised at once.
+
+        Scoped to `CLOSE_INCIDENT` rather than applied by decision class: every other action that
+        can raise this is evaluated while D06 is still ahead of it, where the demand is answerable
+        and belongs to the gate whose name it carries.
+        """
         # Read-only actions do not need a root cause: running a diagnostic is *how* confidence is
         # acquired, and requiring confidence first would deadlock the diagnosis stage before it
         # could gather anything. Keyed on the action, not on the risk class -- an earlier draft
@@ -537,6 +570,11 @@ class PolicyEngine:
         out: list[_Finding] = []
         cls_ = request.effective_decision_class()
         bar = pack.rca.minimum_for(cls_)
+        kind = (
+            ApprovalKind.EXCEPTIONAL_CLOSURE
+            if request.action_type is ActionType.CLOSE_INCIDENT
+            else ApprovalKind.LOW_CONFIDENCE_RCA
+        )
 
         if request.rca_confidence is None:
             out.append(
@@ -547,7 +585,7 @@ class PolicyEngine:
                     ),
                     rule=f"rca.min_for_{cls_}",
                     blocks=False,
-                    approval_kind=ApprovalKind.LOW_CONFIDENCE_RCA,
+                    approval_kind=kind,
                 )
             )
         elif request.rca_confidence < bar:
@@ -567,7 +605,7 @@ class PolicyEngine:
                     ),
                     rule=f"rca.min_for_{cls_}",
                     blocks=False,
-                    approval_kind=ApprovalKind.LOW_CONFIDENCE_RCA,
+                    approval_kind=kind,
                     inputs={"rca_confidence": round(request.rca_confidence, 3)},
                 )
             )
@@ -585,7 +623,7 @@ class PolicyEngine:
                         ),
                         rule="rca.ambiguity_margin",
                         blocks=False,
-                        approval_kind=ApprovalKind.LOW_CONFIDENCE_RCA,
+                        approval_kind=kind,
                         inputs={"confidence_margin": round(margin, 3)},
                     )
                 )

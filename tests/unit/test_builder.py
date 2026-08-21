@@ -674,18 +674,44 @@ def _clean_boots_submission(service: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _walk(service: dict[str, Any], *, thread: str, laps: int = 10) -> tuple[Any, list[Any]]:
+def _let_the_window_elapse(payload: dict[str, Any], clock: FrozenClock) -> dict[str, str]:
+    """Answer `await_service_stability` the way a scheduler does -- by having let the time pass.
+
+    The wait node is `while ctx.clock.now() < deadline: interrupt(waiting)`, so the resume value is
+    not what releases it; the clock is. Handing it a signature and leaving the clock where it was
+    re-raises the identical interrupt, which is why `_walk` stops on this pause rather than
+    answering it by default: measured, a run answered the same window ten times and then parked at
+    `remote_resolution`, a stage it had in fact finished with.
+    """
+    resume_at = (payload["stability_window_wait"] or {}).get("resume_at")
+    if resume_at:
+        target = datetime.fromisoformat(resume_at)
+        if target > clock.now():
+            clock.set(target + timedelta(minutes=1))
+    return {"resumed_by": "timer"}
+
+
+async def _walk(
+    service: dict[str, Any], *, thread: str, laps: int = 10, timer: bool = False
+) -> tuple[Any, list[Any]]:
     """Drive the parent to a standstill, answering every pause, and report the statuses it held.
 
     `_run` cannot be reused: it compiles without a checkpointer, and without one an interrupt is not
     resumable -- `ainvoke` returns an `__interrupt__` and the run is over. Every existing test in
     this module therefore stops at the first gate, which is upstream of every stage boundary.
 
+    `timer` is off by default because a stability window is the one pause with no human on the other
+    end, and whether the clock is allowed to move is a different question from whether a decision is
+    forthcoming. Left off, the run stops *at* the window and reports where the parent got before any
+    time had to pass -- which is what the boundary below it is about. Turned on, the wait releases
+    and the run carries on into the closure stage.
+
     The walk is read off `aget_state_history`, consecutive duplicates removed, so it is the sequence
     of values the *parent's* `status` channel actually took. That is a different list from the one
     the incident lived through, and the difference is the whole point.
     """
-    ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+    clock = _Ticking(NOW)
+    ctx = build_context(clock=clock)
     parent = build_parent_graph().compile(name="lpr_cpe_parent", checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": thread}}
     await parent.ainvoke(_initial(service), context=ctx, config=config)
@@ -694,11 +720,15 @@ async def _walk(service: dict[str, Any], *, thread: str, laps: int = 10) -> tupl
         if not snapshot.interrupts:
             break
         payload = snapshot.interrupts[0].value
-        answer: Any = (
-            _clean_boots_submission(service)
-            if isinstance(payload, dict) and "briefing" in payload
-            else SEAM_APPROVAL
-        )
+        answer: Any
+        if isinstance(payload, dict) and "stability_window_wait" in payload:
+            if not timer:
+                break
+            answer = _let_the_window_elapse(payload, clock)
+        elif isinstance(payload, dict) and "briefing" in payload:
+            answer = _clean_boots_submission(service)
+        else:
+            answer = SEAM_APPROVAL
         await parent.ainvoke(Command(resume=answer), context=ctx, config=config)
 
     history = [snap.values.get("status") async for snap in parent.aget_state_history(config)]
@@ -771,6 +801,75 @@ async def test_the_parent_is_shown_one_status_per_subgraph_not_the_ones_it_walke
 
     crossed = [(a, b) for a, b in pairwise(walk) if b not in TRANSITIONS[a]]
     assert crossed == [(IncidentStatus.DISPATCH_PLANNING, IncidentStatus.VALIDATING)]
+    assert all(pair in STAGE_TRANSITIONS for pair in crossed)
+
+
+#: The one service measured to run event-to-closure. Named by ref rather than found by health label
+#: for `QUIET_SERVICE`'s reason and then some: eighteen fixtures share its `pon_healthy` label, and
+#: the first of them -- `SVC-UT-001-A-01`, the same ODP one letter over -- takes the field path and
+#: escalates. What separates them is peers: four services sit behind this delimiter and eight behind
+#: that one, which is enough to move correlation off the shared-plant reading and onto the remote
+#: fork. So the label is not the thing being selected for and spelling it would be misleading.
+CLOSING_SERVICE = "SVC-UT-001-B-01"
+
+
+async def test_the_closure_stage_collapses_onto_the_parent_as_one_hop_too(fixtures: Any) -> None:
+    """The second seam, and the first run of any kind to reach `closed`.
+
+    `field_execution`'s boundary above is the same mechanism, but it was found by 20 services dying
+    on it. This one could not be found that way, because nothing was arriving: every incident left
+    the closure stage through `abandon_closure`, whose `escalated` is a legal single hop from
+    `validating` and so crosses no seam at all. What was holding them there was
+    `PolicyEngine._check_confidence` demanding `low_confidence_rca` for a `close_incident` -- a kind
+    `route_closure_gate` does not own. Fixing that put a run through the stage for the first time,
+    and it failed immediately in `_walk`::
+
+        E   lpr_cpe.domain.lifecycle.IllegalTransitionError: illegal incident transition
+        E   validating -> closed; permitted from validating: ['cancelled', 'diagnosing',
+        E   'dispatch_planning', 'escalated', 'reconciling', 'remote_resolution']
+        E   During task with name 'reconciliation_closure' and id '...'
+
+    So the order matters and is worth stating: this seam was unreachable, not absent, and the entry
+    that fixes it could not have been written from the table alone. The pair is legal only because
+    something walked the middle, and until the closure gate could answer its own question nothing
+    ever did.
+
+    **`reconciling` and `resolved` never appear.** That is the mechanism rather than a consequence,
+    and the control is the same shape as the field seam's: `reconcile_linked_systems` writes
+    `RECONCILING` and `close_linked_records` writes `RESOLVED`, and the parent's `node_visits`
+    records both as having run once. Same run, the nodes and not their writes. If a LangGraph
+    release starts forwarding a child's intermediate writes these two assertions go red together,
+    and the answer then is to delete the seam entry rather than to edit this line.
+
+    `awaiting_approval` is deliberately *not* asserted absent, unlike at the field seam. It is in
+    this walk -- raised by the diagnosis gate, in the parent, where the parent can see it -- so its
+    presence says nothing either way about the closure stage's own approval, and asserting on it
+    would make the test fail for a reason it is not about.
+
+    The walk itself is not asserted whole. It laps `diagnosing -> remote_resolution -> validating`
+    three times before it closes, because a remote repair changes nothing a later read sees --
+    fixture telemetry is keyed on a static `health` field with no writer. That is a real gap and it
+    is not this test's; pinning the lap count here would make an unrelated fix look like a
+    regression. What is pinned is the seam, which is what the entry under test authorises.
+    """
+    service = fixtures.services[CLOSING_SERVICE]
+    final, walk = await _walk(service, thread="seam-closure", timer=True)
+
+    assert final["status"] is IncidentStatus.CLOSED
+    assert walk[-2:] == [IncidentStatus.VALIDATING, IncidentStatus.CLOSED]
+    assert IncidentStatus.RECONCILING not in walk
+    assert IncidentStatus.RESOLVED not in walk
+
+    # The controls: both nodes whose writes are missing did run, and the parent knows it.
+    assert final["node_visits"]["reconcile_linked_systems"] == 1
+    assert final["node_visits"]["close_linked_records"] == 1
+
+    # ...and it closed the ordinary way, so the middle recorded in the seam entry is the one walked.
+    assert "prepare_exceptional_closure_approval" not in final["node_visits"]
+    assert "abandon_closure" not in final["node_visits"]
+
+    crossed = [(a, b) for a, b in pairwise(walk) if b not in TRANSITIONS[a]]
+    assert crossed == [(IncidentStatus.VALIDATING, IncidentStatus.CLOSED)]
     assert all(pair in STAGE_TRANSITIONS for pair in crossed)
 
 
