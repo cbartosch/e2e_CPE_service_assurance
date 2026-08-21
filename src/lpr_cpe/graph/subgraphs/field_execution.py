@@ -135,20 +135,15 @@ from lpr_cpe.domain.enums import (
     FaultDomain,
     IncidentStatus,
     KPIName,
-    MRStatus,
-    PolicyOutcome,
     ReasonCode,
-    Severity,
     WorkOrderStatus,
 )
 from lpr_cpe.domain.field_ops import (
     DispatchRequirement,
     FieldFinding,
     HandoverContract,
-    MRRecord,
     WorkOrder,
 )
-from lpr_cpe.domain.governance import ActionRecord, ActionRequest
 from lpr_cpe.graph.context import GraphContext
 from lpr_cpe.graph.guards import ESCALATED, ONWARD, guarded, straight_on
 from lpr_cpe.graph.interrupts import build_request, prepare_approval, request_approval
@@ -175,14 +170,16 @@ from lpr_cpe.graph.state import (
     current_work_orders,
     truck_roll_count,
 )
-from lpr_cpe.graph.subgraphs._shared import (
-    attempt_number,
-    evidence_support,
-    executed_idempotency_keys,
+from lpr_cpe.graph.subgraphs._mr import (
+    mr_idempotency_key,
+    mr_policy_input,
+    mr_reference,
+    mr_severity,
+    plant_object_ref,
+    submit_mr,
 )
-from lpr_cpe.integrations.jtrack.simulator import REQUIRED_MR_FIELDS
+from lpr_cpe.graph.subgraphs._shared import attempt_number
 from lpr_cpe.observability.kpi import MetricTimestamp, mark
-from lpr_cpe.policies.engine import PolicyInput
 
 # ------------------------------------------------------------------------------------------------
 # Reading the incident for the visit
@@ -260,71 +257,6 @@ def outstanding_requests(state: IncidentState) -> list[str]:
             return [str(item) for item in missing]
         return []
     return []
-
-
-def plant_object_ref(state: IncidentState, finding: FieldFinding) -> str:
-    """What the MR is filed against. The delimiter the crew established, or the service.
-
-    `MRRequest.plant_object_ref` and `REQUIRED_MR_FIELDS` both insist on this, and D17 has already
-    refused to reach P18 without a `delimiter_ref`, so the first branch is the one that runs. The
-    fall-back is the service reference and not an empty string: an MR whose subject is `""` is the
-    non-retryable adapter refusal this stage exists to prevent, and the service is at least
-    something an OSP engineer can look up.
-    """
-    return finding.delimiter_ref or state.get("delimiter_ref") or state.get("service_ref") or ""
-
-
-def mr_policy_input(
-    state: IncidentState, ctx: GraphContext, *, target_ref: str, idempotency_key: str
-) -> PolicyInput:
-    """Everything the engine may consider about filing this MR.
-
-    Built here rather than through `_shared.policy_input_for`, and the difference is not
-    duplication. That function is keyed on a `ResolutionOption` -- it reads `option.action_type`,
-    `option.blast_radius`, `option.reversible` and derives the idempotency key from `option_id` --
-    and there is no option to key on: the MR this stage files comes from a `FieldFinding` a
-    technician submitted, not from a plan P11 generated. Inventing a synthetic `ResolutionOption` to
-    satisfy the signature would put a fabricated option into a plan that `first_actionable_option`
-    reads.
-
-    What it does *not* re-derive is any of the readings. `evidence_support`,
-    `executed_idempotency_keys` and `attempt_number` are imported from `_shared`, so the engine is
-    asked about corroboration, duplicate suppression and attempt count in exactly the words the
-    other three branches use.
-
-    `blast_radius` is the affected customer count and not `1`. An MR at a feeder affects every
-    service behind it, and the pack's blast-radius rules are the reason a plant fault is put to a
-    human rather than filed automatically.
-
-    `contacts_today` and `minutes_since_last_contact` are left at their defaults, unlike
-    `policy_input_for`, which supplies them for every action. `_check_customer_contact` returns
-    immediately for anything outside `CUSTOMER_CONTACT_ACTIONS` and `raise_mr` is outside it -- but
-    the argument in `policy_input_for` was that passing them unconditionally is what stops the next
-    branch from being written without them, and that argument is about a function every branch
-    shares. This one serves one action type, named in its own signature.
-    """
-    rca = state.get("rca")
-    impact = state.get("impact")
-    sla = state.get("sla")
-    quality = state.get("data_quality")
-    source_count, age_minutes = evidence_support(state, ctx.clock.now())
-    return PolicyInput(
-        action_type=ActionType.RAISE_MR,
-        incident_id=state.get("incident_id") or "",
-        target_ref=target_ref,
-        actor_role=ctx.automation_role,
-        rca_confidence=rca.confidence if rca is not None else None,
-        evidence_source_count=source_count,
-        evidence_age_minutes=age_minutes,
-        data_quality_flags=tuple(quality.flags) if quality is not None else (),
-        attempt=attempt_number(state, ActionType.RAISE_MR),
-        blast_radius=impact.affected_customer_count if impact is not None else 1,
-        severity=impact.severity if impact is not None else Severity.MEDIUM,
-        vulnerable_customer=sla.vulnerable_customer if sla is not None else False,
-        local_time=ctx.clock.local_now().time(),
-        idempotency_key=idempotency_key,
-        executed_idempotency_keys=executed_idempotency_keys(state),
-    )
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1230,22 +1162,6 @@ def _missing_for_delimiting(finding: FieldFinding | None) -> list[str]:
 # ------------------------------------------------------------------------------------------------
 
 
-def mr_idempotency_key(state: IncidentState, target_ref: str) -> str:
-    """The key the MR is filed under. Derived, so the policy check and the send agree.
-
-    Keyed on the **plant object**, not on the finding. Two consequences, both wanted. Across the
-    `more_tests` loop the finding id moves on every lap while the tap does not, so a packet refused
-    and re-offered for the same boundary keeps one key and jTrack's ledger suppresses the duplicate
-    -- which is D18's "non-duplicative" enforced at the adapter as well as asserted by a router. And
-    a crew who re-delimits to a *different* object gets a different key, because that genuinely is a
-    different MR.
-
-    Not keyed on the attempt, for `idempotency_key_for`'s reason: a key that moved with the retry
-    counter would make every retry a fresh write and nothing would ever be suppressed.
-    """
-    return derive_id("IDK", state.get("incident_id") or "", ActionType.RAISE_MR.value, target_ref)
-
-
 @node("evaluate_handover_policy")
 async def evaluate_handover_policy(state: IncidentState, ctx: GraphContext) -> NodeUpdate:
     """Put the MR to the policy engine **before** the packet is built. P19's authorisation.
@@ -1750,38 +1666,37 @@ async def request_handover_approval(state: IncidentState, ctx: GraphContext) -> 
 
 @node("file_plant_mr")
 async def file_plant_mr(state: IncidentState, ctx: GraphContext) -> NodeUpdate:
-    """Search jTrack, then file the MR and record what came back. P20.
+    """Assemble the Clean Boots handover package and file the MR against it. P20, one of two ways.
 
-    The duplicate-suppression read runs first, because that is P20's own first instruction and
-    because `fetch_open_mrs` is the only way to know: two Clean crews confirming the same tap on the
-    same afternoon must not produce two MRs. The result is recorded whichever way it comes back, so
-    an operator can see what we knew before filing.
+    The *mechanism* is not here. `_mr.submit_mr` owns the duplicate-suppression read, the
+    `REQUIRED_MR_FIELDS` re-check, the `ActionRequest`, the `MRRecord`, the `ActionRecord` and the
+    `mr_raised` write, because P20 has two entrances -- "the handover evidence, or the NOC/plant
+    evidence package when the case reached this step directly from D08 without a Clean Boots visit"
+    -- and `plant_execution` reads the MR back off whichever of them wrote it. Two filers assembling
+    that record differently would give D19 two different answers to "is this still with OSP?" and
+    nothing would fail. See that module's docstring for the rest of the argument.
 
-    **`update_mr` is not called here, and its absence is measured rather than an oversight.** The
-    specification's "update the existing MR when appropriate" needs a reachable state in which an MR
-    already exists, and nothing upstream of this node files one. The only path that holds one is
-    Stage 4's plant branch, and that is where the call lives: `plant_execution.update_plant_mr`,
-    updating the MR this node filed. A second caller here would sit behind a condition no state
-    arriving at *this* node can satisfy. What protects against the duplicate is the idempotency key:
-    `mr_idempotency_key` is keyed on the plant object, so a second `create_mr` for the same boundary
-    is returned from the ledger flagged `replayed` rather than filed again.
+    What is left here is the part only a Clean Boots handover has, and it is four things.
 
-    `REQUIRED_MR_FIELDS` is re-checked here before the `ActionRequest` is built, duplicating a check
-    the adapter also makes. That is deliberate: `create_mr` raises a **non-retryable**
-    `AdapterError` on a missing field, so the alternative to checking is an incident that dies two
-    nodes after a human approved it. Checking locally turns that into `abandon_handover`'s recorded
-    refusal, on a path the state machine has a status for. The field list is imported from the
-    adapter rather than restated, so the two cannot drift.
+    **The package.** `parameters` is built from the `HandoverContract` a technician's finding
+    produced: the measurements they took, the causes they ruled out, their access and safety notes,
+    the crew id that raised it. The NOC-direct filer has none of that and says so; that difference
+    is the specification's and not an accident to be factored away.
 
-    The contract is marked accepted here, and the justification is who approved it. The pack
+    **The contract's acceptance.** Marked here, and the justification is who approved it. The pack
     requires `Role.OSP_ENGINEER` for `CLEAN_TO_DIRTY_HANDOVER` -- the approver *is* the receiving
     owner -- so `accepted_by` is that person and not a guess about what OSP will later say.
     `MRStatus.SUBMITTED` still means OSP has not accepted the *MR*; the two acceptances are
-    different facts and the simulator's docstring is explicit about keeping them apart.
+    different facts and the simulator's docstring is explicit about keeping them apart. It is
+    stamped at `submission.action.completed_at` rather than a fresh `ctx.clock.now()`, so the
+    acceptance and the filing carry the one instant.
 
-    The status is `mr_raised` and the incident stays active, which is P20's last line. The work
-    order is completed with `handed_to_osp`, because the Clean Boots visit genuinely is over -- and
-    unlike `resolved_at_premises`, that code makes no claim about the service.
+    **The work order.** Completed with `handed_to_osp`, because the Clean Boots visit genuinely is
+    over -- and unlike `resolved_at_premises`, that code makes no claim about the service. The
+    NOC-direct path has no work order at all, which is the other half of why this cannot be shared.
+
+    **The handover KPIs.** All three return `None` until `contract.accepted is not None`, so they
+    are emitted over `preview` and only from the path that has a contract at all.
     """
     contract = state.get("handover_contract")
     decision = latest_policy_decision(state, ActionType.RAISE_MR)
@@ -1794,169 +1709,60 @@ async def file_plant_mr(state: IncidentState, ctx: GraphContext) -> NodeUpdate:
             "without all three."
         )
 
-    now = ctx.clock.now()
     target_ref = plant_object_ref(state, finding)
     packet = handover_packet(state, finding)
-    existing = await ctx.adapters.jtrack.fetch_open_mrs(target_ref)
-    # Read off `impact` and not the packet: item 20 carries `severity.value` for a human to read,
-    # and `MRRecord.severity` is the enum. Round-tripping through the string leaves pydantic to
-    # coerce it back, which works right up to the first severity whose name and value differ.
-    impact = state.get("impact")
-    severity = impact.severity if impact is not None else Severity.MEDIUM
-
-    parameters: dict[str, Any] = {
-        "plant_object_ref": target_ref,
-        "fault_description": packet["24_recommended_plant_action"],
-        "evidence_refs": list(contract.evidence_refs),
-        "access_notes": contract.access_notes,
-        "safety_notes": contract.safety_notes,
-        "crew_type_required": CrewType.DIRTY.value,
-        "priority": severity.value,
-        "homes_affected": packet["20_priority_and_sla"]["affected_customer_count"],
-        "suspected_fault_class": finding.fault_domain.value,
-        "raised_by_crew_id": order.assigned_crew_id if order is not None else None,
-        "contract_id": contract.contract_id,
-        "handover_completeness": contract.completeness,
-        "measurements": dict(contract.measurements),
-        "ruled_out": list(contract.ruled_out),
-        "known_open_mrs": [
-            str(row.get("mr_ref") or row.get("external_ref") or "") for row in existing
-        ],
-    }
-    absent = [field for field in REQUIRED_MR_FIELDS if not parameters.get(field)]
-    if absent:
-        raise ValueError(
-            f"file_plant_mr assembled an MR missing {absent}, which `create_mr` refuses "
-            f"non-retryably. D18 requires `HandoverContract.complete` before the approval is asked "
-            f"for, and `build_handover_contract` guarantees non-empty access notes, so this "
-            f"combination should be unreachable -- see the contract's `missing_items()`: "
-            f"{contract.missing_items()}"
-        )
-
     answer = latest_decision_of(state, ApprovalKind.CLEAN_TO_DIRTY_HANDOVER)
-    idempotency_key = mr_idempotency_key(state, target_ref)
-    action_id = derive_id("ACT", state.get("incident_id") or "", contract.contract_id)
-    attempt = attempt_number(state, ActionType.RAISE_MR)
-    request = ActionRequest(
-        action_id=action_id,
-        incident_id=state.get("incident_id") or "",
-        action_type=ActionType.RAISE_MR,
+    accepted_by = answer.decided_by if answer is not None else ctx.automation_actor
+
+    submission = await submit_mr(
+        state,
+        ctx,
+        node_name="file_plant_mr",
+        parameters={
+            "plant_object_ref": target_ref,
+            "fault_description": packet["24_recommended_plant_action"],
+            "evidence_refs": list(contract.evidence_refs),
+            "access_notes": contract.access_notes,
+            "safety_notes": contract.safety_notes,
+            "crew_type_required": CrewType.DIRTY.value,
+            "priority": mr_severity(state).value,
+            "homes_affected": packet["20_priority_and_sla"]["affected_customer_count"],
+            "suspected_fault_class": finding.fault_domain.value,
+            "raised_by_crew_id": order.assigned_crew_id if order is not None else None,
+            "contract_id": contract.contract_id,
+            "handover_completeness": contract.completeness,
+            "measurements": dict(contract.measurements),
+            "ruled_out": list(contract.ruled_out),
+        },
         target_ref=target_ref,
-        requested_at=now,
-        idempotency_key=idempotency_key,
-        actor=ctx.automation_actor,
-        reason_code=(
-            ReasonCode.POLICY_APPROVAL_REQUIRED
-            if decision.outcome is PolicyOutcome.REQUIRES_APPROVAL
-            else ReasonCode.POLICY_ALLOWED
-        ),
-        correlation_id=state.get("correlation_id") or state.get("incident_id") or "",
-        approval_ref=answer.approval_ref if answer is not None else None,
-        policy_decision_id=decision.decision_id,
-        policy_outcome=decision.outcome,
-        attempt=attempt,
-        parameters=parameters,
-        reversible=False,
-        expected_blast_radius=packet["20_priority_and_sla"]["affected_customer_count"] or 1,
-    )
-
-    result = await ctx.adapters.jtrack.create_mr(request)
-    completed_at = ctx.clock.now()
-    outcome = ActionOutcome(str(result["outcome"]))
-    external_ref = result.get("external_ref")
-    mr_id = derive_id("MR", state.get("incident_id") or "", contract.contract_id)
-
-    record = MRRecord(
-        mr_id=mr_id,
-        incident_id=request.incident_id,
-        external_ref=external_ref,
-        status=MRStatus(str(result.get("status") or MRStatus.SUBMITTED.value)),
-        created_at=now,
-        updated_at=completed_at,
-        submitted_at=completed_at,
         fault_domain=finding.fault_domain,
-        plant_object_ref=target_ref,
-        severity=severity,
-        idempotency_key=idempotency_key,
-        osp_owner=answer.decided_by if answer is not None else "",
+        decision=decision,
+        approval=answer,
+        discriminator=contract.contract_id,
+        blast_radius=packet["20_priority_and_sla"]["affected_customer_count"],
         notes=[f"raised from handover contract {contract.contract_id}"],
-    )
-    action = ActionRecord(
-        action_id=action_id,
-        incident_id=request.incident_id,
-        action_type=ActionType.RAISE_MR,
-        target_ref=target_ref,
-        idempotency_key=idempotency_key,
-        outcome=outcome,
-        started_at=now,
-        completed_at=completed_at,
-        actor=ctx.automation_actor,
-        reason_code=request.reason_code,
-        approval_ref=request.approval_ref,
-        correlation_id=request.correlation_id,
-        attempt=attempt,
-        simulated=bool(result.get("simulated")),
-        external_ref=external_ref,
-        detail=str(result.get("detail") or ""),
-        error=str(result.get("error") or ""),
         evidence_refs=tuple(contract.evidence_refs),
-    )
-    accepted = contract.model_copy(
-        update={
-            "accepted": True,
-            "accepted_at": completed_at,
-            "accepted_by": answer.decided_by if answer is not None else ctx.automation_actor,
-        }
+        detail={
+            "contract_id": contract.contract_id,
+            "completeness": contract.completeness,
+            "accepted_by": accepted_by,
+        },
+        refusal_hint=(
+            "D18 requires `HandoverContract.complete` before the approval is asked for, and "
+            "`build_handover_contract` guarantees non-empty access notes, so this combination "
+            f"should be unreachable -- see the contract's `missing_items()`: "
+            f"{contract.missing_items()}"
+        ),
     )
 
-    update: NodeUpdate = {
-        "status": IncidentStatus.MR_RAISED,
-        "selected_action": request,
-        "handover_contract": accepted,
-        "mr_records": [record],
-        "action_history": [action],
-        # Absolute, never `state.get(...) + 1`: `mr_attempt_count` reduces with `take_max` and an
-        # increment computed at entry is exactly what that reducer exists to defeat. Counted
-        # distinct by id for `_distinct_work_orders`' reason -- `mr_records` keeps revisions.
-        "mr_attempt_count": len({*(r.mr_id for r in state.get("mr_records", [])), mr_id}),
-        "linked_records": {"mr": external_ref or mr_id, "handover_contract": contract.contract_id},
-        **mark(MetricTimestamp.MR_SUBMITTED_AT, completed_at),
-        "updated_at": completed_at,
-        "audit_events": [
-            audit(
-                state,
-                ctx,
-                node="file_plant_mr",
-                action="create_mr",
-                outcome=outcome.value,
-                subject_ref=target_ref,
-                reason_code=request.reason_code,
-                detail={
-                    "action_id": action_id,
-                    "mr_id": mr_id,
-                    "external_ref": external_ref,
-                    "status": record.status.value,
-                    "contract_id": contract.contract_id,
-                    "completeness": contract.completeness,
-                    "plant_object_ref": target_ref,
-                    "attempt": attempt,
-                    "idempotency_key": idempotency_key,
-                    "approval_ref": request.approval_ref,
-                    "accepted_by": accepted.accepted_by,
-                    "policy_decision_id": decision.decision_id,
-                    "policy_outcome": decision.outcome.value,
-                    # What the duplicate-suppression read found. Recorded even when empty, because
-                    # "we asked and there were none" is the fact P20 requires, and an absent key
-                    # would be indistinguishable from not having asked.
-                    "open_mrs_before": parameters["known_open_mrs"],
-                    "simulated": bool(result.get("simulated")),
-                    "replayed": bool(result.get("replayed")),
-                    "gate": result.get("gate"),
-                    "detail": result.get("detail"),
-                },
-                discriminator=action_id,
-            )
-        ],
+    completed_at = submission.completed_at
+    update = submission.update
+    update["handover_contract"] = contract.model_copy(
+        update={"accepted": True, "accepted_at": completed_at, "accepted_by": accepted_by}
+    )
+    update["linked_records"] = {
+        **update["linked_records"],
+        "handover_contract": contract.contract_id,
     }
     if order is not None:
         update["work_orders"] = [
@@ -1965,7 +1771,7 @@ async def file_plant_mr(state: IncidentState, ctx: GraphContext) -> NodeUpdate:
                 status=WorkOrderStatus.COMPLETED,
                 code="handed_to_osp",
                 at=completed_at,
-                note=f"handed to OSP as {external_ref or mr_id}",
+                note=f"handed to OSP as {mr_reference(submission.record)}",
             )
         ]
     # `preview`, not `state`: both handover KPIs return `None` until `contract.accepted is not
@@ -1994,7 +1800,7 @@ async def file_plant_mr(state: IncidentState, ctx: GraphContext) -> NodeUpdate:
             KPIName.PLANT_REPAIR_BACKLOG,
             node="file_plant_mr",
             dimensions={"fault_domain": finding.fault_domain.value},
-            discriminator=mr_id,
+            discriminator=submission.record.mr_id,
         ),
     ]
     return update

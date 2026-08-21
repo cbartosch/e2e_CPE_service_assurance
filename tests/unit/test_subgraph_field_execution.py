@@ -704,6 +704,86 @@ async def test_one_rejected_hypothesis_completes_the_packet_and_files_the_mr(
     assert [w.status for w in current_work_orders(values).values()] == [WorkOrderStatus.COMPLETED]
 
 
+async def test_the_filed_mr_is_traceable_from_both_links_and_from_the_closing_note(
+    dispatched: Any,
+) -> None:
+    """Everything `file_plant_mr` adds to `_mr.submit_mr`'s update survives the merge.
+
+    This exists because the mechanism moved out. `submit_mr` is shared with the NOC-direct filer
+    and writes the status, the records and `linked_records["mr"]`; `file_plant_mr` merges three
+    things of its own onto that -- the accepted contract, the second link, and the completed work
+    order -- and a merge is a place where a write can be dropped in silence.
+
+    **Measured: it could be, and nothing said so.** Two of those joins were mutated while the
+    extraction was being verified and the whole 904-test suite stayed green, so "the refactor is
+    proved by the suite staying green" was not true until this test existed. The two the suite
+    already held were the status and the filed `MRStatus`, which the test above asserts.
+
+    The four assertions are one claim: an operator holding the incident can get from it to the MR
+    and to the packet it was filed against, and the two records agree about when. `linked_records`
+    is what a reconciliation report reads and the note is what a crew reads on the order, so they
+    must name the *same* reference -- `mr_reference` owns which string that is. The two are
+    genuinely distinguishable here rather than coincidentally equal: jTrack's `external_ref` is
+    eight uppercase hex (`MR-927BA175`) and our `derive_id` is twenty lowercase
+    (`MR-bb5a4124a61e464c5789`), so a filer that quoted the wrong one could not hide.
+
+    Shown red four times, one mutation per assertion.
+
+    `mr_reference` returning `record.mr_id`, dropping jTrack's reference:
+
+        AssertionError: the incident's MR link must name what jTrack called it, not what we
+        called it before asking
+        assert 'MR-bb5a4124a61e464c5789' == 'MR-927BA175'
+
+    Dropping `handover_contract` from the merged `linked_records`:
+
+        AssertionError: the packet the MR was filed against must stay reachable from the incident
+        assert 'handover_contract' in {'canonical_incident': 'INC-SVC-SJ-011-A-01', 'customer_ref':
+        'CUS-SJ-011-A-01', 'mr': 'MR-927BA175', 'parent_incident': 'NXT-ALM-31711604', ...}
+
+    Spelling the note's reference `submission.record.mr_id` instead of `mr_reference`:
+
+        AssertionError: the order's closing note and the incident's MR link must name one MR
+        assert 'handed to OS...4a61e464c5789' == 'handed to OSP as MR-927BA175'
+
+    And stamping the acceptance from a fresh `ctx.clock.now()` rather than `submission.completed_at`
+    -- six seconds later under this module's advance-on-read clock, which is exactly the drift the
+    field exists to prevent:
+
+        AssertionError: the contract is accepted by the act of filing, so it cannot be stamped a
+        tick later than the order that filing closed -- both read `submit_mr`'s `completed_at`
+        assert datetime.datetime(2026, 3, 2, 14, 31, 33, tzinfo=datetime.timezone.utc) ==
+        datetime.datetime(2026, 3, 2, 14, 31, 27, tzinfo=datetime.timezone.utc)
+    """
+    service, snapshot = dispatched
+    seeded, _rejected = _with_one_rejection(snapshot.values)
+    values, _seen = await _drive(
+        seeded, "traceable", lambda p: _submission(service) if _is_submission_pause(p) else APPROVAL
+    )
+
+    contract = values["handover_contract"]
+    [filed] = current_mr_records(values).values()
+    links = values["linked_records"]
+
+    assert links.get("mr") == (filed.external_ref or filed.mr_id), (
+        "the incident's MR link must name what jTrack called it, not what we called it before asking"
+    )
+    assert "handover_contract" in links, (
+        "the packet the MR was filed against must stay reachable from the incident"
+    )
+    assert links["handover_contract"] == contract.contract_id
+
+    [order] = current_work_orders(values).values()
+    assert order.completion_code == "handed_to_osp"
+    assert order.notes[-1] == f"handed to OSP as {links['mr']}", (
+        "the order's closing note and the incident's MR link must name one MR"
+    )
+    assert contract.accepted_at == order.completed_at, (
+        "the contract is accepted by the act of filing, so it cannot be stamped a tick later than "
+        "the order that filing closed -- both read `submit_mr`'s `completed_at`"
+    )
+
+
 # ------------------------------------------------------------------------------------------------
 # The arrival that booked nothing
 # ------------------------------------------------------------------------------------------------
