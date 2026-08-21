@@ -99,6 +99,7 @@ from lpr_cpe.graph.subgraphs import (
     compile_field_execution_graph,
     compile_field_planning_graph,
     compile_plant_execution_graph,
+    compile_plant_referral_graph,
     compile_preventive_maintenance_graph,
     compile_reconciliation_closure_graph,
     compile_remote_resolution_graph,
@@ -132,6 +133,7 @@ SUBGRAPH_NODES: Mapping[str, Callable[[], Any]] = {
     "field_execution": compile_field_execution_graph,
     "field_planning": compile_field_planning_graph,
     "plant_execution": compile_plant_execution_graph,
+    "plant_referral": compile_plant_referral_graph,
     "preventive_maintenance": compile_preventive_maintenance_graph,
     "reconciliation_closure": compile_reconciliation_closure_graph,
     "remote_resolution": compile_remote_resolution_graph,
@@ -142,19 +144,29 @@ SUBGRAPH_NODES: Mapping[str, Callable[[], Any]] = {
 #: The subgraphs a plain edge leaves, and where it goes. The third way a stage acquires a successor,
 #: alongside a position in `PARENT_NODES` and an entry in `DECISION_AFTER`.
 #:
-#: One entry, and the specification is why there is one rather than none: P16 commits the field
-#: action and P17 briefs the technician, with no decision asked in between. Nothing in
-#: `BRANCH_TARGETS` could express that, because a subgraph is not in `PARENT_NODES` and so has no
-#: consecutive neighbour for `_plain_edges` to find.
+#: Two entries, and the specification is why each exists rather than a `BRANCH_TARGETS` line: a
+#: subgraph is not in `PARENT_NODES`, so it has no consecutive neighbour for `_plain_edges` to find,
+#: and neither pair has a decision asked between them for `DECISION_AFTER` to name.
 #:
-#: The edge fires on **all** of `field_planning`'s exits, including the two that book nothing, and
-#: that is the design rather than a tolerated imprecision. `field_execution.route_visit_gate` asks
-#: whether a work order is open and answers `no_visit` when none is; only `commit_field_dispatch`
-#: writes `work_orders`, so `queue_for_dispatcher` and `abandon_field_planning` arrive, record that
-#: there was nothing to visit, and stop. Gating here instead would leave that arm unreachable, and
-#: an arm no state can enter is an arm no test can hold to account.
+#: The first is P16 into P17: commit the field action, then brief the technician. The edge fires on
+#: **all** of `field_planning`'s exits, including the two that book nothing, and that is the design
+#: rather than a tolerated imprecision. `field_execution.route_visit_gate` asks whether a work order
+#: is open and answers `no_visit` when none is; only `commit_field_dispatch` writes `work_orders`,
+#: so `queue_for_dispatcher` and `abandon_field_planning` arrive, record that there was nothing to
+#: visit, and stop. Gating here instead would leave that arm unreachable, and an arm no state can
+#: enter is an arm no test can hold to account.
+#:
+#: The second is P20 into P21 on D08's arm: raise the MR, then track it to repair. It fires on all
+#: three of `plant_referral`'s exits for the same reason the first one does, and the receiving gate
+#: is again what makes that right. `plant_execution` opens on `route_plant_gate`, which reads the MR
+#: records; the referral's `abandon_plant_referral` files none, so an abandoned referral arrives
+#: holding nothing -- but it also writes `IncidentStatus.ESCALATED`, and `guarded` sends an
+#: escalated exit to `END` before this edge is consulted. The arm that survives to `plant_execution`
+#: is therefore the one that filed, plus `already_referred`, which is an incident that already held
+#: an MR and is exactly what that stage is for.
 SUBGRAPH_SUCCESSOR: Mapping[str, str] = {
     "field_planning": "field_execution",
+    "plant_referral": "plant_execution",
 }
 
 #: Which decision is asked after which node. A node absent from this mapping is followed by a plain
@@ -228,6 +240,14 @@ DECISION_AFTER: Mapping[str, str] = {
 #:   changed since the evidence was gathered, so the evidence is re-gathered. D12's is "return to
 #:   diagnosis (P10)": self-help changes nothing the diagnostic reads unless it worked, and it did
 #:   not, so the same evidence supports a second opinion.
+#: * **D08 `plant_path` -> `plant_referral`, and not to `plant_execution` directly.** The tempting
+#:   edge is the short one: the fault is in a plant domain, so send it to the stage that owns plant
+#:   work. It would arrive with no MR to chase. `route_plant_gate` reads `outstanding_plant_mr` and
+#:   would answer `no_plant_action` on every one of these, so the arm would cross a stage that does
+#:   nothing and reach D19 -- which is what it did before this edge existed, except that the arm
+#:   ended at `END` instead. What is missing between D08 and P21 is P19 and P20: the MR does not
+#:   exist yet, and P19's approval is what decides whether it may. `plant_referral` is those two
+#:   steps, and `SUBGRAPH_SUCCESSOR` runs it into `plant_execution` once there is an MR to track.
 #: * **D16 `delimit` -> `plant_execution` for three of `field_execution`'s four endings.** Only
 #:   `close_clean_boots_visit` answers `validate`; the MR that was just filed, the handover that was
 #:   abandoned and the visit that never opened all arrive at the plant stage. That is correct rather
@@ -280,7 +300,7 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
         "continue": "D08",
     },
     "D08": {
-        "plant_path": END,
+        "plant_path": "plant_referral",
         "continue": "D09",
     },
     "D09": {
@@ -344,21 +364,6 @@ PENDING_STAGES: Mapping[str, str] = {
         "select, so the two cannot simply be joined by an edge. The specification's separate Clean "
         "Boots and Dirty Boots arms are that same seam; see the subgraph's module docstring and "
         "docs/vendor-integration-gaps.md"
-    ),
-    "D08:plant_path": (
-        "the NOC and provisioning entry into the plant branch -- the case that reaches P20 "
-        "*directly*, with no Clean Boots visit behind it. P20, P21, D19 and D20 are built and "
-        "wired now, so what is missing is narrower than this entry used to say: it is the MR "
-        "filing for a case that has no handover. `file_plant_mr` reads its packet from the "
-        "`HandoverContract` and refuses without `REQUIRED_MR_FIELDS` -- plant_object_ref, "
-        "fault_description, evidence_refs, access_notes -- and the specification agrees that a "
-        "D08-direct case has no contract to read them from: the Clean-Boots-specific fields "
-        "'do not apply and may be omitted', with the NOC/plant evidence package supplied instead. "
-        "Nothing assembles that package today. The lifecycle says the same thing a second way: "
-        "D08 is asked in the chain after `generate_resolution_options`, where the incident is at "
-        "`diagnosing`, and neither `mr_raised` nor `awaiting_plant_repair` is one hop from there "
-        "-- so this arm needs a filing node of its own and a `STAGE_TRANSITIONS` seam recording "
-        "the middle it walks, not an edge to the stage that now exists"
     ),
 }
 

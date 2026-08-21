@@ -171,6 +171,7 @@ from lpr_cpe.graph.state import (
     truck_roll_count,
 )
 from lpr_cpe.graph.subgraphs._mr import (
+    mr_access_notes,
     mr_idempotency_key,
     mr_policy_input,
     mr_reference,
@@ -1468,7 +1469,7 @@ async def build_handover_contract(state: IncidentState, ctx: GraphContext) -> No
         measurements=dict(finding.measurements),
         ruled_out=_ruled_out(state),
         photos=[dict(photo) for photo in finding.photos],
-        access_notes=_access_notes(state, finding),
+        access_notes=mr_access_notes(state, finding),
         safety_notes=_safety_notes(finding, requirement),
         field_finding_ids=[finding.finding_id],
         evidence_refs=list(packet["10_evidence_refs"]),
@@ -1511,22 +1512,6 @@ async def build_handover_contract(state: IncidentState, ctx: GraphContext) -> No
             )
         ],
     }
-
-
-def _access_notes(state: IncidentState, finding: FieldFinding) -> str:
-    """How a Dirty Boots crew reaches the object. Never empty; see `build_handover_contract`."""
-    topology = state.get("topology")
-    parts = [f"plant object {plant_object_ref(state, finding) or 'unidentified'}"]
-    if topology is not None:
-        if topology.latitude is not None and topology.longitude is not None:
-            parts.append(f"at {topology.latitude:.5f},{topology.longitude:.5f}")
-        if topology.mdu_ref:
-            parts.append(f"MDU {topology.mdu_ref}")
-        if topology.area_archetype is not None:
-            parts.append(f"{topology.area_archetype.value} area")
-    if finding.technician_note:
-        parts.append(f"Clean Boots note: {finding.technician_note}")
-    return "; ".join(parts)
 
 
 def _safety_notes(finding: FieldFinding, requirement: DispatchRequirement | None) -> str:

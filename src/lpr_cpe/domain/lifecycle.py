@@ -190,6 +190,23 @@ STAGE_TRANSITIONS: dict[tuple[S, S], tuple[S, ...]] = {
     # own, and fixing that in `PolicyEngine._check_confidence` is what first drove a parent run
     # into the write below.
     (S.VALIDATING, S.CLOSED): (S.RECONCILING, S.RESOLVED),
+    # `plant_referral`, entered at `diagnosing` -- D08's plant arm, where the case goes to OSP with
+    # no Clean Boots visit behind it. One hop of middle: `prepare_plant_referral_approval` writes
+    # `awaiting_approval` for P19's authorisation, then `file_plant_referral_mr` raises the MR.
+    #
+    # The narrower entry of the two that were considered. The plan was to widen `TRANSITIONS` with
+    # `DIAGNOSING -> AWAITING_HANDOVER` by analogy with the seam above, on the assumption that a
+    # plant referral is a handover without the crew. Measured against `can_transition` first:
+    # `diagnosing -> awaiting_approval` and `awaiting_approval -> mr_raised` are both already legal,
+    # so the walk this stage takes needs nothing new in the node table -- while
+    # `diagnosing -> awaiting_handover` is False and would have had to be invented to support it.
+    # The analogy would have licensed a node to put a case at the plant boundary straight out of
+    # diagnosis, which is the same thing the note above refuses for `DISPATCH_PLANNING`.
+    #
+    # This stage's other exit needs no entry either: `abandon_plant_referral` writes `escalated`,
+    # and both `diagnosing -> escalated` and `awaiting_approval -> escalated` are single legal hops
+    # already -- which is why one node can serve a policy block and a refused approval alike.
+    (S.DIAGNOSING, S.MR_RAISED): (S.AWAITING_APPROVAL,),
 }
 
 

@@ -51,6 +51,11 @@ from lpr_cpe.graph.subgraphs.plant_execution import (
     build_plant_execution_graph,
     compile_plant_execution_graph,
 )
+from lpr_cpe.graph.subgraphs.plant_referral import (
+    PLANT_REFERRAL_NODES,
+    build_plant_referral_graph,
+    compile_plant_referral_graph,
+)
 from lpr_cpe.graph.subgraphs.preventive_maintenance import (
     PREVENTIVE_MAINTENANCE_NODES,
     build_preventive_maintenance_graph,
@@ -81,6 +86,7 @@ __all__ = [
     "FIELD_EXECUTION_NODES",
     "FIELD_PLANNING_NODES",
     "PLANT_EXECUTION_NODES",
+    "PLANT_REFERRAL_NODES",
     "PREVENTIVE_MAINTENANCE_NODES",
     "RECONCILIATION_CLOSURE_NODES",
     "REMOTE_RESOLUTION_NODES",
@@ -89,6 +95,7 @@ __all__ = [
     "build_field_execution_graph",
     "build_field_planning_graph",
     "build_plant_execution_graph",
+    "build_plant_referral_graph",
     "build_preventive_maintenance_graph",
     "build_reconciliation_closure_graph",
     "build_remote_resolution_graph",
@@ -97,6 +104,7 @@ __all__ = [
     "compile_field_execution_graph",
     "compile_field_planning_graph",
     "compile_plant_execution_graph",
+    "compile_plant_referral_graph",
     "compile_preventive_maintenance_graph",
     "compile_reconciliation_closure_graph",
     "compile_remote_resolution_graph",

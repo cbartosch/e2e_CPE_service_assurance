@@ -46,6 +46,7 @@ from lpr_cpe.graph.builder import (
     ONWARD,
     PENDING_STAGES,
     SUBGRAPH_NODES,
+    SUBGRAPH_SUCCESSOR,
     GraphTopologyError,
     build_parent_graph,
     compile_parent_graph,
@@ -58,6 +59,16 @@ from lpr_cpe.graph.state import make_initial_state, total_steps
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
 HEALTHS = ("hfc_degraded_upstream", "pon_degraded_optical", "pon_power_affected", "hfc_healthy")
+
+#: The approval each health profile's single pass parks on. A `node_visits` assertion cannot see
+#: this -- a paused subgraph has written nothing the parent can read -- which is how the prose in
+#: `test_a_fixture_runs_the_whole_parent_graph_without_writing_anything` went stale twice.
+PARKS_AT = {
+    "hfc_degraded_upstream": "dispatch",
+    "pon_degraded_optical": "clean_to_dirty_handover",
+    "pon_power_affected": "clean_to_dirty_handover",
+    "hfc_healthy": "dispatch",
+}
 
 
 class _Ticking(FrozenClock):
@@ -212,10 +223,13 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         # gets from one question to the next, they appear in `BRANCH_TARGETS` under D07, D08 and
         # D09, and they are absent here -- consumed by `_cascade` rather than routed. An edge
         # labelled `continue` leaving P11 would mean the composition was never applied.
+        #
+        # `plant_path` reached `END` until `plant_referral` was written, and deleting that stage's
+        # `PENDING_STAGES` line is the change this destination records.
         "generate_resolution_options": {
             "approve_high_blast_radius": "prepare_blast_radius_approval",  # D07
             "escalate": "record_escalation",  # D07
-            "plant_path": END,  # D08
+            "plant_path": "plant_referral",  # D08
             "remote": "remote_resolution",  # D09
             "self_help": "self_help",  # D11
             "field_planning": "field_planning",  # D11
@@ -262,7 +276,7 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         "request_blast_radius_approval": {
             "approve_high_blast_radius": "prepare_blast_radius_approval",
             "escalate": "record_escalation",
-            "plant_path": END,
+            "plant_path": "plant_referral",
             "remote": "remote_resolution",
             "self_help": "self_help",
             "field_planning": "field_planning",
@@ -320,6 +334,12 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
             "delimit": "plant_execution",
             ESCALATED: END,
         },
+        # `SUBGRAPH_SUCCESSOR`'s second entry, P20 into P21, and the D08-direct way into the plant
+        # stage. Together with `field_execution`'s `delimit` above it makes two feeders for one
+        # stage, which is the fact neither builder table can hold: `SUBGRAPH_SUCCESSOR` knows this
+        # edge and `BRANCH_TARGETS` knows that one, and only reading them back out of the same
+        # `StateGraph` shows that they converge.
+        "plant_referral": {ONWARD: "plant_execution", ESCALATED: END},
         # `await_plant` is a self-loop, and unlike `SUBGRAPH_SUCCESSOR`'s -- which `_check_tables`
         # refuses outright -- this one is a `BRANCH_TARGETS` entry and allowed. What stops it is
         # `capture_plant_evidence`, which raises an interrupt for OSP's report, so a lap that
@@ -431,23 +451,47 @@ async def test_a_fixture_runs_the_whole_parent_graph_without_writing_anything(
     to exercise, and a run that looped P07 three times would still total eleven if the assertion
     were `len(...) == 11`.
 
-    Where each of the four stops was measured rather than reasoned about, and the answer is not
-    the same for all four. Two divert at D08 (`pon_degraded_optical` and `pon_power_affected`, both
-    `plant_path`, which is still a pending exit and so ends the run). The other two walk the whole
-    chain to D11 and answer `field_planning` -- `hfc_degraded_upstream` and `hfc_healthy`, both
-    diagnosed `tap_or_odp`, whose only options are `raise_mr` and `create_work_order` and both of
-    those set `requires_truck_roll`. `is_remote_option` and `is_self_help_option` reject a truck
-    roll, so there is nothing for D09 or D11 to choose.
+    Where each of the four stops was measured rather than reasoned about, and the answer is now the
+    same for all four: each enters a subgraph and parks in it. Two divert at D08
+    (`pon_degraded_optical` and `pon_power_affected`, both `plant_path`) and stop at P19, asking an
+    `osp_engineer` for `clean_to_dirty_handover` on a `raise_mr` against the ODP that `delimiter_ref`
+    named. The other two walk the whole chain to D11 and answer `field_planning` --
+    `hfc_degraded_upstream` and `hfc_healthy`, both diagnosed `tap_or_odp`, whose only options are
+    `raise_mr` and `create_work_order` and both of those set `requires_truck_roll`.
+    `is_remote_option` and `is_self_help_option` reject a truck roll, so there is nothing for D09 or
+    D11 to choose, and they stop at that stage's `dispatch` gate.
 
-    So two of these runs *do* enter a subgraph, and the eleven are still eleven anyway. This
-    docstring said the opposite until it was re-measured, and how it went stale is the point worth
-    keeping: when it was written, `D11:field_planning` was a pending exit to `END`; wiring the stage
-    changed where the answer goes without changing anything this test asserts. `field_planning`
-    pauses at its dispatch-approval gate, and a paused subgraph's writes have not reached the
-    parent -- `ainvoke` returns with an `__interrupt__` in it and `node_visits` untouched. That is
-    the same property `graph.subgraphs` documents and `graph.inspect` exists to work around, and
-    here it means an assertion counting parent visits cannot see the difference between a stage that
-    is not entered and one that is entered and parks. Only the second is true.
+    So all four of these runs enter a subgraph, and the eleven are still eleven anyway. This
+    paragraph has now gone stale the same way twice, and how is the point worth keeping. When it was
+    first written, `D11:field_planning` was a pending exit to `END`; wiring the stage changed where
+    the answer goes without changing anything this test asserts. Then `D08:plant_path` was a pending
+    exit, and wiring `plant_referral` did it again -- the sentence saying those two runs ended the
+    run survived the edit that gave them somewhere to go.
+
+    The mechanism is the same both times: a paused subgraph's writes have not reached the parent, so
+    `ainvoke` returns with an `__interrupt__` in it and `node_visits` untouched. That is the property
+    `graph.subgraphs` documents and `graph.inspect` exists to work around, and here it means an
+    assertion counting parent visits cannot tell a stage that is not entered from one that is entered
+    and parks. So `PARKS_AT` is asserted below: the second rewire put an interrupt where there had
+    been none at all, and reading `__interrupt__` is what makes a third such edit turn this red
+    instead of leaving the prose to rot again.
+
+    What that line adds over the visit count was measured rather than assumed, because the two
+    obvious mutations do not both reach it. Making `route_plant_referral_gate` answer `abandon`
+    instead of `refer` for a case with no decision yet never gets there: the stage runs to
+    completion instead of parking, so its writes *do* reach the parent and the visit count catches
+    it two lines earlier, `Left contains 2 more items: {'abandon_plant_referral': 1,
+    'evaluate_plant_referral': 1}`. Filing P19's approval under `ApprovalKind.DISPATCH` is the one
+    that reaches it -- the run still parks, the count is still eleven, and only this line notices::
+
+        E   AssertionError: the run stopped somewhere other than the paragraph above says
+        E   assert 'dispatch' == 'clean_to_dirty_handover'
+
+    Not the only guard for that defect, and the difference is the point. Six tests in
+    `test_subgraph_plant_referral.py` went red too, but the sharpest of them reads `assert 6 == 1`:
+    the gate stops recognising the answer, so the approval is asked six times until the guard's
+    budget stops it, and the failure names a symptom three nodes downstream of the cause. This one
+    names the cause. Both are worth having.
 
     Only these four, and `_service` takes the *first* service of each health profile -- the fork is
     not dead across the fixture set. Swept over all 41 services, two do enter `remote_resolution`
@@ -498,6 +542,11 @@ async def test_a_fixture_runs_the_whole_parent_graph_without_writing_anything(
     assert final["resolution_plan"] is not None
     # A tuple, so `== []` would fail on the type alone and read as a real defect.
     assert list(ctx.adapters.gate.recorded) == []
+
+    (pause,) = final["__interrupt__"]
+    assert pause.value["approval_request"]["kind"] == PARKS_AT[health], (
+        "the run stopped somewhere other than the paragraph above says"
+    )
 
 
 async def test_the_data_quality_metric_is_emitted_before_the_branch_that_needs_it(
@@ -1221,16 +1270,21 @@ def test_wiring_a_pending_stage_forces_its_line_to_be_deleted(
 
         E   Failed: DID NOT RAISE <class 'lpr_cpe.graph.builder.GraphTopologyError'>
 
-    `D08:plant_path` took its place, and any surviving entry would do. That is the point: the check
-    is a property of the table, not of whichever gap happened to be open when it was written.
+    `D08:plant_path` took its place and has now been spent the same way, which is the point rather
+    than a nuisance: the check is a property of the table, not of whichever gap happened to be open
+    when it was written.
+
+    The one entry left is node-shaped, so the mutation had to change shape with it -- and that is a
+    gain and not a compromise. `_check_pending_stages` derives its gaps twice, once from the
+    `BRANCH_TARGETS` answers that end at `END` and once from the terminal nodes `_plain_edges` finds
+    no successor for, and both previous mutations were `Dnn:answer`, so only the first set was ever
+    exercised. Giving `preventive_maintenance` a `SUBGRAPH_SUCCESSOR` entry takes it out of the
+    second set, which puts the half of the check that had never been mutated under test.
     """
     monkeypatch.setattr(
         builder_module,
-        "BRANCH_TARGETS",
-        {
-            **BRANCH_TARGETS,
-            "D08": {**BRANCH_TARGETS["D08"], "plant_path": "assemble_case_evidence"},
-        },
+        "SUBGRAPH_SUCCESSOR",
+        {**SUBGRAPH_SUCCESSOR, "preventive_maintenance": "assemble_case_evidence"},
     )
     with pytest.raises(GraphTopologyError, match="no longer reach END"):
         build_parent_graph()
@@ -1271,11 +1325,16 @@ def test_a_node_that_ends_the_workflow_has_to_say_so(monkeypatch: pytest.MonkeyP
 def test_the_unbuilt_exits_are_the_ones_named() -> None:
     """What is left to build, written down where the builder will not let it go stale.
 
-    Four, and the count has now moved in both directions, which is the shape to expect. Wiring the
-    resolution fork made it *longer*: a stage deletes one line -- `ONWARD:generate_resolution_
-    options`, P11's old fall off the end -- and adds one for every branch it opens that leads
-    somewhere still unwritten, and Stage 3 asks four questions and answers seven of its branches to
-    `END`.
+    One, and the count has moved in both directions on the way there, which is the shape to expect.
+    This opening line read "Four" while the assertion below held two, and that is worth admitting
+    rather than quietly correcting: the builder keeps the *table* from going stale and nothing keeps
+    this sentence from it, so the number here is read off the assertion at the bottom and not
+    carried forward.
+
+    Wiring the resolution fork made it *longer*: a stage deletes one line --
+    `ONWARD:generate_resolution_options`, P11's old fall off the end -- and adds one for every branch
+    it opens that leads somewhere still unwritten, and Stage 3 asks four questions and answers seven
+    of its branches to `END`.
 
     Wiring the preventive stage moved it neither way: one entry changed *kind* rather than going
     away. `D04:preventive` was a decision answer that fell to `END`; it now reaches a subgraph, and
@@ -1355,25 +1414,40 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     really was waiting on an edge rather than a stage, and D16 re-read on the parent's edge is that
     edge.
 
-    `D08:plant_path` survived and, like `__onward__:preventive_maintenance` before it, no longer
-    says what it used to. It meant "the plant branch is unwritten"; the branch is written, and what
-    is left is one filing node -- a D08-direct case has no `HandoverContract` for `file_plant_mr` to
-    read `REQUIRED_MR_FIELDS` from, which the specification itself says is correct for that case.
+    `D08:plant_path` survived that edit and, like `__onward__:preventive_maintenance` before it, no
+    longer said what it used to. It meant "the plant branch is unwritten"; the branch was written,
+    and what was left was one filing node -- a D08-direct case has no `HandoverContract` for
+    `file_plant_mr` to read `REQUIRED_MR_FIELDS` from, which the specification itself says is correct
+    for that case.
 
-    What is left is two entries and one cause, which is the first time this list has had one. Both
-    name a *seam*: a stage that exists on each side and no edge that may join them, because in each
-    case the receiving stage reads a model the sending one never builds.
+    Writing `plant_referral` closed it, making this the third edit to add a stage and put nothing in
+    its place, and the first to close an exit by *deleting* what it was waiting on rather than by
+    building it. The contract was never the field source it looked like: `graph.subgraphs._mr`
+    derives all four of `REQUIRED_MR_FIELDS` from the state instead, so a case with no contract has
+    the same four to send as a case with one. `access_notes` was the only one with nowhere else to
+    come from -- absent on all ten fixtures that reach this arm -- and it is composed from what
+    `topology` resolved. `field_execution` was migrated onto the same helper, so the derivation has
+    one owner and not two.
+
+    What is left is one entry, and it is the seam kind: a stage that exists on each side and no edge
+    that may join them, because the receiving stage reads a model the sending one never builds.
 
     `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
-    against the tables in both directions, so an exit that stops reaching `END` fails the build.
-    Seen to go red on this very edit -- routing `D22:reconcile` at the new subgraph while leaving
-    its line in place failed the build with "PENDING_STAGES still lists exits that no longer reach
-    END: ['D22:reconcile']", which is the stale direction, the one nothing else would have caught.
+    against the tables in both directions, so an exit that stops reaching `END` fails the build. Both
+    directions were seen red on this edit rather than reasoned about. Leaving the line in place with
+    the stage wired::
+
+        GraphTopologyError: PENDING_STAGES still lists exits that no longer reach END:
+          ['D08:plant_path']. The stage was wired; delete its line.
+
+    and deleting the line while `plant_path` still fell to `END`::
+
+        GraphTopologyError: these exits reach END with nothing to explain them: ['D08:plant_path'].
+          A run that stops there looks like a run that finished. [...]
+
+    The first is the direction nothing else in the codebase would have caught.
     """
-    assert set(PENDING_STAGES) == {
-        f"{ONWARD}:preventive_maintenance",
-        "D08:plant_path",
-    }
+    assert set(PENDING_STAGES) == {f"{ONWARD}:preventive_maintenance"}
     assert all(text.strip() for text in PENDING_STAGES.values()), "each has to say what is missing"
 
 

@@ -76,6 +76,44 @@ def plant_object_ref(state: IncidentState, finding: FieldFinding | None) -> str:
     return state.get("delimiter_ref") or state.get("service_ref") or ""
 
 
+def mr_access_notes(state: IncidentState, finding: FieldFinding | None) -> str:
+    """How a crew reaches the object. One of `REQUIRED_MR_FIELDS`, and never empty.
+
+    Moved here from `field_execution._access_notes` by the rule this module is built on: the second
+    caller is what moves a function, and `plant_referral` is it. The move matters more than most,
+    because `access_notes` is the *one* required field a D08-direct case cannot borrow from
+    anywhere. Measured across the ten fixtures that reach D08's plant arm, `plant_object_ref`,
+    `fault_description` and `evidence_refs` are all fillable from `delimiter_ref` and `rca` -- and
+    `access_notes` is absent on all ten, which is what makes it the field that would have produced
+    `create_mr`'s non-retryable refusal.
+
+    Never empty, and that is by construction rather than by check: the first part is always present,
+    naming the plant object or saying it is unidentified. What the rest adds is what `topology`
+    resolved. Measured on those ten: latitude and longitude on all ten, `area_archetype` on all ten
+    (`remote_island` on eight of them), and `mdu_ref` on **none** -- so the `if topology.mdu_ref`
+    clause is the one part of this that the D08-direct path never exercises. It is not removed,
+    because the Clean Boots path shares this function and an MDU is exactly the case where an access
+    note earns its keep.
+
+    `finding` is optional for `plant_object_ref`'s reason -- no crew attended a D08-direct case --
+    and the technician's note is what its absence costs. That is a real loss, not a formality: the
+    difference between "a Clean crew stood at this cabinet" and "nobody has been" is the difference
+    `plant_referral` records in its safety notes instead.
+    """
+    topology = state.get("topology")
+    parts = [f"plant object {plant_object_ref(state, finding) or 'unidentified'}"]
+    if topology is not None:
+        if topology.latitude is not None and topology.longitude is not None:
+            parts.append(f"at {topology.latitude:.5f},{topology.longitude:.5f}")
+        if topology.mdu_ref:
+            parts.append(f"MDU {topology.mdu_ref}")
+        if topology.area_archetype is not None:
+            parts.append(f"{topology.area_archetype.value} area")
+    if finding is not None and finding.technician_note:
+        parts.append(f"Clean Boots note: {finding.technician_note}")
+    return "; ".join(parts)
+
+
 def mr_idempotency_key(state: IncidentState, target_ref: str) -> str:
     """The key the MR is filed under. Derived, so the policy check and the send agree.
 
@@ -125,21 +163,24 @@ def mr_policy_input(
     Built here rather than through `_shared.policy_input_for`, and the difference is not
     duplication. That function is keyed on a `ResolutionOption` -- it reads `option.action_type`,
     `option.blast_radius`, `option.reversible` and derives the idempotency key from `option_id` --
-    and neither filer has an option it may key on. `field_execution`'s MR comes from a
-    `FieldFinding` a technician submitted; `plant_referral`'s comes from the diagnosis, and although
-    P11 does put a `raise_mr` option in the plan for those cases, keying on it would make the
-    engine's `blast_radius` the option catalogue's guess rather than the impact assessment's count.
-    Measured on the ten D08-direct fixtures, the option says 1 for every one of them while
-    `homes_behind_delimiter` says 8 or 16.
+    and `field_execution` has no option anywhere in its state to key on. Its MR comes from a
+    `FieldFinding` a technician submitted. That is the argument, and it is structural: one of the
+    two filers simply cannot call that function.
 
     What it does *not* re-derive is any of the readings. `evidence_support`,
     `executed_idempotency_keys` and `attempt_number` are imported from `_shared`, so the engine is
     asked about corroboration, duplicate suppression and attempt count in exactly the words the
     other branches use.
 
-    `blast_radius` is the affected customer count and not `1`. An MR at a feeder affects every
-    service behind it, and the pack's blast-radius rules are the reason a plant fault is put to a
-    human rather than filed automatically.
+    `blast_radius` comes from `impact` rather than from the option, and that is a second, smaller
+    choice whose size was overstated here until it was measured. `plant_referral`'s case *does* have
+    a `raise_mr` option -- P11 puts one in the plan for all ten D08-direct fixtures -- so for that
+    filer both numbers are available, and they differ: measured, `option.blast_radius` is 1 on all
+    ten while `impact.affected_customer_count` is 1 on six of them and 2 on four. The reason to
+    prefer `impact` is ownership rather than magnitude -- it is the assessment that owns how many
+    customers a fault reaches. An earlier draft of this paragraph argued the point by contrasting
+    the option with `topology.homes_behind_delimiter`, which says 8 or 16 across the same ten and is
+    a field neither this function nor the option reads.
 
     `contacts_today` and `minutes_since_last_contact` are left at their defaults, unlike
     `policy_input_for`, which supplies them for every action. `_check_customer_contact` returns
