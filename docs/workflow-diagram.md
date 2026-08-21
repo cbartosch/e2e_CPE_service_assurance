@@ -1,6 +1,6 @@
 # The workflow, drawn
 
-**Status: measured on 2026-08-20 against the tree at `a1015f4`.** Every node, edge and branch label
+**Status: measured on 2026-08-21 against the tree at `e78421e`.** Every node, edge and branch label
 below was read out of the wiring tables, not transcribed from the specification. Where the drawing
 and `docs/specification.md` disagree, the drawing is what the code does and the disagreement is
 listed in §5.
@@ -32,16 +32,18 @@ confirm_customer_outcome`, which the specification calls P23. This document uses
 numbers throughout. That mismatch is a trap worth knowing about before comparing the two.
 
 A second trap, recorded because it caught an earlier audit: **grepping for a router's function name
-misreports in both directions.** Measured by comparing a text search of `graph/` against the names
-each file's *bytecode* actually references. A grep finds 18 of the 24 wired; the true figure is 22,
-and the two sets differ by six. Five decisions — D03, D05, D08, D09 and D11 — name their router
-nowhere outside `routing.py`, because the parent wires them through ID-keyed tables, so grep calls
-them unwired and they are not. One — D19 — appears only inside a docstring, `field_execution`'s note
-on why it stops short of P21, so grep calls it wired and it is not.
+misreports.** Measured by comparing a text search of `graph/` against the names each file's
+*bytecode* actually references. A grep finds 19 of the 24 wired; the true figure is 24. The five it
+misses — D03, D05, D09, D11 and D20 — name their router nowhere outside `routing.py`, because the
+parent wires them through ID-keyed tables, so grep calls them unwired and they are not.
 
-What makes that hard to notice is how often grep is right for the wrong reason: nine more decisions
-(D01, D02, D04, D06, D07, D10, D12, D21, D22) are docstring-only as well and happen to be wired, and
-D20 names its router nowhere and happens to be unwired. Same two signals, opposite verdicts.
+What makes that hard to notice is how often grep is right for the wrong reason. Eleven more
+decisions — D01, D02, D04, D06, D07, D08, D10, D12, D19, D21 and D22 — are named only inside a
+docstring, and all eleven are wired anyway: a mention in prose is the same evidence that called D19
+wired one revision of this file ago, when it was not. That revision measured 18 found against a true
+22, with D19 the false positive — named only in `field_execution`'s note on why it stopped short of
+P21 — and D20 named nowhere and also unwired. Building the plant stages emptied the false-positive
+direction. **The search did not get better; the tree changed underneath it.**
 
 Subgraphs add a third shape: D13 and D15 are reached by *delegation* — `route_field_gate` and
 `route_dispatch_gate` each end in `return route_...(state)` — never by a direct
@@ -50,33 +52,41 @@ not from grep.
 
 ---
 
-## 1. The short answer: nearly, and one named block is missing
+## 1. The short answer: every step and every decision is built, and one seam is open
 
-**25 of the specification's 26 process steps are built. 22 of its 24 decisions are wired.** The path
-from a signal arriving to an incident closed, reconciled and labelled runs end to end. What is
-missing is the plant-repair branch.
+**26 of the specification's 26 process steps are built. 24 of its 24 decisions are wired** — 17 on a
+parent edge and 7 inside a subgraph. The path from a signal arriving to an incident closed,
+reconciled and labelled runs end to end, and so does the plant branch that was missing when this
+document was first written.
 
 | | Declared | Built / wired | Missing |
 | --- | --- | --- | --- |
-| Process steps | 26 | 25 | P21 |
-| Decisions | 24 | 22 | D19, D20 |
+| Process steps | 26 | 26 | — |
+| Decisions | 24 | 24 | — |
 | Approval kinds with a gate | 6 | 6 | — |
 
-The three missing items are one contiguous block: **P21 + D19 + D20**, the Dirty Boots / plant / OSP
-/ NOC execution branch and the two questions that follow it. It is reached from two directions — by
-`D08:plant_path` at the parent, and by whatever should follow P20's jTrack MR inside
-`field_execution`.
+What is still open is not a step or a decision but a **seam**: a place where one stage ends a thread
+that the specification carries into another. `builder.PENDING_STAGES` has one entry left,
+`__onward__:preventive_maintenance`, and §5 says what it is waiting on.
 
-Nothing about that absence is implicit. `builder.PENDING_STAGES` names the three exits that reach it
-or wait on it, and `_check_pending_stages` fails the build if a terminal node is neither listed nor
-declared deliberate in `_DELIBERATE_TERMINALS`. The gaps are drawn as `PENDING` boxes below rather
-than as `END`.
+Nothing about that absence is implicit, and it cannot rot quietly either. `_check_pending_stages`
+fails the build in **both** directions: an exit that reaches `END` while neither listed nor declared
+deliberate in `_DELIBERATE_TERMINALS` / `_DELIBERATE_ENDINGS`, and a `PENDING_STAGES` line whose exit
+no longer reaches `END`. So wiring a stage without deleting its line is a red build, which is what
+keeps that list honest. The counts in the table above have no such guard — they are prose, which is
+why §0 says how to re-derive them. The remaining gap is drawn as a `PENDING` box below rather than
+as `END`.
+
+**Built and wired is not the same as driven end to end.** Exactly one of the 41 fixture services
+reaches Stage 5 under a full sweep, and it is the one whose fixture was healthy to begin with. §6
+measures where the other 40 stop, and why what stops them is a simulator gap rather than a graph
+one.
 
 ---
 
 ## 2. The parent graph
 
-24 nodes: 17 process steps plus 7 compiled subgraphs. `[[double-bordered]]` boxes are subgraphs,
+26 nodes: 17 process steps plus 9 compiled subgraphs. `[[double-bordered]]` boxes are subgraphs,
 expanded in §3. `[HUMAN]` marks a node that raises `interrupt()` and waits for a person; `[TIMER]`
 one that waits on the clock.
 
@@ -121,7 +131,7 @@ flowchart TD
     CAS{{"D07 - D08 - D09 - D11<br/>asked as one cascaded edge"}}
     CAS -->|"escalate"| ESC["record_escalation"]
     CAS -->|"approve_high_blast_radius"| GBR
-    CAS -->|"plant_path"| PEND_A
+    CAS -->|"plant_path"| PR[["P19-P20 plant_referral"]]
     CAS -->|"remote"| RR[["P12 remote_resolution"]]
     CAS -->|"self_help"| SH[["P13 self_help"]]
     CAS -->|"field_planning"| FP[["P14-P16 field_planning"]]
@@ -140,7 +150,17 @@ flowchart TD
     D12 -->|"verify"| RV
 
     FP --> FE[["P17-P20 field_execution"]]
-    FE --> PEND_B
+    FE --> D16{{"D16 Resolved within the Clean Boots service domain?"}}
+    D16 -->|"validate"| RV
+    D16 -->|"delimit"| PE
+
+    PR --> PE[["P20-P21 plant_execution"]]
+    PE --> D19{{"D19 Did the plant action restore the network domain?"}}
+    D19 -->|"await_plant"| PE
+    D19 -->|"retry_diagnosis"| P10
+    D19 -->|"restored"| D20{{"D20 Is customer service still degraded?"}}
+    D20 -->|"reverse_handover"| FP
+    D20 -->|"verify"| RV
 
     RV[["P22 restoration_validation"]] --> D21{{"D21 Stable for the required observation window?"}}
     D21 -->|"continue_observation"| RV
@@ -155,19 +175,17 @@ flowchart TD
 
     PM --> PEND_D
 
-    PEND_A["PENDING D08:plant_path<br/>P21, D19, D20 not built"]
-    PEND_B["PENDING after P20<br/>plant branch not built"]
     PEND_D["PENDING preventive to field-planning<br/>seam not built"]
 
     classDef pending fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#000
     classDef human fill:#bfdbfe,stroke:#1d4ed8,color:#000
     classDef sub fill:#e9d5ff,stroke:#7e22ce,color:#000
-    class PEND_A,PEND_B,PEND_D pending
+    class PEND_D pending
     class RLC,RBR human
-    class PM,RR,SH,FP,FE,RV,RC sub
+    class PM,RR,SH,FP,FE,PR,PE,RV,RC sub
 ```
 
-### Three things in that picture that are not obvious
+### Four things in that picture that are not obvious
 
 **The four questions after P11 are one edge, not four.** LangGraph allows a node to carry only one
 `add_conditional_edges`, and D07, D08, D09 and D11 are asked in sequence with no node between them.
@@ -182,6 +200,13 @@ builds the payload, `request_*` raises the interrupt and records the answer, and
 back at the cascade. The split exists because everything before `interrupt()` re-runs on resume, so a
 node that both built the question and waited would build a different question each time.
 
+**`plant_execution` is the one stage with two feeders, and no single table says so.** It is entered
+from `plant_referral` — a `SUBGRAPH_SUCCESSOR` entry, because a subgraph has no position in
+`PARENT_NODES` for `pairwise` to read — and from `D16:delimit`, which is a `BRANCH_TARGETS` answer.
+The two edges are declared in different tables by different mechanisms, so the convergence is visible
+only by reading them back out of the same `StateGraph`; `tests/unit/test_builder.py` asserts it there.
+The `await_plant` self-loop is a third way in, and the reason those ten incidents escalate in §6.
+
 **`reconciliation_closure -> END` is the end of the workflow, not a gap.** It is one of the two
 entries in `_DELIBERATE_TERMINALS`, alongside `record_escalation`. Its main line ends at
 `update_kpis_and_learning`, which writes `IncidentStatus.CLOSED`, and `domain.lifecycle` gives
@@ -191,7 +216,7 @@ was a `PENDING_STAGES` line claiming work was owed, which for these two would be
 
 ---
 
-## 3. Inside the seven subgraphs
+## 3. Inside the nine subgraphs
 
 Every subgraph router is wrapped in `guarded(...)`, which answers `ESCALATED` when the budget is
 spent — `policy.attempt_limits.max_subgraph_reentries`, measured at 6. Those `ESCALATED -> END` edges
@@ -264,9 +289,10 @@ flowchart TD
     class R human
 ```
 
-`field_planning` is the only subgraph with a successor wired at the parent —
-`SUBGRAPH_SUCCESSOR = {"field_planning": "field_execution"}`. It needs a table entry rather than a
-position because a subgraph has no place in `PARENT_NODES` for `pairwise` to read.
+`field_planning` is one of the two subgraphs with a successor wired at the parent —
+`SUBGRAPH_SUCCESSOR = {"field_planning": "field_execution", "plant_referral": "plant_execution"}`.
+Both need a table entry rather than a position because a subgraph has no place in `PARENT_NODES` for
+`pairwise` to read. Every other subgraph leaves through a decision or through `END`.
 
 ### P17-P20 — `field_execution`
 
@@ -304,6 +330,79 @@ The handover policy is evaluated **before** P18 builds the packet, while the inc
 `field_in_progress`. `field_in_progress -> awaiting_approval` is a refused transition, so P18 has to
 write `awaiting_handover` first — which means the policy verdict must be taken on the state that
 precedes it.
+
+### P19-P20 — `plant_referral`
+
+```mermaid
+flowchart TD
+    S([START]) --> A["evaluate_plant_referral"]
+    A --> G{{"route_plant_referral_gate"}}
+    G -->|"refer"| P["prepare_plant_referral_approval"]
+    G -->|"file"| F["P20 file_plant_referral_mr"]
+    G -->|"abandon"| X["abandon_plant_referral"]
+    G -->|"already_referred"| Z([END])
+    P --> R["P19 request_plant_referral_approval<br/>[HUMAN]"]
+    R --> G
+    F --> Z
+    X --> Z
+    classDef human fill:#bfdbfe,stroke:#1d4ed8,color:#000
+    class R human
+```
+
+D08's arm: a fault referred to OSP with no Clean Boots visit behind it. The specification gives P20
+two entrances — "the handover evidence, or the NOC/plant evidence package when the case reached this
+step directly from D08 without a Clean Boots visit" — and this is the second. The filing itself is
+`_mr.submit_mr`, shared with `field_execution.file_plant_mr` so the two entrances cannot drift.
+
+Three shapes here are chosen rather than incidental. **The policy is asked before anything is
+assembled**: a pack that refuses an MR for a case with no crew, no premises visit and no remote
+option is saying that nobody automated may act, so assembling an evidence package first would be
+assembling it for a question already answered. **The package is deliberately not a
+`HandoverContract`** — measured over the ten incidents that reach this stage, one would audit
+`incomplete` on all ten, because `missing_items()` looks for field measurements nobody took, a
+finding id no crew submitted, and a non-empty `ruled_out` — so `plant_referral_packet` is a pure
+function of state, stored nowhere. And **`abandon_plant_referral` writes `escalated` where `field_execution.abandon_handover`
+writes `diagnosing`**: a refused handover leaves behind a Clean Boots finding diagnosis has not seen,
+so another lap has new evidence in it, while a refused referral leaves nothing new and D08 would read
+the same `fault_domain` and route straight back.
+
+### P20-P21 — `plant_execution`
+
+```mermaid
+flowchart TD
+    S([START]) --> A["P20 search_plant_mr"]
+    A --> G{{"route_plant_gate"}}
+    G -->|"chase"| U["P20 update_plant_mr"]
+    G -->|"no_plant_action"| Z([END])
+    U --> C["P21 capture_plant_evidence<br/>[HUMAN]"]
+    C --> Z
+    classDef human fill:#bfdbfe,stroke:#1d4ed8,color:#000
+    class C human
+```
+
+The plant wait: the MR is with OSP, so chase it and record what a Dirty crew sends back. Three nodes,
+and both boundaries between them are places where re-running would do damage. `search_plant_mr`
+performs P20's duplicate-suppression read on its own because `update_mr` refuses **non-retryably**
+when jTrack is not holding the MR open, and the only honest way to know that before building an
+`ActionRequest` is to have asked. `update_plant_mr` sends the chase and `capture_plant_evidence`
+waits for the answer, split because everything before `interrupt()` re-runs on resume — one node that
+chased *and* waited would re-send the chase every time it was resumed.
+
+The edge out of `update_plant_mr` is `straight_on` and not a router: sent, refused by policy, and not
+held by jTrack all lead to the same place, because the report OSP sends is not conditional on our
+having managed to chase them for it. D19 is asked at the parent on the way out, and reads the latest
+MR revision by `updated_at`:
+
+| latest revision | D19 answers |
+| --- | --- |
+| no MR at all | `retry_diagnosis` |
+| `completed` or `closed` | `restored` |
+| `submitted`, `accepted`, `planned`, `in_progress` — `awaiting_osp` | `await_plant` |
+| `draft`, `rejected`, `cancelled` | `retry_diagnosis` |
+
+`completed` is tested before `awaiting_osp`, so a revision that arrives finished is read as finished
+whatever it passed through. Nothing in the simulator completes an MR, which is why `await_plant`
+loops until the guard's ceiling — see §6.
 
 ### P22 — `restoration_validation`
 
@@ -390,8 +489,9 @@ All three dispositions end the thread. `plan_preventive_field_work` is the seam 
 
 ## 4. Where a human or a clock stops the graph
 
-Ten sites raise `interrupt()`. Seven are approval gates and share one implementation,
-`graph.interrupts.request_approval`; three are waits of their own.
+Twelve sites raise `interrupt()`. Eight are approval gates and share one implementation,
+`graph.interrupts.request_approval`; four are waits of their own. Counted from the AST rather than by
+grep, for §0's reason: `plant_execution` names `interrupt` in three docstrings and raises it once.
 
 | Site | Graph | Kind |
 | --- | --- | --- |
@@ -401,9 +501,11 @@ Ten sites raise `interrupt()`. Seven are approval gates and share one implementa
 | `request_self_help_approval` | `self_help` | approval — kind read from the decision |
 | `request_dispatch_approval` | `field_planning` | approval — `dispatch` |
 | `request_handover_approval` | `field_execution` | approval — `clean_to_dirty_handover` |
+| `request_plant_referral_approval` | `plant_referral` | approval — `clean_to_dirty_handover` |
 | `request_exceptional_closure_approval` | `reconciliation_closure` | approval — `exceptional_closure` |
 | `await_customer_response` | `self_help` | waits for the customer, with an adapter fallback |
 | `capture_field_evidence` | `field_execution` | waits for the technician, **no** adapter fallback |
+| `capture_plant_evidence` | `plant_execution` | waits for OSP, **no** adapter fallback |
 | `await_service_stability` | `restoration_validation` | waits on the clock |
 
 All six `ApprovalKind` members now have a gate. Five of the six name their kind as a literal; the
@@ -414,6 +516,11 @@ remote and self-help gates take theirs from the policy decision, which is why
 `high_risk_remote_action` as the only kind those two may serve. The AST guard in
 `tests/unit/test_routing.py` enforces the list against the gates that exist.
 
+One kind now has two gates. `clean_to_dirty_handover` is named as a literal by `field_execution`,
+where a crew hands the fault over, and by `plant_referral`, where there was no crew to hand it over
+from — the approval half of P20's two entrances. The authority is identical because the question is:
+may this fault be given to OSP. What differs is only what is put in front of the approver.
+
 `prepare_exceptional_closure_approval` names `EXCEPTIONAL_CLOSURE` as a literal even though
 `route_closure_gate` cannot reach it under any other kind — measured by swapping the literal for the
 decision's field, which changed nothing. What the literal buys is that the kind asked and the kind
@@ -421,56 +528,10 @@ later looked for are the same token.
 
 ---
 
-## 5. The three open exits, with what each is waiting on
+## 5. The one open exit, and what it is waiting on
 
-These are `builder.PENDING_STAGES`. The builder's own entries are longer than what follows; each is
-summarised here and quoted in full by `python -m lpr_cpe.cli topology`.
-
-**`D08:plant_path`** — the NOC, provisioning and plant branch. Stage 4's Dirty Boots half, P20
-onwards, which creates or updates an MR from NOC and plant evidence rather than from a handover
-contract. P21 is the unbuilt step, and the two questions after it are D19 *"Did the Dirty Boots or
-plant action restore the affected network domain?"* and D20 *"Is customer service still degraded
-after plant restoration?"* Both are declared in `routing.DECISIONS` and wired nowhere.
-
-**`__onward__:field_execution`** — the same branch seen from the other side. **This entry said
-something measurably wrong until 2026-08-20, and the correction is the part worth reading.** It said
-the blocker was a missing *capability*: that since `create_mr` returns an MR at `submitted` and
-nothing in `src` calls `update_mr`, D19 would answer `await_plant` for every incident that ever
-reached it, and D20 would sit behind an arm no state could enter.
-
-Measured against the shipped `route_plant_outcome`, **all three of D19's arms are enterable**. The
-enumeration behind the old claim was keyed on MR status and had no row for the empty case:
-
-| state | D19 answers |
-| --- | --- |
-| no MR at all | `retry_diagnosis` |
-| `submitted`, `in_progress` | `await_plant` |
-| `completed`, `closed`, or a revision ending there | `restored` |
-| `rejected` | `retry_diagnosis` |
-
-No MR at all is what two of this subgraph's four ways out already produce, so `retry_diagnosis` is
-enterable today with no new capability. `restored` needs a revision at `completed`, and the
-specification says where one comes from: P21 is a *capture* list — acceptance, assignment, dispatch,
-measurements, repair actions, components changed, photos, resolution code, completion time,
-post-repair evidence — which is the crew's own report, the same shape `capture_field_evidence`
-already takes through `interrupt()` with no adapter fallback. The OSP status feed is a real gap
-(EXEC-2) and would be a *second* channel into that parser, exactly as FIELD-3 is for
-`field_submission`.
-
-What actually blocks it is that **the subgraph has one exit and four things to say through it**:
-
-* `file_plant_mr` ends with the MR filed and the incident at `mr_raised` — that is the wait above.
-* `close_clean_boots_visit` writes `validating`, and D16's own specification text — *"if yes, route
-  to restoration validation"* — names the destination. **Stage 5 exists**; a subgraph simply cannot
-  reach a sibling from inside itself.
-* `abandon_handover` writes `diagnosing`, and P07 and P10 both exist.
-* `route_visit_gate`'s `no_visit` booked nothing at all — the two `field_planning` exits that
-  deliberately book nothing arrive here and stop.
-
-`_check_tables` admits only decisions that are in `routing.DECISIONS`, so a local gate cannot
-separate them on the parent's edge; it has to be a numbered one. **D16 is that decision**, re-read on
-the parent's edge from the same `FieldFinding` the subgraph answered it from — and no terminal node
-writes a `FieldFinding`, so the second reading is the first one's answer by construction.
+This is `builder.PENDING_STAGES`, which now holds a single line. The builder's own entry is longer
+than what follows; it is summarised here and quoted in full by `python -m lpr_cpe.cli topology`.
 
 **`__onward__:preventive_maintenance`** — the seam from a preventive disposition into field planning.
 P14 exists, but nothing routes into it from here. `plan_preventive_field_work` records that a visit
@@ -479,7 +540,40 @@ which is exactly what `build_field_requirement` consumes, but a preventive case 
 `resolution_plan` and no `ResolutionOption` for P14 to select, so the two cannot be joined by an edge
 without first deciding what a preventive `ResolutionOption` is.
 
+That is a seam and not an oversight, and the distinction is worth keeping: every other entry that ever
+sat in this list waited on a stage that did not exist, while this one waits on two stages that both
+exist and disagree about what is handed over between them. The sweep in §6 reaches
+`preventive_maintenance` zero times under the profile it uses, so nothing measures the seam from
+outside either.
+
 ### What is no longer open
+
+**`D08:plant_path` and `__onward__:field_execution`** — one gap seen from two sides: the plant branch
+reached from `field_execution` after a handover, closed on 2026-08-20, and the same branch reached
+directly from D08 with no Clean Boots visit behind it, closed on 2026-08-21. P21 is built as
+`plant_execution`; D19 and D20 are wired at the parent; the D08-direct entrance is `plant_referral`.
+§3 draws both interiors.
+
+Two things learned in closing them are worth keeping, because both were wrong in a way that reasoning
+alone did not catch. The first: `__onward__:field_execution` had claimed the blocker was a missing
+*capability* — that D19 would answer `await_plant` for every incident forever, and D20 would sit
+behind an arm no state could enter. Measured against the shipped `route_plant_outcome`, all three of
+D19's arms were enterable; the enumeration behind the claim was keyed on MR status and had no row for
+the empty case. What actually blocked it was that **the subgraph had one exit and four things to say
+through it** — MR filed, Clean Boots visit closed, handover abandoned, no visit booked at all — and
+`_check_tables` admits only decisions that are in `routing.DECISIONS`, so a local gate could not
+separate them on the parent's edge. **D16 is that decision**, re-read on the parent's edge from the
+same `FieldFinding` the subgraph answered it from, and no terminal node writes a `FieldFinding`, so
+the second reading is the first one's answer by construction.
+
+The second: `D08:plant_path` looked like the larger of the two and turned out to be the smaller. Once
+P20, P21, D19 and D20 existed, what was left was one entrance — an MR filed from a NOC and plant
+evidence package rather than from a handover contract — and the lifecycle needed one
+`STAGE_TRANSITIONS` row, `(diagnosing, mr_raised) -> awaiting_approval`, and not the extra
+`TRANSITIONS` hop the Clean Boots analogy suggested: `diagnosing -> awaiting_approval` was already
+legal. Measured before it was wired:
+ten of the 41 fixture services answered `plant_path`, went to `END`, and **ended at `diagnosing` with
+no pause, no error and nothing to resume**, indistinguishable from a run that had finished.
 
 `D22:reconcile` was the fourth entry in this list until 2026-08-19. Stage 5's closure half — P24's
 reconciliation, D23, P25's controlled closure, P26's labelling and D24 — is built and wired, and
@@ -491,20 +585,44 @@ which by itself held every incident short of closure through three retries and t
 ## 6. What "complete" means for the part that is built
 
 The reachable path — signal in, through diagnosis, through one of remote repair / self-help / field
-work, through post-fix validation and customer confirmation, to a reconciled and labelled closure —
-is whole, and every branch off it either reaches a real node or reaches one of the three boxes above.
-There are no dangling edges and no node without a predecessor; `builder._check_tables`,
+work / plant referral, through post-fix validation and customer confirmation, to a reconciled and
+labelled closure — is whole, and every branch off it either reaches a real node or reaches the one
+box above. There are no dangling edges and no node without a predecessor; `builder._check_tables`,
 `_check_chains` and `_check_pending_stages` raise `GraphTopologyError` at build time if that stops
 being true, so it is checked on every import rather than asserted here.
 
-One caveat that the topology cannot show: **no fixture drives the parent all the way into Stage 5.**
-Swept over all 41 fixture services under three case profiles, 20 stop at `validating`, 20 at
-`diagnosing` and one escalates. The simulator derives telemetry from each service's static `health`
-field, so no repair this workflow performs changes a reading, `assess_restoration` scores every fix
-as having cleared 0% of the anomaly, and D21 answers `retry_diagnosis` until the resolution budget
-escalates. Stage 5 is therefore covered by seeding P22's `ValidationResult` onto a real parent run —
-see `tests/unit/test_subgraph_reconciliation_closure.py`. Making a fixture restore is a simulator
-change, not a graph one.
+One caveat the topology cannot show: **exactly one of the 41 fixture services reaches Stage 5, and it
+is the one that was healthy to begin with.** Swept over every service as a high-severity
+`proactive_alarm`, answering each approval `approved` with the role the kind requires and resuming
+until no interrupt remains: **40 escalate and one closes.** The one that closes is `SVC-UT-001-B-01`,
+whose fixture `health` is `pon_healthy`, and it goes `remote_resolution` → `restoration_validation` →
+`reconciliation_closure`.
 
-The gate on 2026-08-20, from the repo root, all four exiting 0: `ruff check`, `ruff format --check`
-(130 files), `mypy --strict src/lpr_cpe` (106 source files), `pytest` (888 passed).
+Where the other 40 stop, and on which budget:
+
+| runs | stops on | stages reached |
+| --- | --- | --- |
+| 20 | `node_reentries` 6 of 6 | field planning and execution, looping |
+| 10 | `node_reentries` 6 of 6 | `plant_referral` then `plant_execution` — D08's arm |
+| 9 | `resolution_cycles` 6 of 6 | field work, then delimited into `plant_execution` |
+| 1 | `resolution_cycles` 6 of 6 | remote, self-help, field work, `plant_execution` |
+
+Read that table with the count of runs that reach each stage beside it — `field_planning` 30,
+`field_execution` 30, `plant_execution` 20, `plant_referral` 10, `remote_resolution` 2, `self_help` 1,
+`restoration_validation` 1, `reconciliation_closure` 1, `preventive_maintenance` 0 — and one cause
+accounts for the whole shape. **Nothing a repair does changes what a later read sees.** The simulator
+derives telemetry from each service's static `health` field: `Fixtures.telemetry` is keyed on it, five
+call sites across four simulators read it, and nothing in `src` writes it. So a fix is followed by the
+same readings that motivated it, the loops re-decide the same way, and a budget is what ends the run.
+`plant_execution`'s ten are the same story through a different mechanism — no simulator ever moves an
+MR to `completed` (EXEC-2 in `docs/vendor-integration-gaps.md`: nothing pushes OSP's progress at us),
+so D19 answers `await_plant` every lap until the guard's ceiling.
+
+That is a simulator gap, not a graph one, and it is the reason Stage 5 is covered instead by seeding
+P22's `ValidationResult` onto a real parent run — see
+`tests/unit/test_subgraph_reconciliation_closure.py`. The one closure above is the sole end-to-end run
+the fixtures produce unaided, and it is not a demonstration that repair works: it is a service that
+needed none.
+
+The gate on 2026-08-21, from the repo root, all four exiting 0: `ruff check`, `ruff format --check`
+(135 files), `mypy --strict src/lpr_cpe` (109 source files), `pytest` (916 passed).
