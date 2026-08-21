@@ -1,8 +1,15 @@
 # Operator dashboard: architecture and implementation plan
 
-**Status: proposed. Nothing here is built.** This document is a design to be argued with, not a
-record of work done. Where it states a measurement, the measurement was taken; where it states a
-choice, the choice is mine and is marked as such.
+**Status: proposed. Measurements re-taken on 2026-08-21; one phase of the plan has since landed.**
+This document is a design to be argued with, not a record of work done. Where it states a
+measurement, the measurement was taken; where it states a choice, the choice is mine and is marked
+as such.
+
+The exception to "nothing is built" is §7's phase 1: `awaiting_node_path` and `is_awaiting_human`
+exist at `graph/inspect.py:109` and `:161`. There is still no `src/lpr_cpe/api/` and no `dashboard/`,
+so phases 2 onward are unchanged. Every graph-shaped figure below was re-derived at the tree that
+closed the plant branch, and most of them moved — §3's `get_graph()` losses, §6.1's inventory, and
+the whole of the argument about what a rendering conceals.
 
 ## 0. What was asked, and what the specification says about it
 
@@ -94,10 +101,13 @@ and `approvals` unmoved at zero. `test_an_empty_resume_map_never_reaches_the_nod
 still passes. *What the retake changed is the evidence.* That test watches a node which writes an
 audit event when it runs, so an empty trail there proves the resume was dropped before delivery. **A
 gate node writes no audit event at all** — `request_dispatch_approval` is absent from the trail of a
-*successful* approval too, measured, and none of the six `request_*` nodes so much as names
-`audit_events`: all six delegate to `interrupts.request_approval`, whose return is `approvals` /
-`pending_approval` / `updated_at` and nothing else. So at the six gates a dashboard actually cares
-about, the audit trail cannot distinguish a dropped resume from a delivered one. The missing
+*successful* approval too, measured, and none of the eight gates so much as names `audit_events`:
+all eight delegate to `interrupts.request_approval`, whose return is `approvals` /
+`pending_approval` / `updated_at` and nothing else — re-measured on 2026-08-21, when two more gates
+existed than when this was written. Not "the `request_*` nodes", because there are nine of those and
+the ninth is the exception that matters: `request_additional_field_tests` is not a gate, calls no
+`request_approval`, and **does** write to the audit trail. So at the eight gates a dashboard actually
+cares about, the audit trail cannot distinguish a dropped resume from a delivered one. The missing
 **`ApprovalDecision`** is the only sign; the same gate handed a malformed but non-empty answer
 records one immediately. *Naive failure:* a form submitted before a selection is made looks to the
 operator like a click that did nothing, and looks to the audit trail like a click that never
@@ -191,9 +201,13 @@ nothing else. `bool(await awaiting_node_path(...))` therefore equals `await is_a
 and the tests assert that equivalence rather than leaving two spellings of one predicate to drift.
 
 **The returned path is not always two elements long, and a dashboard that assumes it is will be
-wrong on a third of the gates.** Measured on 2026-08-18: there are six approval gates, and the four
-that live inside a subgraph return a 2-tuple — `("self_help", "request_self_help_approval")` — while
-D06's and D07's are flat in the parent and return a 1-tuple, `("request_low_confidence_review",)`.
+wrong on a sixth of the places it can pause.** Re-measured on 2026-08-21 by walking the AST for
+calls to `interrupt` and `request_approval`, which is the only way to get this right — there are
+twelve pause sites, eight approval gates and four waits, and `request_additional_field_tests` is
+named like a gate and is not one, so matching on `request_*` reports nine. Ten of the twelve live
+inside a subgraph and return a 2-tuple — `("self_help", "request_self_help_approval")` — while D06's
+and D07's are flat in the parent and return a 1-tuple, `("request_low_confidence_review",)`. Both of
+the flat two are gates, so the split among the eight gates alone is six nested to two flat.
 The difference costs a renderer more than a length check. For the flat pair the interrupted task has
 **no child state at all** — `tasks == [("request_low_confidence_review", None)]` — so a view
 generalised from the nested case that reaches for `.tasks[0].state.values` gets `None` rather than a
@@ -204,21 +218,52 @@ nested and flat shapes against each other and has been seen to go red;
 
 **D1 — the node path is derived from the snapshot walk, not from the interrupt id or from
 `get_graph()`.** The interrupt id is opaque (C4). `get_graph()` is separately lossy, and the loss was
-re-measured on 2026-08-18 against langgraph 1.2.11, where two rules in `pregel/_draw.py` cause it:
-`add_edge` returns early when an edge with the same `(source, target)` already exists, and the
-drawing keeps a branch label only when it differs from the target's name
-(`data=label if label != dest else None`). Between them those two rules drop **ten of the
-twenty-nine answers `BRANCH_TARGETS` declares** — six collide with the uniform `__escalated__` edge
-to `END` (D01 `quarantine`, D02 and D05 `manual_review`, D08 `plant_path`, D10 and D12 `verify`),
-three lose a label that happens to equal its target (D11 `self_help`, D11 and D12 `field_planning`),
-and D03 `continue` collides with its sibling `associate` on the pair they share.
+re-measured on 2026-08-21 against langgraph 1.2.11 — the same version as before, so what changed
+below is the graph and not the library. Two rules in `pregel/_draw.py` cause it: `add_edge` returns
+early when an edge with the same `(source, target)` already exists, and the drawing keeps a branch
+label only when it differs from the target's name (`data=label if label != dest else None`).
 
-**All five `PENDING_STAGES` exits are among the casualties, and two of them are worse than dropped —
-they are mislabelled.** The three answer-shaped exits are in the list above. The other two,
-`__onward__:field_execution` and `__onward__:preventive_maintenance`, leave terminal nodes whose
-`ONWARD` and `ESCALATED` arms both point at `END`; the drawing keeps one edge for the pair and
-labels it `__escalated__`. So a graph rendered from `get_graph()` states that those stages end in a
-budget escalation, when what actually happens is that the next stage was never written.
+`BRANCH_TARGETS` now declares **41 arms across its 17 parent-wired decisions**, and of those the
+drawing carries **30**. The eleven it does not split into two unequal groups:
+
+| Missing because | Count | Which |
+| --- | --- | --- |
+| collided with the uniform `__escalated__` edge to `END` | 3 | D01 `quarantine`, D02 and D05 `manual_review` |
+| collided with a sibling on the pair they share | 1 | D03 `continue` against `associate` |
+| the label equalled its target's name | 3 | D11 `self_help`, D11 and D12 `field_planning` |
+| never offered as an edge at all | 4 | D07 `continue`, D08 `continue`, D09 `self_help_check`, D19 `restored` |
+
+**The first three groups are the same seven the two rules would have dropped in any case; the fourth
+is a category the 2026-08-18 pass did not name, and it is not the library's fault.** A chained
+decision is flattened into its source node's path map, so an arm whose target is another *question*
+rather than a node never reaches `add_conditional_edges` — D19 `restored` is the newest of the four,
+and `get_graph()` cannot lose what it was never shown.
+
+Against 2026-08-18's **ten of twenty-nine**, that is seven of forty-one, and the set is worth reading
+rather than the ratio. **All three of the recovered arms recovered for the same reason: they stopped
+answering `END`.** D08 `plant_path` now names `plant_referral`, and D10 and D12 `verify` both name
+`restoration_validation`, so none of them collides with the escalation edge any more. The
+label-equals-target group is *unchanged* — still exactly D11 `self_help` and D11 and D12
+`field_planning` — which is the useful part: **building four subgraphs added four node names an
+answer could have collided with, and none of them did.** The rule punishes the convention of naming
+an answer after its destination, and only the three arms that already did it are caught.
+
+**`xray=True` is not the way out, and measuring it is what settles the question.** It expands every
+subgraph, so it reaches **75 real nodes — precisely the registry total below** — but it loses *more*
+of the answers, not fewer: counted per source node, the arms the drawing fails to carry go from 9 of
+61 to **27 of 61**. The expansion re-parents an edge leaving a subgraph onto that subgraph's own
+`__end__` and relabels it, so what the parent declared as D12 `field_planning` becomes
+`field_planning:__end__ --__onward__--> field_execution:__start__`. The two renderings are therefore
+lossy in different halves — `xray=False` has the parent's answers and none of the interiors,
+`xray=True` has the interiors and loses three times as many answers — and neither is a topology.
+
+**The one remaining `PENDING_STAGES` exit is still mislabelled rather than merely dropped.**
+`__onward__:preventive_maintenance` leaves a terminal node whose `ONWARD` and `ESCALATED` arms both
+point at `END`; the drawing keeps one edge for the pair and labels it `__escalated__`. All three
+terminal nodes are drawn that way — `preventive_maintenance`, `reconciliation_closure` and
+`record_escalation` — and only the first is an unwritten seam. So the label a naive rendering shows
+does not distinguish a deliberate ending from a missing one, and it reports the missing one as a
+budget escalation, which is a different and far more reassuring lie.
 
 `builder.BRANCH_TARGETS` + `DECISION_AFTER` + `routing.DECISIONS` are the authoritative topology,
 and `_check_tables()` already holds them against each other at compile time.
@@ -332,25 +377,37 @@ declared and permanently unused.
 
 ## 6. What the two halves of the request actually mean
 
-### 6.1 "Each node visible" — 54 nodes, and a state per node
+### 6.1 "Each node visible" — 75 nodes, and a state per node
 
-The inventory, measured on 2026-08-18:
+The inventory, re-measured on 2026-08-21:
 
 | Registry | Count | Nodes |
 | --- | --- | --- |
-| `graph.nodes.PARENT_NODES` | 16 | `receive_signal` … `record_escalation` |
+| `graph.nodes.PARENT_NODES` | 17 | `receive_signal` … `record_escalation` |
 | `subgraphs.remote_resolution.REMOTE_RESOLUTION_NODES` | 6 | `select_remote_action` … `abandon_remote_action` |
 | `subgraphs.self_help.SELF_HELP_NODES` | 8 | `select_self_help_script` … `abandon_self_help` |
 | `subgraphs.field_planning.FIELD_PLANNING_NODES` | 8 | `build_field_requirement` … `abandon_field_planning` |
 | `subgraphs.field_execution.FIELD_EXECUTION_NODES` | 11 | `open_field_visit` … `abandon_handover` |
+| `subgraphs.plant_referral.PLANT_REFERRAL_NODES` | 5 | `evaluate_plant_referral` … `abandon_plant_referral` |
+| `subgraphs.plant_execution.PLANT_EXECUTION_NODES` | 3 | `search_plant_mr` … `capture_plant_evidence` |
+| `subgraphs.restoration_validation.RESTORATION_VALIDATION_NODES` | 3 | `await_service_stability` … `assess_restoration` |
+| `subgraphs.reconciliation_closure.RECONCILIATION_CLOSURE_NODES` | 9 | `reconcile_linked_systems` … `update_kpis_and_learning` |
 | `subgraphs.preventive_maintenance.PREVENTIVE_MAINTENANCE_NODES` | 5 | `assess_predictive_risk` … `record_monitoring` |
-| **total** | **54** | plus `routing.DECISIONS` — 24 declared, 12 wired in the parent |
+| **total** | **75** | plus `routing.DECISIONS` — 24 declared, 17 wired in the parent |
 
-Six registries, not three, and the count is the sum of them rather than of anything the parent
-graph knows: `builder.SUBGRAPH_NODES` adds five compiled graphs to the parent under one name each,
-so the parent itself has 21 nodes and `get_graph()` draws 21 — the 38 steps inside the five
-subgraphs are exactly what that number omits. The dashboard's inventory is the 54, which is why it
-has to be assembled from the registries and not read off the compiled graph.
+Ten registries, not six, and the count is the sum of them rather than of anything the parent graph
+knows: `builder.SUBGRAPH_NODES` adds nine compiled graphs to the parent under one name each, so the
+parent itself has 26 nodes and `get_graph()` draws 26 — the 58 steps inside the nine subgraphs are
+exactly what that number omits.
+
+**The earlier version of this section said the inventory therefore "has to be assembled from the
+registries and not read off the compiled graph", and that is not true: `get_graph(xray=True)`
+returns exactly 75 real nodes, the same total, alongside 13 `__start__`/`__end__` pseudo-nodes to
+filter out.** The reason to prefer the registries is the one §3 measured, and it is about edges
+rather than nodes — xray reaches every node and, counted per source, loses 27 of the 61 arms where the
+unexpanded drawing loses 9. So the registries are the source for the inventory because they are the
+same names `check_node_registry` holds the audit trail against at import, and because the thing a
+dashboard needs next — which answer led here — is not in either rendering.
 
 The per-node state comes from three sources that already exist and are already checkpointed. **No
 streaming API is required for any of it** (C5):
@@ -361,32 +418,43 @@ streaming API is required for any of it** (C5):
 | done (×n) | `node_visits[name]` | written by the `@node` decorator on **every** node, unconditionally — including the budget-escalation path. Reduces per-key `max`, so a replay cannot inflate it |
 | **waiting on a human** | `awaiting_node_path()` (§3) | the only node that can be *currently* paused |
 | what it did | `audit_events` filtered on `.node` | every event carries the node name, and `check_node_registry` guarantees at import that the name in the audit trail equals the name in the topology |
-| unreachable today | `builder.PENDING_STAGES` | the five unwired exits, named rather than hidden |
+| unreachable today | `builder.PENDING_STAGES` | the one unwired exit, named rather than hidden |
 
-That last row is a deliberate inclusion, and the reason has changed since this section was first
-written — it has got *better*, not weaker. When six of twenty-four decisions were wired, the
-argument was simply that most of the graph was unbuilt and a tidy drawing would hide it. That is no
-longer the shape of it. Measured on 2026-08-18: eighteen of the twenty-four are wired — twelve in
-the parent's `BRANCH_TARGETS` and six more inside the subgraphs, where `field_planning` answers D13,
-D14 and D15 and `field_execution` answers D16, D17 and D18. Only six routers are reachable from no
-graph at all: D19 to D24.
+That last row is a deliberate inclusion, and the argument behind it has now inverted twice. When six
+of twenty-four decisions were wired, the point was simply that most of the graph was unbuilt and a
+tidy drawing would hide it. On 2026-08-18 that became eighteen of twenty-four, and the point became
+that three quarters wired *renders as a workflow that looks finished*. Re-measured on 2026-08-21 from
+`python -m lpr_cpe.cli topology` and the subgraphs' own `add_conditional_edges` call sites: **all 24
+are wired — 17 on a parent edge and 7 inside a subgraph — and `PENDING_STAGES` is down to a single
+entry.** Every router is now reachable from some graph.
 
-Which makes the concealment *more* dangerous rather than less. Three quarters wired renders as a
-workflow that looks finished, and the six that are missing are not a scattered remainder. The
-specification names five stages; against its own headings, D19 and D20 are Stage 4's Dirty Boots and
-plant half, and D21 to D24 are the whole of Stage 5. So what is unwired is every question between
-"the repair was attempted" and "the incident is closed". `PENDING_STAGES` says as much in its
-entries for `D10:verify` and `D12:verify`: Stage 5 "is where every successful resolution ends up",
-and it does not exist.
+**So the row cannot go, but it can no longer carry the argument on its own, because what a rendering
+now conceals is not an absence.** Built and wired is not the same as driven end to end. §6 of
+`docs/workflow-diagram.md` owns that measurement and is where it should be read: swept over all 41
+fixture services, answering every approval, **one reaches closure and forty escalate** — and the
+forty do not stop at a gap in the graph, they exhaust a budget going round a loop that is fully
+wired. A dashboard rendering the topology would show all five stages present and connected, which is
+true, and would say nothing about the fact that almost nothing gets to the fifth.
 
-**No incident this graph runs can reach closure, and a dashboard drawing only what runs would not
-show that.** It would show four stages that each terminate tidily at `END`, and nothing to say that
-the fifth is where they were all supposed to go. §3 measured what those terminating arrows are
-labelled: two of the five pending exits are drawn `__escalated__`, so a naive rendering does not
-merely omit the gap — it reports it as a budget escalation, which is a different and far more
-reassuring lie.
+That is a harder thing to surface than an unwired exit, and it is the reason the "done (×n)" row
+above counts visits rather than recording a boolean. Measured on one of the forty: 21 distinct nodes
+for 42 visits, with `open_field_visit` reached **seven** times against a re-entry limit of six — on
+the plant path it is `search_plant_mr` at seven instead, which is D19's `await_plant` self-loop. A
+node with a 7 beside it is the visible shape of a loop that is not converging; the same node marked
+merely "done" is indistinguishable from one that ran once and succeeded. **The `PENDING_STAGES` row
+and the visit counts are answers to the same question at two different scales** — what this graph
+cannot do, and what it does not in practice manage to do — and a dashboard that shows only the first
+will be reassuring for the wrong reason.
 
-Naming the unreachable exits is therefore the same failure the README's "four things this table
+§3 measured what the one remaining exit's arrow is labelled, and it is worse than dropped: the
+drawing calls it `__escalated__`, identically to the two terminal nodes that are *meant* to end
+there. So a naive rendering does not merely omit the seam — it reports it as a budget escalation.
+**And the camouflage is what makes that expensive here rather than merely untidy:** forty of the
+forty-one runs above really do end in a budget escalation, so the one arrow that says "escalated"
+falsely is hidden among a great many that say it truthfully, and no reader has a reason to look
+twice.
+
+Naming the unreachable exit is therefore the same failure the README's "four things this table
 would otherwise be expected to list" paragraph exists to prevent, applied to the one part of the
 graph that a plausible rendering makes look complete.
 
@@ -417,7 +485,21 @@ measured from `rbac.approvers_for`:
 | `high_blast_radius_action` | admin, noc_supervisor |
 | `exceptional_closure` | admin, noc_supervisor |
 
-`automation` appears in none, by design.
+`automation` appears in none, by design. Re-measured on 2026-08-21 against `rbac.approvers_for`:
+unchanged, row for row, despite two new gates landing.
+
+**Six kinds but eight gates, and one kind is now raised from two different nodes.**
+`ApprovalKind.CLEAN_TO_DIRTY_HANDOVER` is passed as `kind=` at both `field_execution.py:1573` and
+`plant_referral.py:631` — the same authority asked for once after a Clean crew has attended, and once
+on the path where none did. The split is clean and worth stating because it decides what the form may
+derive and what it must display. `build_request` takes `required_role` and `expires_at` from
+`ctx.policy.pack.approvals[kind]`, so **everything that governs who may answer and for how long is
+keyed on the kind and identical at both sites** — one form, one role list, one validation path.
+`question`, `recommendation` and `risk_summary` are caller-supplied and differ: the plant gate's
+question says in as many words that "no premises visit was made, so this package is built from
+records", which the field gate's does not. **So the rule is render `question`, never synthesise a
+title from `kind`** — a screen that captions itself "clean to dirty handover" is not wrong so much as
+silent about the one thing the approver needs, and the payload already carries it.
 
 **Form 2 — customer response.** Raised by `self_help.await_customer_response`. Payload
 `{"customer_response_request": {...}, "accepted_responses": ["completed", "declined"]}`. Parsed by
@@ -456,7 +538,7 @@ respect.
 
 **Phase 2 — the read-only API.** `src/lpr_cpe/api/` with `lifespan` wrapping `checkpointer_scope`,
 and the read endpoints only: incident state (via `effective_state`), pending approval, interrupt
-payloads, node path, and the topology — the node inventory from the six registries (§6.1) and the
+payloads, node path, and the topology — the node inventory from the ten registries (§6.1) and the
 decisions from the three tables (§3). No writes at all.
 *Why reads first:* it closes the largest specification gap, it is safe by construction, and it
 unblocks phase 3 without any of the C2/C3 risk. `api/` is `docs/vendor-integration-gaps.md`'s and
@@ -514,10 +596,12 @@ proceeds with a **recorded rejection nobody made**. This is C3, and it is the on
 the UI bypassed entirely. *Red by:* enforcing only in Streamlit — accepted.
 
 **8.6 The dashboard's node list cannot drift from the graph's.** Assert the rendered inventory equals
-the union of the six registries. *Red by:* adding a node to a registry and not to the dashboard.
+the union of the ten registries. *Red by:* adding a node to a registry and not to the dashboard.
 The mirror of `check_node_registry`, one layer out. The registry count is itself the thing that
-drifts — this section said "three" while three more subgraphs were landing — so the assertion has to
-derive the union from `builder.SUBGRAPH_NODES` rather than from a list of imports.
+drifts, and it has now drifted twice: this section said "three" while three more subgraphs were
+landing, was corrected to six, and is ten as of 2026-08-21. **A written-down count is the wrong
+mechanism here** — the assertion has to derive the union from `builder.SUBGRAPH_NODES` rather than
+from a list of imports, and then the number in the prose stops being load-bearing.
 
 **8.7 The import boundary holds (D2).** Assert `lpr_cpe.graph` and `lpr_cpe.persistence` are absent
 from the dashboard package's import graph. *Red by:* one convenience import.
