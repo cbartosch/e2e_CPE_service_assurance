@@ -22,17 +22,36 @@ and a run that had done nothing was indistinguishable from one that had finished
 D08 diverts: plant faults whose crew is Dirty, and the back-office domains no crew attends at all.
 
 Re-swept with this stage wired, the ten stalls are gone: 40 escalated and 1 closed, no exceptions,
-and nothing left at `diagnosing`. What the ten do now, measured individually, is walk the whole arm
--- one visit each to `evaluate_plant_referral`, `prepare_plant_referral_approval` and
-`file_plant_referral_mr`, one `MRRecord` apiece, no abandons -- then cross into `plant_execution`,
-chase the MR six times and escalate on `node_reentries budget exhausted: observed 6, limit 6`.
+and nothing left at `diagnosing`. Those totals re-measured true. **What the ten do next was written
+from a drive that answered two of the five pause types, and most of it describes two runs rather
+than ten.** Re-measured with each pause type answered in the shape its own parser accepts:
 
-That last hop is worth being plain about, because "escalated" reads like failure. It is D19's
-pre-existing `await_plant` self-loop reaching the guard's ceiling: the simulated OSP never completes
-an MR, so the answer stays "still with OSP" until the budget stops it. The stage's own contribution
-is the difference between a run that stopped without a record and one that filed an MR, handed it to
-the stage that owns plant work, and escalated with a reason a supervisor can act on. Closing those
-ten needs an OSP that finishes repairs, which is the recovery-model gap, not this one.
+| services | `evaluate_plant_referral` | `search_plant_mr` | escalates on |
+| --- | --- | --- | --- |
+| `SVC-PO-042-A-04`, `SVC-UT-001-A-03` | 1 | 7 | `node_reentries`, 6 of 6 |
+| the five `SVC-VQ-002-A-*` and `-B-03` | 6 | 5 | `resolution_cycles`, 6 of 6 |
+| `SVC-VQ-002-B-01`, `-B-02` | 3 | 3 | reconciliation, after 3 attempts |
+
+So "one visit each to `evaluate_plant_referral` ... then chase the MR six times and escalate on
+`node_reentries budget exhausted: observed 6, limit 6`" is true of two of the ten. What does hold
+for all ten is the rest of that sentence: one visit each to `prepare_plant_referral_approval` and
+`file_plant_referral_mr`, one `MRRecord` apiece, no abandons. This stage behaves identically for
+every one of them; what the old figure got wrong is how far past it each run then gets.
+
+The ten are also the one part of the corpus a crew answer cannot move. Every column above is
+identical under a handover submission and a premises one, because D08 diverts these before any
+field visit happens, so there is no crew to ask.
+
+The `node_reentries` pair is worth being plain about, because "escalated" reads like failure. It is
+D19's pre-existing `await_plant` self-loop reaching the guard's ceiling: the simulated OSP never
+completes an MR, so the answer stays "still with OSP" until the budget stops it. The other eight
+stop before reaching that ceiling, and the reconciliation pair gets furthest of all -- they take a
+closed OSP report and are then caught by `reconcile_linked_systems` reporting `ours: closed` against
+`theirs: submitted`, which `docs/vendor-integration-gaps.md` EXEC-2 records as the missing jTrack
+feed rather than a fault in the graph. None of that changes this stage's own contribution: the
+difference between a run that stopped without a record and one that filed an MR, handed it to the
+stage that owns plant work, and escalated with a reason a supervisor can act on. Closing them needs
+an OSP that finishes repairs, which is the recovery-model gap, not this one.
 
 Why the evidence package is not a `HandoverContract`
 ---------------------------------------------------
