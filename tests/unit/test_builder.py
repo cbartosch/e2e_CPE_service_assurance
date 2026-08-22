@@ -506,17 +506,24 @@ async def test_a_fixture_runs_the_whole_parent_graph_without_writing_anything(
     `confirm_customer_outcome` only from D21's `confirm_outcome`, which is three stages past where
     any of these four gets to.
 
-    The governance five are asserted absent rather than left unmentioned, and that absence is the
-    measurement, not an accident of these four services: with both routers instrumented at
-    `_cascade`'s call site and all 82 fixture cases driven to completion, D06 and D07 were asked
-    134 times between them and every single answer was `continue`. The fixture corpus records no
-    `PolicyDecision` of either gating kind, and `route_rca_confidence`'s other opening -- `rca is
-    None` -- never fires either, because P10 always produces one. The arms are reachable and the
-    mechanism was watched working (`SVC-SJ-011-B-01-proactive_alarm` re-enters both decisions three
-    times as the retry arm carries it back upstream, seeing 0, then 1, then 2 policy decisions);
-    what the corpus lacks is a decision of the right *kind*. `test_governance_nodes.py` therefore
-    seeds one rather than hoping for it, and this test holds the complementary claim: nothing seeds
-    one by accident.
+    The governance five are asserted absent rather than left unmentioned, and what makes that a
+    measurement is narrower than this paragraph used to say. It cited a sweep of "82 fixture cases
+    driven to completion" in which "D06 and D07 were asked 134 times between them and every single
+    answer was `continue`", and concluded that the corpus records no `PolicyDecision` of either
+    gating kind. That conclusion is false. Re-swept with every pause type answered in the shape its
+    own parser accepts, nine of the 41 services reach `prepare_low_confidence_review` through
+    `D06:approve_low_confidence`; `graph.nodes.governance` carries the figures.
+
+    The assertion survives that because of where this run stops, not because the arm is
+    unreachable. Every count above is exactly 1 and the run ends on its first `__interrupt__`, so
+    D06 is asked once -- and all nine take the arm on their *second* ask, the first seeing no
+    demand of the kind because every writer of `policy_decisions` sits in a subgraph downstream of
+    D06. A first-pass assertion is the right one here and the wrong one to generalise from.
+
+    The other half of that paragraph re-measured true: `route_rca_confidence`'s second opening,
+    `rca is None`, fires at none of D06's 376 asks, because P10 always produces one.
+    `test_governance_nodes.py` therefore seeds the demand rather than hoping for it, and this test
+    holds the complementary claim: nothing seeds one by accident this early.
 
     This run is also what guards `_cascade`. Composing the chain has two halves -- the path map
     (`_terminal_targets`) and the router (`_cascade`) -- and only the map is asserted structurally,

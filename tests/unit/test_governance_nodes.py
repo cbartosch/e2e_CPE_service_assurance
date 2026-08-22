@@ -2,17 +2,25 @@
 
 Why this module seeds state instead of picking a fixture
 --------------------------------------------------------
-Every other stage in this suite is exercised by finding a service that reaches it. No service
-reaches these three arms, and that was measured rather than assumed: with `route_rca_confidence` and
-`route_safety_and_blast_radius` both instrumented at `builder._cascade`'s call site -- the only call
-whose answer moves the graph -- and all 41 fixture services driven to completion under both case
-types, D06 and D07 were asked **134 times between them and answered `continue` every single time**.
+Every other stage in this suite is exercised by finding a service that reaches it. **Two of these
+three arms are reached by no service. The third is, and this module used to say otherwise.** The
+old claim rested on instrumenting `route_rca_confidence` and `route_safety_and_blast_radius` at
+`builder._cascade`'s call site over a drive that answered two of the five pause types, which put
+D06 and D07 at "134 times between them and `continue` every single time".
+
+Re-swept with each pause type answered in the shape its own parser accepts, D06 answers
+`approve_low_confidence` for nine of the 41 services under either crew answer, while D07 answers
+`continue` at all 358 of its asks. So seeding is still the only way to reach
+`prepare_blast_radius_approval` and `record_escalation`, and it is no longer the only way to reach
+`prepare_low_confidence_review` -- the fixtures corroborate that pair, and the tests below pin the
+behaviour that a corpus-wide sweep is far too slow to assert. `graph.nodes.governance` has the
+figures.
 
 The arms are not dead, and `graph.nodes.governance` sets out why at length: both routers gate on
 `policy_decisions`, every writer of that field is inside a subgraph *downstream* of both decisions,
-and the retry arms carry a run back upstream of them. That loop was watched working --
-`SVC-SJ-011-B-01` under a proactive alarm asks both decisions three times, seeing 0, then 1, then 2
-policy decisions. What the corpus never produces is a decision of the two *kinds* these gates read.
+and the retry arms carry a run back upstream of them. That is exactly how the nine arrive: each
+takes the arm on its second D06 ask and never on its first. What the corpus never produces is a
+decision of the kind D07 reads.
 
 So the demand is seeded. `_seeded` runs the real parent up to a real node with `interrupt_after`,
 calls `aupdate_state` to append one `PolicyDecision`, and resumes. Nothing about the graph is

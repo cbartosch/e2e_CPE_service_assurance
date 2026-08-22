@@ -21,26 +21,45 @@ position in `PARENT_NODES` alone, which is the extension point its docstring ant
 
 What the fixtures do with these arms, measured
 ----------------------------------------------
-Nothing, and the reason is worth writing down before someone reads a green suite as coverage. Both
-routers were instrumented at `builder._cascade`'s call site -- the only call whose answer moves the
-graph -- and all 41 fixture services were driven to completion under both case types, resuming every
-interrupt with an approval. **134 invocations, 67 of D06 and 67 of D07, every one answering
-`continue`.** No fixture enters any of the three arms these nodes serve.
+**D06's review arm is taken. D07's two are not. This section used to say none of them was.** The
+figure it carried -- 134 invocations, 67 of D06 and 67 of D07, every one answering `continue` --
+came from routers instrumented at `builder._cascade`'s call site, over a drive that resumed *every
+interrupt with an approval*. Only two of the five pause types accept one, so that drive re-asked
+the same crew until a re-entry budget stopped it; `docs/workflow-diagram.md` §6 records the cost.
 
-That is not the same as the arms being dead, and the difference is the whole justification for this
-module. `route_rca_confidence` and `route_safety_and_blast_radius` both gate on `policy_decisions`,
-and every one of the four callers of `ctx.policy.evaluate` is inside a subgraph downstream of both
-decisions -- so a demand can only reach D06 or D07 second-hand, carried back by D10's
-`retry_diagnosis` to P07 or D12's to P10. That loop is real and it runs: on `SVC-SJ-011-B-01` under
-a proactive alarm, D06 and D07 are each asked three times, seeing 0, then 1, then 2 policy
-decisions. The mechanism works. What the corpus never produces is a decision of *these two kinds*
-before the loop closes -- the observed `required_approval_kind` at every ask is `None`.
+Re-measured with each pause type answered in the shape its own parser accepts, over all 41
+services under both crew answers, wrapping `DECISIONS[...].route` rather than the composed edge:
 
-So the arms are reachable and unexercised, which is precisely the case in which leaving them at
-`END` is dangerous rather than merely incomplete: `_check_pending_stages` puts it as "a run that
-stops there looks like a run that finished". Until this module existed, an incident whose remedies
-were all blocked by policy terminated silently with `escalated` false and the status still
-`diagnosing`.
+| gate | asks, handover / premises | `continue` | the other arms |
+| --- | --- | --- | --- |
+| D06 | 138 / 238 | 129 / 229 | `approve_low_confidence`, 9 and 9 |
+| D07 | 129 / 229 | 129 / 229 | none, in either sweep |
+
+The nine are `SVC-UT-001-B-01` and the eight `SVC-VQ-002-*`, the same nine under both crew
+answers, entering once each. The counts close against node entries rather than standing alone:
+D06 is asked after `determine_root_cause` (129 entries) *and* after the gate's own
+`request_low_confidence_review` (9), which is the 138.
+
+The mechanism this section already described is what carries the demand, and it is now watched
+rather than inferred. Both routers gate on `policy_decisions`, every caller of `ctx.policy.evaluate`
+is inside a subgraph downstream of both decisions, so a demand reaches D06 or D07 only second-hand,
+carried back by D10's `retry_diagnosis` to P07 or D12's to P10. All nine take the arm on their
+*second* ask and none on their first: ask 1 sees no demand of the kind and answers `continue`, ask
+2 sees one and answers `approve_low_confidence`, and every ask after that reads the recorded answer
+and continues. What was wrong was the generalisation drawn from it. "The observed
+`required_approval_kind` at every ask is `None`" holds for `HIGH_BLAST_RADIUS_ACTION` and not for
+`LOW_CONFIDENCE_RCA`, which `policies.engine._check_confidence` raises for any non-read-only action
+whose RCA sits under its class bar.
+
+`route_rca_confidence`'s other opening does still never fire. `rca is None` was not the clause
+behind any of D06's 376 asks, because P10 always produces one -- so the no-RCA half of
+`prepare_low_confidence_review`'s question is the part no fixture covers, and
+`test_governance_nodes.py` is the only thing holding it.
+
+D07's two arms being reachable and unexercised is precisely the case in which leaving them at `END`
+is dangerous rather than merely incomplete: `_check_pending_stages` puts it as "a run that stops
+there looks like a run that finished". Until this module existed, an incident whose remedies were
+all blocked by policy terminated silently with `escalated` false and the status still `diagnosing`.
 
 The consequence for the tests is that they cannot be fixture-driven. They seed `policy_decisions`
 and drive the real parent from there; see `tests/unit/test_governance_nodes.py`.
