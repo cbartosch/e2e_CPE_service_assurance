@@ -728,11 +728,27 @@ everything about what a visit needs beyond a crew type, and how far ahead this s
   operator's own screen?** All three are real deployments and the pack would permit any of them.
   Inherits JTRACK-1.
 
-  **The half of this entry that said an MR never leaves `submitted` is now closed.**
-  `graph/subgraphs/plant_execution.py` is P21/D19/D20 built and wired, and its `update_plant_mr` is
-  the only caller of `update_mr` in `src`. What is left is the feed, not the wait: when it exists,
-  `capture_plant_evidence` gains a second channel and `plant_report` is the one parser both go
-  through — exactly as FIELD-3 says a WFM completion feed would be for `field_submission`.
+  **This entry once said that half of it was now closed, and that was a misreading of what got
+  built.** `graph/subgraphs/plant_execution.py` is P21/D19/D20 built and wired, and its
+  `update_plant_mr` is the only caller of `update_mr` in `src` — but that call is a *chase*, and a
+  chase deliberately asks for nothing: its `parameters` carry `mr_ref`, `note` and `evidence_refs`
+  and **no `status`**, and `_requested_status` hands back the status jTrack was already holding when
+  none is asked. Wiring the only caller therefore moved no MR, and an MR still never leaves
+  `submitted`. Both of those are the right local behaviour; what is missing is the feed this entry
+  opens with, and no amount of graph work substitutes for it.
+
+  **What is new is that the gap is now reachable end to end, and it terminates two fixture runs.**
+  Under a HANDOVER submission `SVC-VQ-002-B-01` and `SVC-VQ-002-B-02` take D08's plant-referral arm,
+  file through `file_plant_referral_mr`, chase once through `update_plant_mr`, take a closed OSP
+  report through `capture_plant_evidence`, clear restoration, and are caught by
+  `reconcile_linked_systems` reporting `{'system': 'jtrack', 'record': 'mr', 'ours': 'closed',
+  'theirs': 'submitted'}`. Both then spend the pack's `max_retries: 3` in
+  `hold_for_reconciliation_retry` and escalate on *"reconciliation did not converge after 3 attempts;
+  jtrack still disagrees with the incident"*. That is each component behaving correctly: the incident
+  is finished, jTrack has not been told, and nothing in the build can tell it — so the reconciler is
+  right to refuse the closure. When the feed exists, `capture_plant_evidence` gains a second channel
+  and `plant_report` is the one parser both go through — exactly as FIELD-3 says a WFM completion
+  feed would be for `field_submission`.
 
   **This entry used to claim more than it could measure, and the correction is the useful half.** It
   said P21, D19 and D20 were unwritten *because* of this gap — that D19 would answer `await_plant`

@@ -77,10 +77,11 @@ keeps that list honest. The counts in the table above have no such guard — the
 why §0 says how to re-derive them. The remaining gap is drawn as a `PENDING` box below rather than
 as `END`.
 
-**Built and wired is not the same as driven end to end.** Exactly one of the 41 fixture services
-reaches Stage 5 under a full sweep, and it is the one whose fixture was healthy to begin with. §6
-measures where the other 40 stop, and why what stops them is a simulator gap rather than a graph
-one.
+**Built and wired is not the same as driven end to end.** Three of the 41 fixture services reach
+Stage 5 under a full sweep and one of them closes — the one whose fixture was healthy to begin with.
+§6 measures where the other 40 stop and gives the three reasons, all three of which are simulator or
+fixture gaps rather than graph ones. It also records that the sweep this replaces answered two of
+the five pause types and mis-attributed part of its own result.
 
 ---
 
@@ -542,8 +543,8 @@ without first deciding what a preventive `ResolutionOption` is.
 
 That is a seam and not an oversight, and the distinction is worth keeping: every other entry that ever
 sat in this list waited on a stage that did not exist, while this one waits on two stages that both
-exist and disagree about what is handed over between them. The sweep in §6 reaches
-`preventive_maintenance` zero times under the profile it uses, so nothing measures the seam from
+exist and disagree about what is handed over between them. The sweeps in §6 reach
+`preventive_maintenance` zero times under either crew answer, so nothing measures the seam from
 outside either.
 
 ### What is no longer open
@@ -591,38 +592,83 @@ box above. There are no dangling edges and no node without a predecessor; `build
 `_check_chains` and `_check_pending_stages` raise `GraphTopologyError` at build time if that stops
 being true, so it is checked on every import rather than asserted here.
 
-One caveat the topology cannot show: **exactly one of the 41 fixture services reaches Stage 5, and it
-is the one that was healthy to begin with.** Swept over every service as a high-severity
-`proactive_alarm`, answering each approval `approved` with the role the kind requires and resuming
-until no interrupt remains: **40 escalate and one closes.** The one that closes is `SVC-UT-001-B-01`,
-whose fixture `health` is `pon_healthy`, and it goes `remote_resolution` → `restoration_validation` →
-`reconciliation_closure`.
+One caveat the topology cannot show: **three of the 41 fixture services reach Stage 5, one of them
+closes, and which guard stops the other 40 depends on what the crew says.** Every service is swept as
+a high-severity `proactive_alarm`, and each of the five pause types is answered in the shape its own
+parser accepts: approvals `approved` with the role the kind requires, a field report to
+`field_submission_request`, an OSP report to `plant_report_request`, `"completed"` to
+`customer_response_request`, and the clock moved past `resume_at` for `stability_window_wait`.
 
-Where the other 40 stop, and on which budget:
+**The harness this replaces answered two of those five, and that is why the previous reading of this
+section was wrong.** It dispatched on `stability_window_wait` and `approval_request` and returned an
+approval payload for everything else, so `field_submission` and `plant_report` — which correctly
+refuse anything that is not a report — rejected it and the same crew was asked again until a
+re-entry budget tripped. Part of what this section recorded as a product defect was the sweep never
+answering. The numbers are therefore given per crew answer, because the reply decides the path and
+one sweep cannot report both: **HANDOVER**, the crew confirms a fault at the tap or ODP and plant
+work follows; **PREMISES**, the crew fixes it on site and none does.
 
-| runs | stops on | stages reached |
+Both sweeps close one and escalate 40. Which guard ends the run swaps almost completely between them,
+and the third row is a reason the previous table had no entry for at all:
+
+| stops on | HANDOVER | PREMISES |
 | --- | --- | --- |
-| 20 | `node_reentries` 6 of 6 | field planning and execution, looping |
-| 10 | `node_reentries` 6 of 6 | `plant_referral` then `plant_execution` — D08's arm |
-| 9 | `resolution_cycles` 6 of 6 | field work, then delimited into `plant_execution` |
-| 1 | `resolution_cycles` 6 of 6 | remote, self-help, field work, `plant_execution` |
+| `node_reentries` 6 of 6 | 22 | 2 |
+| `resolution_cycles` 6 of 6 | 16 | 36 |
+| `reconciliation did not converge after 3 attempts` | 2 | 2 |
+| closes | 1 | 1 |
 
-Read that table with the count of runs that reach each stage beside it — `field_planning` 30,
-`field_execution` 30, `plant_execution` 20, `plant_referral` 10, `remote_resolution` 2, `self_help` 1,
-`restoration_validation` 1, `reconciliation_closure` 1, `preventive_maintenance` 0 — and one cause
-accounts for the whole shape. **Nothing a repair does changes what a later read sees.** The simulator
-derives telemetry from each service's static `health` field: `Fixtures.telemetry` is keyed on it, five
-call sites across four simulators read it, and nothing in `src` writes it. So a fix is followed by the
-same readings that motivated it, the loops re-decide the same way, and a budget is what ends the run.
-`plant_execution`'s ten are the same story through a different mechanism — no simulator ever moves an
-MR to `completed` (EXEC-2 in `docs/vendor-integration-gaps.md`: nothing pushes OSP's progress at us),
-so D19 answers `await_plant` every lap until the guard's ceiling.
+Runs entering each stage, on the same two sweeps:
 
-That is a simulator gap, not a graph one, and it is the reason Stage 5 is covered instead by seeding
-P22's `ValidationResult` onto a real parent run — see
-`tests/unit/test_subgraph_reconciliation_closure.py`. The one closure above is the sole end-to-end run
-the fixtures produce unaided, and it is not a demonstration that repair works: it is a service that
-needed none.
+| stage | HANDOVER | PREMISES |
+| --- | --- | --- |
+| `field_planning`, `field_execution` | 32 each | 32 each |
+| `plant_execution` | 20 | 20 |
+| `plant_referral` | 10 | 10 |
+| `restoration_validation` | 9 | 29 |
+| `reconciliation_closure` | 3 | 3 |
+| `remote_resolution` | 2 | 2 |
+| `self_help` | 1 | 1 |
+| `preventive_maintenance` | 0 | 0 |
 
-The gate on 2026-08-21, from the repo root, all four exiting 0: `ruff check`, `ruff format --check`
+**Three causes account for that shape, not one**, and each is a gap already written down elsewhere.
+The previous revision named a single cause, and it was the wrong one for most of the runs.
+
+* **`node_reentries`, which dominates HANDOVER — EXEC-1.** The handover chain *is* entered, which is
+  the largest correction here: `determine_delimiter`, `request_additional_field_tests`,
+  `evaluate_handover_policy` and `build_handover_contract` are each reached by 20 services. D18 then
+  answers `reject` on every lap, because `HandoverContract.missing_items` still holds `ruled_out` and
+  no first-cycle RCA rejects a hypothesis. `prepare_handover_approval`, `request_handover_approval`
+  and `file_plant_mr` stay at 0 — which is what EXEC-1 already said from a single-service drive, and
+  what the fixture set now says as a whole.
+* **`resolution_cycles`, which dominates PREMISES — the telemetry defect.** `Fixtures.telemetry` is
+  keyed on each service's static `health`. Ten sites in `src` read that field by subscript: nine in
+  the four device simulators, and `Fixtures.telemetry` itself at `simulation/loader.py:125`, which
+  those four call from five places. The one line that ever *sets* the key is the fixture builder at
+  `simulation/fixtures/network.py:546`, so nothing an adapter or a node runs moves it. The crew
+  reports the fix,
+  `close_clean_boots_visit` runs for 20 services, `restoration_validation` goes from 9 entrants to 29
+  — and it then re-measures exactly what motivated the repair, so the loop re-decides the same way
+  until a budget ends it. The two figures agree: the 9 that reach validation by other routes plus the
+  20 clean-boots closures are the 29.
+* **Reconciliation, in both modes, for the two runs that filed an MR and got that far — EXEC-2.**
+  `reconcile_linked_systems` reports `{'system': 'jtrack', 'record': 'mr', 'ours': 'closed',
+  'theirs': 'submitted'}` on `SVC-VQ-002-B-01` and `-B-02`, `hold_for_reconciliation_retry` runs
+  three times, and `ReconciliationPolicy.max_retries` escalates. Nothing is miswired: P21's
+  `update_plant_mr` sends a *chase* and deliberately no `status`, because only OSP may move an OSP
+  ticket — and no feed brings OSP's move back to us. This is the open half of EXEC-2 seen end to end
+  for the first time, and it took answering the OSP interrupt to see it at all.
+
+The one that closes is `SVC-UT-001-B-01` in both modes, whose fixture `health` is `pon_healthy`. It
+runs `remote_resolution` → `restoration_validation` → `reconciliation_closure`, laps
+`await_service_stability` four times, and enters `close_linked_records` and `update_kpis_and_learning`
+once each. It is still not a demonstration that repair works: it is a service that needed none.
+
+So the closure stage is exercised by the fixtures after all — three runs enter it, one closes, two
+escalate on a mismatch that is real — which is more than this section previously credited. Seeding
+P22's `ValidationResult` onto a real parent run in
+`tests/unit/test_subgraph_reconciliation_closure.py` is still the right way to cover it, but now for
+a smaller reason: three unaided runs are a thin sample, not an absent one.
+
+The gate on 2026-08-22, from the repo root, all four exiting 0: `ruff check`, `ruff format --check`
 (135 files), `mypy --strict src/lpr_cpe` (109 source files), `pytest` (916 passed).

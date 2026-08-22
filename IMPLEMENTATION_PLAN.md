@@ -454,9 +454,9 @@ silent filter, whatever causes it.
 | `graph/subgraphs/remote_resolution.py` — P12, D10, the high-risk approval interrupt | done | 21 committed tests; mutation-checked 9/9 in the original sweep and 2/2 again when the KPI assertions were added; driven through the real parent graph rather than a hand-built plan |
 | `graph/subgraphs/self_help.py` — P13 and D12, the customer-response interrupt | done | 25 committed tests, mutation-checked 11/11; three KPI defects found by execution (below) |
 | `graph/subgraphs/field_planning.py` — P14, D13, P15, D14, D15, P16 | done | 20 committed tests; the joint incident driven from the real parent, which since the fork was wired runs into this subgraph by itself — the fixture passes `interrupt_after=["generate_resolution_options"]` to stop it. `is_field_option` was measured wrong for 16 of 50 arrivals and `is_dispatchable_option` written to narrow it |
-| `graph/subgraphs/field_execution.py` — P17, D16, D17, P18, D18, P19, P20 | done | 13 committed tests, mutation-checked 10/10. Driven from the real parent through `interrupt_after=["field_planning"]`, so the arriving state is one the graph actually produces. Two constraints were found by execution rather than reasoned about: the handover-gate router is wired on **two** edges and a state where both answer alike cannot tell a mis-wire from a correct wiring, so that test drives a discriminating pair; and `_Ticking` advances on every read of `local_time`, so a context shared across drives makes a later verdict depend on how many nodes an earlier drive ran — each drive builds its own. The stage's headline finding is that **no fixture reaches its own handover chain**: a contract is incomplete until something is ruled out, no first-cycle RCA rejects a hypothesis, so D18 onwards is unreachable end to end and the tests that cover it seed a rejection to get there. That is gap EXEC-1 in `docs/vendor-integration-gaps.md`, and a test asserts the emptiness rather than leaving it implied. **Re-measured on 2026-08-21 and unchanged, which is not what building the plant stages predicted.** Sweeping all 41 services and counting visits per node: `open_field_visit` 30 and `determine_delimiter` 20, then `evaluate_handover_policy`, `build_handover_contract`, `prepare_handover_approval`, `request_handover_approval`, `file_plant_mr`, `close_clean_boots_visit` and `abandon_handover` **0 each**. Ten runs do now get from here to `plant_execution`, which looked like the handover chain finally being driven and is not: they leave through D16's `delimit` arm off the delimiter path, so every node of the handover chain is still unreached and EXEC-1 is exactly as open as it was |
+| `graph/subgraphs/field_execution.py` — P17, D16, D17, P18, D18, P19, P20 | done | 13 committed tests, mutation-checked 10/10. Driven from the real parent through `interrupt_after=["field_planning"]`, so the arriving state is one the graph actually produces. Two constraints were found by execution rather than reasoned about: the handover-gate router is wired on **two** edges and a state where both answer alike cannot tell a mis-wire from a correct wiring, so that test drives a discriminating pair; and `_Ticking` advances on every read of `local_time`, so a context shared across drives makes a later verdict depend on how many nodes an earlier drive ran — each drive builds its own. The stage's headline finding is that **the handover chain is entered and stalls at D18**: a contract is incomplete until something is ruled out, no first-cycle RCA rejects a hypothesis, so D18 onwards is unreachable end to end and the tests that cover it seed a rejection to get there. That is gap EXEC-1 in `docs/vendor-integration-gaps.md`, and a test asserts the emptiness rather than leaving it implied. **This row previously said no fixture reaches the chain at all, and that was a defect in the sweep, not a finding.** The old harness answered two of the five pause types and handed an approval payload to `field_submission_request`, which `field_submission` rejects — so no crew ever reported and `determine_delimiter` had no finding to act on. Re-swept on 2026-08-22 answering all five, and counting the services that enter each node: `open_field_visit` **32**, and on a HANDOVER submission `determine_delimiter`, `request_additional_field_tests`, `evaluate_handover_policy` and `build_handover_contract` **20 each**. On a PREMISES submission `close_clean_boots_visit` is **20**. Only `prepare_handover_approval`, `request_handover_approval`, `file_plant_mr` and `abandon_handover` are 0 under both. So EXEC-1 is open exactly where `docs/vendor-integration-gaps.md` already said it was from a single-service drive — D18 rejects, and the three nodes past it are never entered — and this row was the one that disagreed. Twenty runs reach `plant_execution` and ten reach `plant_referral`, and both counts are identical under the two submissions. `plant_execution` has two entrances from elsewhere — `SUBGRAPH_SUCCESSOR` from `plant_referral`, and D16's `delimit` arm — plus D19's `await_plant` back into itself. Ten of the twenty arrive through `plant_referral`; how the other ten arrive is **not** measured, and this row asserts nothing about it, because the obvious answer cannot be right as stated: a PREMISES crew never delimits and `determine_delimiter` is 0 in that sweep, yet the count is 20 there too |
 | `graph/subgraphs/plant_referral.py` — P19 and P20 on D08's direct arm | done | 11 committed tests. The arrival is the D08 fork itself, produced by running the parent with `interrupt_after=["generate_resolution_options"]` rather than assembled by hand. It landed together with its own wiring in `e78421e`, and the guard was watched red first: with `BRANCH_TARGETS["D08"]["plant_path"]` still pointing at `END`, the test that asserts a plant arrival fails |
-| `graph/subgraphs/plant_execution.py` — P20's update instruction and P21, with D19 and D20 after it | done | 12 committed tests, driven on from `interrupt_after=["field_planning"]`, the same parent seam field execution's tests use. D19's `await_plant` answer targets this subgraph, so along with `restoration_validation` it is one of the two a decision of its own can re-enter, and that shows up in the sweep: on D08's direct arm `search_plant_mr` peaks at seven visits against a re-entry limit of six, which is what stops those ten runs |
+| `graph/subgraphs/plant_execution.py` — P20's update instruction and P21, with D19 and D20 after it | done | 12 committed tests, driven on from `interrupt_after=["field_planning"]`, the same parent seam field execution's tests use. D19's `await_plant` answer targets this subgraph, so along with `restoration_validation` it is one of the two a decision of its own can re-enter, and that shows up in the sweep: on D08's direct arm `search_plant_mr` reaches seven visits against a re-entry limit of six. **This row used to add "which is what stops those ten runs", and that half came from the harness that never answered the OSP interrupt.** Re-measured on 2026-08-22 over exactly the ten services that enter `plant_referral`, the seven-visit peak stops **two** of them — `SVC-PO-042-A-04` and `SVC-UT-001-A-03`. Six sit at five visits and stop on `resolution_cycles` instead, and the last two, `SVC-VQ-002-B-01` and `-B-02`, sit at three, get all the way to `reconcile_linked_systems` and escalate there on a jTrack mismatch. So the re-entry ceiling is one of three things that end this arm, and the least common of them |
 | `graph/subgraphs/restoration_validation.py` — P22 and D21 | done | 9 committed tests, arriving through `interrupt_after=["generate_resolution_options"]`. It is the most-fed stage in the graph — four arms reach it, D16 `validate`, D20 `verify`, D10 `verify` and D12 `verify` — and D21's `continue_observation` loops it back onto itself |
 | `graph/subgraphs/reconciliation_closure.py` — P24, P25 and P26, with D23 and D24 inside it | done | 11 committed tests, arriving through `interrupt_after=["generate_resolution_options"]`. D23 and D24 are wired on this subgraph's own `add_conditional_edges` and so appear nowhere in `BRANCH_TARGETS` — two of the seven decisions a count taken from that table alone misses. It is a terminal node by design and is declared in `_DELIBERATE_TERMINALS` |
 | `graph/subgraphs/preventive_maintenance.py` — D04's preventive arm | done | 27 committed tests, more than any other subgraph, arriving through `interrupt_after=["assess_impact_and_priority"]` — D04's own source node. The subgraph is done and the edge out of it is not: its exit is the single remaining entry in `PENDING_STAGES`, and no fixture reaches it at all |
@@ -528,21 +528,26 @@ least believable part of the document.
 
    **One incident now runs from event to closure**, which is new on 2026-08-21 and replaces this
    paragraph's previous claim that none did. Sweeping all 41 fixture services through the real
-   parent graph — answering every approval, submitting every field report, letting each stability
-   window elapse — `SVC-UT-001-B-01` reaches `closed` in five laps and the sweep raises no error
-   anywhere. It gets there on the remote path rather than the field one.
+   parent graph, `SVC-UT-001-B-01` reaches `closed` and the sweep raises no error anywhere. It gets
+   there on the remote path rather than the field one, lapping `await_service_stability` four times.
 
-   **The other forty all escalate.** The previous reading of this sweep said thirty escalated and
-   ten stopped at `diagnosing` having raised no pause at all, and those ten were D08's plant arm
-   ending at `END`. Wiring that arm did not close them, it moved them: they now run `plant_referral`
-   into `plant_execution` and exhaust a budget there instead. Re-swept at this tree, the split is
-   by budget rather than by stage — **30 exhaust `node_reentries` and 10 exhaust
-   `resolution_cycles`** — and the stages reached are `field_planning` and `field_execution` at 30
-   each, `plant_execution` 20, `plant_referral` 10, `remote_resolution` 2, `self_help` 1,
-   `restoration_validation` and `reconciliation_closure` 1 each, and `preventive_maintenance`
-   **0**. One cause covers all forty, and it is the `Fixtures.telemetry` defect two paragraphs
-   down; `docs/workflow-diagram.md` §6 owns the sweep that establishes it and is cited rather than
-   copied.
+   **The other forty all escalate, and the sweep that said why was itself broken.** This paragraph
+   previously reported one split — 30 on `node_reentries`, 10 on `resolution_cycles` — and gave one
+   cause for all forty. Both were artefacts of the harness. It answered two of the five pause types
+   and handed an approval payload to the other three, so `field_submission` and `plant_report`
+   rejected it as unusable and the crew was re-asked until a re-entry budget tripped; what was
+   written down as a product defect was in part the sweep never answering. Re-swept on 2026-08-22
+   answering all five, the result **depends on what the crew reports** and so is two sweeps:
+   HANDOVER, a fault confirmed at the tap or ODP, and PREMISES, a fix made on site. Both close one
+   and escalate 40. HANDOVER stops **22 on `node_reentries`, 16 on `resolution_cycles`**; PREMISES
+   stops **2 and 36**. A **third** reason appears in both that the old table had no row for at all —
+   two runs escalate on `reconciliation did not converge after 3 attempts`. Stage counts move too:
+   `field_planning` and `field_execution` are 32 each rather than 30, `restoration_validation` is 9
+   under HANDOVER and 29 under PREMISES rather than 1, and `reconciliation_closure` is **3** rather
+   than 1. `plant_execution` 20, `plant_referral` 10, `remote_resolution` 2, `self_help` 1 and
+   `preventive_maintenance` 0 are unchanged. The three causes are EXEC-1, the `Fixtures.telemetry`
+   defect below, and EXEC-2 respectively; `docs/workflow-diagram.md` §6 owns both sweeps and is
+   cited rather than copied.
 
    Three defects stood in the way, and they were in series — each invisible until the one above it
    was fixed. Derived detectors were counted into the restoration comparison, where they hold the
@@ -552,12 +557,16 @@ least believable part of the document.
    had no entry for. All three are fixed and each is guarded by a test seen red.
 
    One defect the closing run makes visible is *not* fixed: `SVC-UT-001-B-01` laps
-   `diagnosing -> remote_resolution -> validating` three times before it closes. `Fixtures.telemetry`
-   is keyed on a static `health` field with ten readers in `src` and no writer, so a completed repair
-   changes nothing a later read sees and the validation stage re-measures what it measured before
-   the fix. Every figure in that sentence was re-derived on 2026-08-21 rather than carried over,
-   and all three are unchanged — three laps, ten read sites, still no writer — which is why the
-   forty escalations above are one defect and not forty.
+   `diagnosing -> remote_resolution -> validating` before it closes. `Fixtures.telemetry` is keyed
+   on a static `health` field, so a completed repair changes nothing a later read sees and the
+   validation stage re-measures what it measured before the fix. Re-derived on 2026-08-22 under the
+   corrected harness: `resolution_cycles` reaches **5** and `await_service_stability` is entered
+   **4** times, against the **3** laps this paragraph claimed while a supervisor approval was being
+   handed to the customer-response interrupt. **Ten** sites in `src` read the field and the only
+   assignment is `simulation/fixtures/network.py`, the builder that constructs the record — so
+   nothing an adapter or a node runs ever moves it, which is the accurate form of the "no writer"
+   this paragraph used to assert. It is one of the three causes behind the forty escalations, not
+   the only one; it is the one that dominates PREMISES.
 
    The standard those tests are held to is worth stating, because it was learned by being caught out.
    The first detector regression test **passed with the defect reinstated**: it asserted
