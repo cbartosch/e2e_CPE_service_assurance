@@ -431,15 +431,23 @@ entry.** Every router is now reachable from some graph.
 **So the row cannot go, but it can no longer carry the argument on its own, because what a rendering
 now conceals is not an absence.** Built and wired is not the same as driven end to end. §6 of
 `docs/workflow-diagram.md` owns that measurement and is where it should be read: swept over all 41
-fixture services, answering every approval, **one reaches closure and forty escalate** — and the
-forty do not stop at a gap in the graph, they exhaust a budget going round a loop that is fully
-wired. A dashboard rendering the topology would show all five stages present and connected, which is
-true, and would say nothing about the fact that almost nothing gets to the fifth.
+fixture services, answering each of the five pause types in the shape its own parser accepts, **one
+reaches closure and forty escalate** — and none of the forty stops at a gap in the graph. Thirty-eight
+exhaust a budget going round a loop that is fully wired; the other two get all the way to
+`reconcile_linked_systems` and are refused there because jTrack still shows the MR open, which is
+also not a gap in the graph. A dashboard rendering the topology would show all five stages present
+and connected, which is true, and would say nothing about the fact that almost nothing gets to the
+fifth.
 
 That is a harder thing to surface than an unwired exit, and it is the reason the "done (×n)" row
-above counts visits rather than recording a boolean. Measured on one of the forty: 21 distinct nodes
-for 42 visits, with `open_field_visit` reached **seven** times against a re-entry limit of six — on
-the plant path it is `search_plant_mr` at seven instead, which is D19's `await_plant` self-loop. A
+above counts visits rather than recording a boolean. Re-measured on 2026-08-22, the two shapes it has
+to distinguish are not the same run: a field-path escalation is **23 distinct nodes for 54 visits**
+with `open_field_visit` reached **seven** times against a re-entry limit of six, and a plant-path one
+is **21 nodes for 42 visits** with `open_field_visit` at six and `search_plant_mr` at seven instead,
+which is D19's `await_plant` self-loop. This paragraph previously read the plant run's totals against
+the field run's peak. The peak is also the crew's to decide: 20 services reach `open_field_visit`
+seven times when the crew confirms a plant fault and none do when it reports a fix on site, where the
+most any service reaches is six. A
 node with a 7 beside it is the visible shape of a loop that is not converging; the same node marked
 merely "done" is indistinguishable from one that ran once and succeeded. **The `PENDING_STAGES` row
 and the visit counts are answers to the same question at two different scales** — what this graph
@@ -449,10 +457,10 @@ will be reassuring for the wrong reason.
 §3 measured what the one remaining exit's arrow is labelled, and it is worse than dropped: the
 drawing calls it `__escalated__`, identically to the two terminal nodes that are *meant* to end
 there. So a naive rendering does not merely omit the seam — it reports it as a budget escalation.
-**And the camouflage is what makes that expensive here rather than merely untidy:** forty of the
-forty-one runs above really do end in a budget escalation, so the one arrow that says "escalated"
-falsely is hidden among a great many that say it truthfully, and no reader has a reason to look
-twice.
+**And the camouflage is what makes that expensive here rather than merely untidy:** thirty-eight of
+the forty-one runs above really do end in a budget escalation and two more end escalated for another
+reason, so the one arrow that says "escalated" falsely is hidden among a great many that say it
+truthfully, and no reader has a reason to look twice.
 
 Naming the unreachable exit is therefore the same failure the README's "four things this table
 would otherwise be expected to list" paragraph exists to prevent, applied to the one part of the
