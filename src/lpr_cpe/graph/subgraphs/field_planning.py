@@ -1,10 +1,28 @@
 """Stage 3's field branch: turn the chosen repair into a scheduled visit, or say why there is none.
 
 This is P14, D13, P15, D14, D15 and P16 -- the largest unwired arm in the graph. Measured over the
-simulator, 50 of the 82 fixture runs (41 services x two case types) reach it: 29 proactive and 20
-predictive through `D11:field_planning`, and one proactive through `D12:field_planning`. Everything
-here is downstream of a router that has already answered "no remote repair and no self-help;
-somebody has to drive to it".
+simulator, 52 of the 82 fixture runs (41 services x two case types) reach it. This paragraph used to
+say 50, because it counted two of the three arms that arrive here:
+
+| arm | runs | which |
+| --- | --- | --- |
+| `D11:field_planning` | 49 | 29 proactive, 20 predictive |
+| `D12:field_planning` | 1 | proactive |
+| `D20:reverse_handover` | 2 | proactive |
+
+The arm that went missing is the one `builder.BRANCH_TARGETS` argues for at length immediately above
+its own table, and it does not behave like the other two. `SVC-PO-042-A-04` and `SVC-UT-001-A-03`
+are diverted at `D08:plant_path` before D09 is ever asked, so D11 and D12 never see them; they
+arrive from `plant_execution` by way of `D19:restored`, and they arrive six times each. Every count
+above is the same under either crew answer.
+
+So it is not true that everything here is downstream of a router that has already answered "no
+remote repair and no self-help; somebody has to drive to it". 50 of the 52 are. The reverse-handover
+pair is downstream of one that answered "the plant work is finished, now book the customer half" --
+a different question that happens to need the same stage. Of the 52, the 40 named further down reach
+the dispatch gate and commit a visit, and none reach `queue_for_dispatcher`. How many also pass
+through `abandon_field_planning` is the one figure a crew answer moves: 12 when the submission hands
+over to plant, all 52 when it closes at the premises.
 
 Why P14 does not use `is_field_option`
 --------------------------------------
@@ -19,9 +37,23 @@ rather than re-deriving it afterwards, because a later node consumes the option 
     --- action_type of the first field option ---
       create_work_order              24
       raise_mr                       16
+      no untried field option        10
     --- fault_domain -> crew at the edge ---
       drop -> clean                  24
       tap_or_odp -> joint            16
+      unknown                         9
+      customer_environment            1
+
+The denominator is 50: the runs in which D11 answers `field_planning` at least once, one more than
+the 49 in the table above, because the run that arrives first through D12 is asked D11 later too.
+The third row is a correction. Without it the tables read as exhaustive at 24 + 16 = 40, and a
+reader reconciling that against the arrival count would think ten runs had gone missing; what those
+ten have is no untried field option at the edge at all.
+
+Read per arrival instead of per run the tables stop being stable: the same sweep gives 97 arrivals
+under a handover submission and 297 under a premises one, because the stage is re-entered on the
+way round, and `raise_mr` moves from 16 to 96 with it. The first-arrival reading is identical under
+both crew answers, which is why it is the one recorded.
 
 The 16 `raise_mr` arrivals are the joint ones. `decision_services.resolution` offers a `TAP_OR_ODP`
 fault two options -- the MR first, because "the delimiter is plant, so OSP owns the repair", and the
