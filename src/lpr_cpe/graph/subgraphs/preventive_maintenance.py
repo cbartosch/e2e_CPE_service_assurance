@@ -36,12 +36,21 @@ over the simulator: of the 41 fixture services, **zero** produce a critical Wi-F
 all. The arm could not be taken. Worse, it was blind in the direction that matters: the same 17
 contain three services with real access-layer degradation -- `SVC-PO-042-A-04` (medium,
 distribution), `SVC-UT-001-A-03` (critical, distribution) and `SVC-VQ-002-A-01` (high, power) --
-none of which the radios can see, because the fault is in the fibre. A predictive stage that sent a
-crew for a busy 2.4 GHz channel and not for a dying ONT is worse than one that never dispatches.
+and the radios see none of them. This paragraph used to give one reason for that, "the fault is in
+the fibre", and only the middle one is: `SVC-UT-001-A-03` is a PON span attenuating in both
+directions, `SVC-PO-042-A-04` is HFC with DOCSIS RF out of spec at `TAP-PO-042-A`, and
+`SVC-VQ-002-A-01` is an ONT with no utility power, raised by `pon_optical_degradation` on a dying
+gasp with no optical measurement in the window at all. Three layers, one thing in common: every one
+of them is upstream of the radios. Two of the three band `healthy` and the third has no radio data,
+so the Wi-Fi read is not a weaker signal here, it is silent. A predictive stage that sent a crew for
+a busy 2.4 GHz channel and not for a dying ONT is worse than one that never dispatches.
 
 So the two acting arms key on different evidence, and each on the evidence that can actually
 support it: field work on an actionable physical finding, remote prevention on the levers
-`forecast_wifi` derived from the radios.
+`forecast_wifi` derived from the radios. The second is the sharper case, because both services that
+take it band `at_risk` -- one below `critical` in `HealthBand`'s order -- and `should_dispatch` is
+therefore `False` for both. The band that arm reads would act on neither, and both name
+`wifi_channel_change` and `cpe_resync`.
 
 Clean Boots and Dirty Boots are one arm here, and where the distinction went
 ---------------------------------------------------------------------------

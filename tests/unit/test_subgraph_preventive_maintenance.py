@@ -32,6 +32,7 @@ halves meet.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -39,12 +40,14 @@ import pytest
 from langgraph.graph import END, START
 
 from lpr_cpe.config.clock import FrozenClock
+from lpr_cpe.decision_services.forecast import should_dispatch
 from lpr_cpe.domain.boundaries import crew_for
 from lpr_cpe.domain.enums import (
     CaseType,
     CrewType,
     EventSource,
     FaultDomain,
+    HealthBand,
     IncidentStatus,
     KPIName,
     Severity,
@@ -77,12 +80,16 @@ from lpr_cpe.policies.models import EvidencePolicy
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
-#: The one PON service whose optical readings are degraded enough for the detector to fire, and the
-#: worked example for the field-work arm.
+#: The one PON service with a degraded optical *reading*, and the worked example for the field-work
+#: arm. Not the one service that fires `pon_optical_degradation`, which this line used to say:
+#: `SVC-VQ-002-A-01` raises the same detector on a powered-off ONT and a dying gasp, with no optical
+#: measurement in the window at all. Both are PON and both plan field work.
 DEGRADED_OPTICAL_SERVICE = "SVC-UT-001-A-03"
 
-#: A healthy HFC service whose radios still name two levers. The worked example for remote
-#: prevention, and the proof that "healthy Wi-Fi band" and "nothing to do" are different facts.
+#: An HFC service whose radios band `at_risk` -- not `healthy`, which this line used to say -- and
+#: name two levers anyway. The worked example for remote prevention, and the proof that "below the
+#: band that would send anyone" and "nothing to do" are different facts: `should_dispatch` is
+#: `False` here, against the shipped pack's `critical`.
 LEVERED_WIFI_SERVICE = "SVC-SJ-011-B-01"
 
 #: A service with nothing wrong with it at all. The worked example for monitoring.
@@ -482,11 +489,17 @@ def test_no_fixture_produces_a_clean_boots_crew(sweep: dict[str, dict[str, Any]]
 def test_the_remote_prevention_arm_selects_levers_and_executes_nothing(
     sweep: dict[str, dict[str, Any]],
 ) -> None:
-    """Two services, both with a healthy band, both with something worth changing anyway.
+    """Two services, both banding `at_risk`, both with something worth changing anyway.
 
     That combination is the reason the arm keys on `recommended_actions` rather than on the band:
     a band is a summary and a lever is a specific breached metric with a specific remedy. A verdict
     breaching only `throughput_mbps` names no lever and correctly falls through to monitoring.
+
+    This docstring said "a healthy band" until the bands were measured rather than assumed, and the
+    corrected reading is the stronger one: `at_risk` is *worse* than healthy and `should_dispatch`
+    still refuses it, so the arm is not rescuing services the band called fine -- it is acting on
+    two the band called degrading and declined to send anyone to.
+    `test_no_band_in_the_sweep_would_dispatch_anyone` is where that now has an owner.
     """
     selected = [ref for ref, row in sweep.items() if row["disposition"] == "remote_prevention"]
     assert selected == ["SVC-SJ-011-B-01", "SVC-VQ-002-B-03"]
@@ -501,6 +514,59 @@ def test_the_remote_prevention_arm_selects_levers_and_executes_nothing(
     assert "Selection only" in event.detail["note"], (
         "the note is what a queue reader sees; if it stops saying the action was not taken, this "
         "stage starts looking like it rebooted somebody's router"
+    )
+
+
+def _band_of(final: dict[str, Any]) -> str:
+    """The Wi-Fi band behind one disposition, with the two ways of having none kept apart.
+
+    `forecast_wifi` returns `None` for a CPE that reported no readable metric, and a
+    `PredictionResult` carrying `band=None` would be a different thing entirely -- a forecast that
+    ran and declined to band its own score. Only the first happens here. They are labelled
+    differently so that if the second ever starts happening the assertion below says so, rather
+    than absorbing it into the same bucket the way `assess_predictive_risk`'s audit detail does.
+    """
+    prediction = final["pm_case"].prediction
+    if prediction is None:
+        return "no radio data"
+    return prediction.band.value if prediction.band is not None else "banded nothing"
+
+
+def test_no_band_in_the_sweep_would_dispatch_anyone(sweep: dict[str, dict[str, Any]]) -> None:
+    """The measurement behind the subgraph docstring's "the arm could not be taken".
+
+    An earlier draft keyed field work on `forecast.should_dispatch`. Nothing pinned the bands it
+    would have read, so two comments in this module described them from memory and both said
+    `healthy` where the fixtures say `at_risk`. `EXPECTED_DISPOSITIONS` pins which arm each service
+    takes; this pins what the forecast said while that arm was being chosen, which is the other
+    half of every argument the stage makes about why those are not the same question.
+
+    The cross-tab is asserted whole rather than per service, because the shape is the point:
+    `healthy` appears against `field_work` as well as `monitoring`, and the only services that are
+    *not* healthy are the two the band would have done nothing for. The band predicts the arm in
+    neither direction.
+    """
+    observed = Counter((_band_of(row["final"]), row["disposition"]) for row in sweep.values())
+    assert dict(observed) == {
+        ("healthy", "field_work"): 2,
+        ("healthy", "monitoring"): 10,
+        ("at_risk", "remote_prevention"): 2,
+        ("no radio data", "field_work"): 1,
+        ("no radio data", "monitoring"): 2,
+    }
+
+    bands = load_pack().health_bands
+    dispatchable = sorted(
+        ref
+        for ref, row in sweep.items()
+        if (band := _band_of(row["final"])) in set(HealthBand)
+        and should_dispatch(HealthBand(band), bands)
+    )
+    assert dispatchable == [], (
+        f"{dispatchable} would now be dispatched on the Wi-Fi band alone, against a threshold of "
+        f"{bands.dispatch_threshold_band.value}. The subgraph's module docstring argues the "
+        "field-work arm could not have been keyed on `should_dispatch` because no fixture crosses "
+        "that line. That paragraph needs re-measuring rather than this assertion relaxing."
     )
 
 
