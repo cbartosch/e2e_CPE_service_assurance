@@ -556,17 +556,41 @@ least believable part of the document.
    And the closure stage's exit collapsed onto a `validating -> closed` hop that `STAGE_TRANSITIONS`
    had no entry for. All three are fixed and each is guarded by a test seen red.
 
-   One defect the closing run makes visible is *not* fixed: `SVC-UT-001-B-01` laps
-   `diagnosing -> remote_resolution -> validating` before it closes. `Fixtures.telemetry` is keyed
-   on a static `health` field, so a completed repair changes nothing a later read sees and the
-   validation stage re-measures what it measured before the fix. Re-derived on 2026-08-22 under the
-   corrected harness: `resolution_cycles` reaches **5** and `await_service_stability` is entered
-   **4** times, against the **3** laps this paragraph claimed while a supervisor approval was being
-   handed to the customer-response interrupt. **Ten** sites in `src` read the field and the only
+   A defect that is *not* fixed: `Fixtures.telemetry` is keyed on a static `health` field, so no
+   repair this workflow performs moves it. **Ten** sites in `src` read the field and the only
    assignment is `simulation/fixtures/network.py`, the builder that constructs the record — so
-   nothing an adapter or a node runs ever moves it, which is the accurate form of the "no writer"
+   nothing an adapter or a node runs ever changes it, which is the accurate form of the "no writer"
    this paragraph used to assert. It is one of the three causes behind the forty escalations, not
    the only one; it is the one that dominates PREMISES.
+
+   **The closing run is not an instance of it, and this paragraph used to offer it as one.** The
+   claim was that `SVC-UT-001-B-01` laps `diagnosing -> remote_resolution -> validating` because a
+   completed repair changes nothing a later read sees. Driven again on 2026-08-23 through
+   `test_builder.py`'s own `_walk`, that is the one service the gap does not reach:
+   `SVC-UT-001-B-01` is `pon_healthy`, which is precisely the condition
+   `integrations/cpe/simulator.py:154-157` requires before it recovers a device, and CPE-8 names it
+   as the worked example. Every lap reads two findings before the repair and one after and clears
+   76% of the anomaly against the pack's 70% bar; every refusal is `STABILITY_WINDOW_PENDING`, "2
+   of the required 3 post-fix samples have arrived". What holds it open is `min_post_fix_samples:
+   3` — set to 1, the same walk closes in one lap.
+
+   **The retraction in the previous revision of this paragraph was itself wrong and is withdrawn.**
+   It gave `resolution_cycles` **5** and `await_service_stability` **4** "against the **3** laps
+   this paragraph claimed", which reads as a correction and is not one: the three counters measure
+   different things and all three hold simultaneously on the same run — three laps through
+   `remote_resolution`, four entries into `await_service_stability`, `resolution_cycles` 5. The
+   original "three laps, ten read sites, still no writer" was accurate in all three parts. What was
+   wrong with it was never the count, only the cause, and swapping in two unrelated counters
+   obscured that for a revision. `test_the_closure_stage_collapses_onto_the_parent_as_one_hop_too`
+   carries the corrected cause in its docstring and deliberately does not assert it. An assertion
+   was written — every lap must read fewer findings after the repair than before — and could not be
+   shown red: emptying `_PLANT_HEALTHY_PROFILES`, and dropping `CPE_REBOOT` from
+   `_RECOVERING_ACTIONS` to model late rather than absent recovery, both failed at that test's
+   *first* assertion instead, `assert <IncidentStatus.ESCALATED: 'escalated'> is
+   <IncidentStatus.CLOSED: 'closed'>`. No reachable world has an early lap read unmoved and the run
+   still close, so `status is CLOSED` already owns the claim; the mechanism itself has four owners
+   in `tests/unit/test_adapters.py`. By the standard CPE-9 was held to, a guard that cannot be shown
+   red is dead defence and was not shipped.
 
    The standard those tests are held to is worth stating, because it was learned by being caught out.
    The first detector regression test **passed with the defect reinstated**: it asserted

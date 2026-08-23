@@ -903,10 +903,35 @@ async def test_the_closure_stage_collapses_onto_the_parent_as_one_hop_too(fixtur
     would make the test fail for a reason it is not about.
 
     The walk itself is not asserted whole. It laps `diagnosing -> remote_resolution -> validating`
-    three times before it closes, because a remote repair changes nothing a later read sees --
-    fixture telemetry is keyed on a static `health` field with no writer. That is a real gap and it
-    is not this test's; pinning the lap count here would make an unrelated fix look like a
-    regression. What is pinned is the seam, which is what the entry under test authorises.
+    three times before it closes, and that count re-measures exactly right. The reason this
+    paragraph gave for it did not. It used to read "because a remote repair changes nothing a later
+    read sees -- fixture telemetry is keyed on a static `health` field with no writer", and that
+    gap is real -- ten sites in `src` read the field and the only assignment is the fixture builder
+    -- but it is not what holds this run open, and this service is the one case it does not reach.
+    `SVC-UT-001-B-01` is `pon_healthy`, which is the exact condition `cpe/simulator.py:154-157`
+    requires before it will recover a device, and CPE-8 names this service as its worked example.
+
+    Measured lap by lap off the `assess_restoration` audit events: every refusal is
+    `STABILITY_WINDOW_PENDING`, "2 of the required 3 post-fix samples have arrived", and every lap
+    -- the first one included -- reads two findings before the repair and one after, clearing 76%
+    of the anomaly against the pack's 70% bar. The repair moved the reading immediately and kept it
+    moved. What holds the run open is `min_post_fix_samples: 3`; set to 1, the same walk closes in
+    a single lap. The two explanations predict the same count and differ on the mechanism, which is
+    why the count could never have settled it.
+
+    Nothing below pins either half. The count is unpinned for the original reason -- an unrelated
+    fix should not look like a regression here -- and the *reason* is unpinned because an assertion
+    for it was written, could not be shown red, and was withdrawn. It read the `assess_restoration`
+    audit events back and required `findings_after < findings_before` on every lap, the first one
+    included, so that a recovery arriving only on the third reboot would fail it. Two mutations were
+    tried to make that happen: `_PLANT_HEALTHY_PROFILES` emptied, and `CPE_REBOOT` dropped from
+    `_RECOVERING_ACTIONS` to model late rather than absent recovery. Both produced the same failure,
+    at the *first* assertion in this test rather than at the new one --
+    `E AssertionError: assert <IncidentStatus.ESCALATED: 'escalated'> is <IncidentStatus.CLOSED:
+    'closed'>`. There is no reachable world where an early lap reads unmoved and this run still
+    closes, so `status is CLOSED` above already owns the claim and a second line asserting it would
+    be dead defence. The mechanism itself has four owners in `tests/unit/test_adapters.py`. What is
+    pinned here is the seam, which is what the entry under test authorises.
     """
     service = fixtures.services[CLOSING_SERVICE]
     final, walk = await _walk(service, thread="seam-closure", timer=True)
