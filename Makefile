@@ -12,7 +12,7 @@ else
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help setup test test-fast lint fmt typecheck demo serve cov check clean
+.PHONY: help setup test test-fast lint fmt typecheck demo serve cov check audit clean
 
 help:  ## Show this help
 	@$(PY) -c "import re,sys; [print(f'  {m[1]:<12} {m[2]}') for m in (re.match(r'^([a-z-]+):.*?## (.*)$$', l) for l in open('Makefile')) if m]"
@@ -62,6 +62,9 @@ serve:  ## Not runnable yet -- src/lpr_cpe/api/ is unwritten
 	@exit 1
 
 check: lint typecheck test  ## lint, typecheck, then the suite behind the coverage gate
+
+audit:  ## Run every gate and write the evidence bundle into audit/
+	$(VPY) -m lpr_cpe.audit
 
 clean:  ## Remove caches and build artefacts
 	$(PY) -c "import shutil,pathlib; [shutil.rmtree(p, ignore_errors=True) for p in ['.pytest_cache','.mypy_cache','.ruff_cache','htmlcov','build','dist']]; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]"

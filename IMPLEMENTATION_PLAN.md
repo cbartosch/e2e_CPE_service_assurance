@@ -324,16 +324,36 @@ domain model does support.
 
 ## 5. Status
 
-"Done" below means the code exists **and** something ran against it, not that it was written.
-Measured on **2026-08-24**, after the first mutation sweep of the six unswept subgraphs: `ruff check
-src tests` passes, `ruff format --check src tests` passes at **135 files already formatted**, `mypy
---strict src/lpr_cpe` reports no issues in **109** source files, and `pytest` collects and passes
-**924** tests at **85.33%** line coverage, so `make lint`, `make test` and `make check` are all
-green. The six new tests are the sweep's: five closing `restoration_validation`'s gaps and one
-owning the `stamp` mechanism (gap 8).
+**These figures have an owner now, and it is not this paragraph.** `make audit` runs all six gates,
+captures each one's output verbatim into `audit/latest/`, and writes `audit/MANIFEST.json`;
+`docs/implementation-report.md` states them in one table, and
+`tests/unit/test_audit_bundle.py` fails the build if that table and the manifest disagree. So the
+numbers below are a **dated transcript of one run** and the report is the live copy. Where the two
+disagree, the manifest is right and this paragraph is the bug — which is the same rule the top of
+this file states about code and prose, applied to the one thing gap 7 said nothing could check.
 
-The revisions before this one were dated 2026-08-23 (135 / 109 / 918 / 85.28%), 2026-08-18
-(124 / 103 / 853 / 82.77%) and 2026-08-17 (122 / 102 / 839 / 82.65%). Every one of those had moved by the next morning, from changes that
+"Done" below means the code exists **and** something ran against it, not that it was written.
+Measured on **2026-08-24** from `audit/MANIFEST.json`: `ruff check src tests` passes, `ruff format
+--check src tests` passes at **137 files already formatted**, `mypy --strict src/lpr_cpe` reports no
+issues in **110** source files, and `pytest` collects and passes **935** tests at **85.14%** line
+coverage, with all six gates green.
+
+**The coverage gate did not mean 85% until this pass, and the audit bundle found that on its first
+run.** `--cov-fail-under=85` compares the total *rounded to `[tool.coverage.report] precision`*,
+which defaults to 0 — so 84.92% rounded to 85, cleared a bar of 85, and pytest exited **0** while
+printing `FAIL Required test coverage of 85% not reached. Total coverage: 84.92%`. Measured against
+coverage 7.15.4 and pytest-cov 7.1.0: the identical run exits 1 with `precision = 2` set and 0
+without it, and a control at `--cov-fail-under=99` over one module exits 1 either way, so the flag
+is not decorative in general — only within half a point of the bar. Two consequences worth being
+plain about. The effective bar had been **84.5%**, which is a wider tolerance than the 0.28 points
+of headroom the revision below called "not a margin". And `make test` and `make check` had **never
+once** failed on coverage, so the 2026-08-23 row's evidence — "prints `Required test coverage of
+85% reached` ... and exits 0" — was half sound: the printed word was evidence, the exit code could
+not have said otherwise. `precision = 2` is now set and the gate is real.
+
+The revisions before this one were dated 2026-08-24 (135 / 109 / 924 / 85.33%), 2026-08-23
+(135 / 109 / 918 / 85.28%), 2026-08-18 (124 / 103 / 853 / 82.77%) and 2026-08-17
+(122 / 102 / 839 / 82.65%). Every one of those had moved by the next morning, from changes that
 touched a handful of files. That is the point the paragraph below about staleness is making, so the
 old figures are left here rather than overwritten: the interval over which a count in this section
 stays true is a **day**, not a release.
@@ -496,11 +516,12 @@ silent filter, whatever causes it.
 | `api` | **pending** | `src/lpr_cpe/api/` does not exist. `make serve` names the gap and exits non-zero rather than importing it |
 | model provider + deterministic fake | **pending** | no module in `src/` calls a model provider. `ModelProvider` is an enum in `config.settings` with nothing behind it, so the `anthropic` extra changes nothing and D7 above describes an intent, not a running path |
 | `cli.py` + `[project.scripts]` | done | 6 committed tests, each watched red. The declaration shipped naming a module that was never written; the guard reads `[project.scripts]` out of `pyproject.toml` and imports what it names, so it covers a second entry point without being extended |
-| tests | 924 passing | unit only; no integration, contract or scenario tests yet, and none of the 17 required scenarios exist. This row read 916 on 2026-08-21 and was one out at the time — see the note under the opening paragraph |
-| coverage | **85.33%**, gate is 85% | **the gate is met and `make test` is green**, measured 2026-08-24 by running that target's own command, which prints `Required test coverage of 85% reached. Total coverage: 85.33%` and exits 0. It was 82.77% and failing on 2026-08-18 and 85.29% on the 21st. Nothing has been written to raise it: the 2.52 points that cleared the bar were `jtrack/simulator.py` going 33% to 72.28% as the plant stages drove it, and the hundredth of a point lost since is a documentation pass adding one test that executes no new source. **0.28 points of headroom is not a margin** — one uncovered module of any size would spend it, so a green `make test` here says the gate passed today and nothing about whether it will tomorrow |
-| docs + diagrams | 1 of 9 documents, **1 of 10 diagrams** | `docs/vendor-integration-gaps.md` is still the only one of the nine the specification asks for — eight `.md` files and `docs/architecture-decisions/` — and `docs/specification.md` is the vendored input, not a deliverable. Two documents written since are **not on that list** and do not count against it, `docs/workflow-diagram.md` and `docs/dashboard-architecture.md`. The first does close a diagram: its ten Mermaid figures are the parent graph and its nine subgraphs, which is the specification's item 3, *LangGraph parent graph and subgraphs*. The other nine diagrams and the other eight documents are unwritten |
+| tests | 935 passing | unit only; no integration, contract or scenario tests yet, and none of the 17 required scenarios exist. Read the live figure off `audit/MANIFEST.json`, not this cell |
+| coverage | **85.14%**, gate is 85% | **the gate is met, and as of this pass the gate is real.** `--cov-fail-under=85` compared the total rounded to `precision`, which defaults to 0, so the effective bar was 84.5% and pytest exited 0 while printing `FAIL ... not reached` at 84.92%. Found by `make audit` on its first run; `precision = 2` is now set in `pyproject.toml` and the identical run exits 1 without it. 82.77% and failing on 2026-08-18, 85.29% on the 21st, 85.33% on the 24th before this pass. The drop to 85.14% is `audit.py` arriving with more statements than its tests cover, not a regression in anything else |
+| docs + diagrams | 1 of 9 documents, **1 of 10 diagrams**, deliverable 17 done | `docs/vendor-integration-gaps.md` is still the only one of the nine the specification asks for — eight `.md` files and `docs/architecture-decisions/`. **`docs/implementation-report.md` is new and is not one of the nine**: it is deliverable 17, the final implementation report, and it is the first document in this repository whose figures a test checks. Three others are not on the list either and do not count against it — `docs/workflow-diagram.md`, `docs/dashboard-architecture.md`, and `docs/specification.md`, which is the vendored input. The first does close a diagram: its ten Mermaid figures are the parent graph and its nine subgraphs, the specification's item 3 |
 | demo | **pending** | the seven scenarios are unwritten. `make demo` names the gap and exits non-zero rather than invoking a subcommand `cli.py` deliberately does not define |
-| CI | **none exists** | no `.github/`, GitLab, Azure, CircleCI, tox, nox or pre-commit configuration is tracked. Every gate in this repository is manual |
+| `audit.py` + `make audit` + `docs/implementation-report.md` | done | 13 committed tests. The bundle runs all six gates, captures each one's stdout verbatim into `audit/latest/`, and writes `audit/MANIFEST.json`; the report states its figures in one table and a test compares that table to the manifest key by key. It found two defects on its first two runs, both in things older than it: the coverage gate's rounding tolerance (above), and its own `^(\d+) passed` regex, which read a green run's summary and lost a red one's — so the manifest dropped its test count at exactly the run somebody would open it to investigate. **The gate is one run behind by construction** and the report says so: pytest runs before the manifest is written, so the comparison always reads the previous run's figures, and only a figure that does not move between a red run and a green one can converge. That is why the report states `tests_total` and not `tests_passing`; two runs sat at a fixed point on the wrong number before this was measured |
+| CI | **none exists** | no `.github/`, GitLab, Azure, CircleCI, tox, nox or pre-commit configuration is tracked. Every gate in this repository is manual — `make audit` makes a run *recorded and reproducible*, which is a different thing, and nothing stops a commit that never ran one |
 
 ## 6. Known gaps
 
@@ -701,11 +722,32 @@ least believable part of the document.
 
    Two things follow. The first is a rule: **verify a documentation claim against the tree, not
    against this file**, and treat §5's *State* column as a dated measurement rather than a fact. The
-   second is that the rule is a poor substitute for a gate, and the cheapest ones are known —
-   `tests/unit/test_cli.py` already closes the entry-point case by importing what `pyproject.toml`
+   second is that the rule is a poor substitute for a gate, and the cheapest ones were known —
+   `tests/unit/test_cli.py` already closed the entry-point case by importing what `pyproject.toml`
    declares, and the same shape would close the rest: a test that asserts every path a markdown file
-   names exists, and every relative link resolves. That test is not written. Until it is, this gap
-   is open by construction rather than by oversight.
+   names exists, and every relative link resolves.
+
+   **Those tests are written as of 2026-08-24, and this gap is now three-quarters shut.**
+   `tests/unit/test_audit_bundle.py` holds four gates over the prose:
+
+   - every relative markdown link resolves — the shape that would have caught README's link to
+     `docs/operations-runbook.md`, which has never existed;
+   - every backticked repository path exists, matched by **suffix against the real tree** rather
+     than against a list of root directories, because both `src/lpr_cpe/graph/builder.py` and
+     `subgraphs/field_planning.py` are in use and both are correct. Root-matching reported 24 files
+     as missing on the first run, every one of which exists;
+   - `_DECLARED_MISSING` names the paths the prose mentions *because they are gaps* —
+     `src/lpr_cpe/api/` and three unwritten documents — and is checked in **both** directions, so
+     the day `api/` is built, the three documents describing its absence fail rather than quietly
+     going wrong. That is `_check_pending_stages`' rule applied to prose;
+   - every figure in `docs/implementation-report.md` equals the one `audit/MANIFEST.json` measured.
+
+   What is still open is the quarter that matters most: **the four gates cover the report and the
+   paths, and nothing checks a sentence.** This file's §5 rows are still prose no test reads, which
+   is why the paragraph at the top of §5 now points at the manifest as the live copy rather than
+   claiming to be it. A claim like "every disposition is the end of that thread's automated work"
+   sat a hundred lines from a table asserting the opposite for four revisions, and no gate described
+   here would have caught it.
 8. **Six subgraphs were swept for the first time on 2026-08-24, and half of every sweep survived.**
    §5 marks a row *mutation-checked* only when every regression assertion has been verified by
    reinstating the defect it names. Three subgraphs carried that mark — `remote_resolution`,

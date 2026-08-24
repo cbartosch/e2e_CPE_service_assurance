@@ -1,0 +1,113 @@
+graph lpr_cpe_parent
+  nodes 26
+    steps 17, in specification order
+      P01 receive_signal
+      P02 normalize_event
+      P03 resolve_identity_and_topology
+      P04 deduplicate_and_correlate
+      P05 assess_impact_and_priority
+      P06 create_or_attach_incident
+      P07 assemble_case_evidence
+      P08 create_diagnostic_test_plan
+      P09 execute_read_only_tests
+      P10 determine_root_cause
+      P11 generate_resolution_options
+      P12 confirm_customer_outcome
+      P13 prepare_low_confidence_review
+      P14 request_low_confidence_review
+      P15 prepare_blast_radius_approval
+      P16 request_blast_radius_approval
+      P17 record_escalation
+    subgraphs 9, each a compiled graph reached by name
+      field_execution
+      field_planning
+      plant_execution
+      plant_referral
+      preventive_maintenance
+      reconciliation_closure
+      remote_resolution
+      restoration_validation
+      self_help
+  decisions 17 wired here, of 24 declared
+    D01 after normalize_event -- Is the event valid and actionable?
+      quarantine -> __end__
+      continue   -> resolve_identity_and_topology
+    D02 after resolve_identity_and_topology -- Is identity and topology sufficiently resolved?
+      enrich        -> resolve_identity_and_topology
+      manual_review -> __end__
+      continue      -> deduplicate_and_correlate
+    D03 after deduplicate_and_correlate -- Is this planned work, a known outage, or part of an existing common cause?
+      associate -> assess_impact_and_priority
+      continue  -> assess_impact_and_priority
+    D04 after assess_impact_and_priority -- Is this predictive risk only or an active service incident?
+      preventive -> preventive_maintenance
+      active     -> create_or_attach_incident
+    D05 after assemble_case_evidence -- Is the evidence complete and fresh enough for the next decision?
+      gather_more   -> assemble_case_evidence
+      manual_review -> __end__
+      continue      -> create_diagnostic_test_plan
+    D06 after determine_root_cause -- Is root-cause confidence sufficient for the proposed action?
+      approve_low_confidence -> prepare_low_confidence_review
+      retry_diagnosis        -> assemble_case_evidence
+      continue               -> generate_resolution_options
+    D07 after generate_resolution_options -- Is there a safety, security, or high-blast-radius condition?
+      approve_high_blast_radius -> prepare_blast_radius_approval
+      escalate                  -> record_escalation
+      continue                  -> D08
+    D08 when D07 answers 'continue' -- Is this a shared network, provisioning, or plant issue?
+      plant_path -> plant_referral
+      continue   -> D09
+    D09 when D08 answers 'continue' -- Is an allowlisted remote repair eligible?
+      remote          -> remote_resolution
+      self_help_check -> D11
+    D11 when D09 answers 'self_help_check' -- Is guided customer self-help suitable?
+      self_help      -> self_help
+      field_planning -> field_planning
+    D10 after remote_resolution -- Did remote repair produce stable restoration?
+      verify          -> restoration_validation
+      retry_diagnosis -> assemble_case_evidence
+    D12 after self_help -- Did self-help produce stable restoration?
+      verify          -> restoration_validation
+      retry_diagnosis -> determine_root_cause
+      field_planning  -> field_planning
+    D16 after field_execution -- Was the issue resolved within the Clean Boots service domain?
+      validate -> restoration_validation
+      delimit  -> plant_execution
+    D19 after plant_execution -- Did the Dirty Boots or plant action restore the affected network domain?
+      restored        -> D20
+      await_plant     -> plant_execution
+      retry_diagnosis -> determine_root_cause
+    D20 when D19 answers 'restored' -- Is customer service still degraded after plant restoration?
+      reverse_handover -> field_planning
+      verify           -> restoration_validation
+    D21 after restoration_validation -- Is the service stable for the required observation window?
+      continue_observation -> restoration_validation
+      retry_diagnosis      -> determine_root_cause
+      confirm_outcome      -> confirm_customer_outcome
+    D22 after confirm_customer_outcome -- Is the incident resolved?
+      reconcile       -> reconciliation_closure
+      retry_diagnosis -> determine_root_cause
+    D06 after request_low_confidence_review -- Is root-cause confidence sufficient for the proposed action?
+      approve_low_confidence -> prepare_low_confidence_review
+      retry_diagnosis        -> assemble_case_evidence
+      continue               -> generate_resolution_options
+    D07 after request_blast_radius_approval -- Is there a safety, security, or high-blast-radius condition?
+      approve_high_blast_radius -> prepare_blast_radius_approval
+      escalate                  -> record_escalation
+      continue                  -> D08
+    D08 when D07 answers 'continue' -- Is this a shared network, provisioning, or plant issue?
+      plant_path -> plant_referral
+      continue   -> D09
+    D09 when D08 answers 'continue' -- Is an allowlisted remote repair eligible?
+      remote          -> remote_resolution
+      self_help_check -> D11
+    D11 when D09 answers 'self_help_check' -- Is guided customer self-help suitable?
+      self_help      -> self_help
+      field_planning -> field_planning
+  a node with no decision runs on to the next; every node also has an escalation
+    edge to __end__, wired uniformly from the budget guard
+  exits awaiting a stage 0
+  nodes that end the workflow on purpose 3
+    preventive_maintenance
+    reconciliation_closure
+    record_escalation

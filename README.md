@@ -51,15 +51,22 @@ natural key, the SLA clock is write-once, and no non-idempotent external write s
 | `src/lpr_cpe/security/` | Redaction, prompt-injection neutralisation, role-based tool allowlists |
 | `src/lpr_cpe/observability/` | Structured logging, tracing attributes, KPI derivation |
 | `src/lpr_cpe/cli.py` | The `lpr-cpe` console script: compile the graph, report topology and config |
-| `docs/` | The vendored specification and the vendor-integration gap register |
+| `src/lpr_cpe/audit.py` | The `lpr-cpe-audit` console script: run every gate, write the evidence bundle |
+| `docs/` | The vendored specification, the gap register, the workflow diagrams, the implementation report |
+| `audit/` | The last bundle: each gate's raw output, and `MANIFEST.json` |
 
-Four things this table would otherwise be expected to list are **not written yet**. They are named
+Three things this table would otherwise be expected to list are **not written yet**. They are named
 here rather than omitted, so that their absence reads as a gap and not as a table nobody updated:
 `src/lpr_cpe/api/` (the HTTP surface, approval resume and the inbound webhooks), the transactional
-outbox and migrations under `persistence/`, the six resolution subgraphs past the fork in `graph/`,
-and everything `docs/` is eventually to hold beyond those two files -- the diagrams, the decision
-tables, the runbook and the decision records. [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §5
-tracks each one.
+outbox and migrations under `persistence/`, and seven of the nine documents `docs/` is eventually to
+hold -- the decision tables, the runbook, the KPI definitions and the decision records.
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §5 tracks each one.
+
+This paragraph said **four** things until 2026-08-24, and the fourth was "the six resolution
+subgraphs past the fork in `graph/`". All nine subgraphs are built and all 24 decisions are wired;
+that entry had been wrong since the plant branch landed on the 21st. It is corrected here rather
+than deleted, because a stale gap list is the specific failure this paragraph exists to prevent and
+it is worth one line admitting the list did it too.
 
 ## Setup
 
@@ -98,22 +105,36 @@ still pending.
 ## Running it
 
 ```bash
+make check         # ruff check, ruff format --check, mypy --strict, then the suite
+make audit         # all of the above, captured into audit/ with a manifest
 make test-fast     # the full suite, without coverage instrumentation
-make lint          # ruff check, then ruff format --check
-make typecheck     # mypy --strict
 ```
 
-`make test` and `make check` put the same suite behind a `--cov-fail-under=85` gate that **does not
-pass today**, so `make test-fast` is the target that runs green.
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §6 says why: the committed tests are still
-unit-only. Every target is a thin wrapper over the commands its recipe shows, and
-[Makefile](Makefile) is their only owner, so where `make` is unavailable -- a plain Windows shell,
-for instance -- run those commands directly. `make help` lists every target.
+`make check` passes, coverage gate included. That gate is worth one sentence of history: until
+2026-08-24 `--cov-fail-under=85` compared the total *rounded to `precision`*, which defaults to 0,
+so the effective bar was 84.5% and a run at 84.92% exited zero while printing `FAIL ... not
+reached`. `precision = 2` is now set and the gate means what it says.
+
+Every target is a thin wrapper over the commands its recipe shows, and [Makefile](Makefile) is their
+only owner, so where `make` is unavailable -- a plain Windows shell, for instance -- run those
+commands directly. `make help` lists every target.
+
+### The audit bundle
+
+`make audit` runs all six gates, writes each one's output verbatim to `audit/latest/`, and records
+the commit, the interpreter, the pinned package versions and the derived figures in
+[audit/MANIFEST.json](audit/MANIFEST.json). It exits non-zero if any gate failed, and it produces a
+bundle either way -- a bundle that only existed when everything was green would be useless at the
+one moment anybody needed it.
+
+[docs/implementation-report.md](docs/implementation-report.md) is the specification's deliverable 17
+and reads off that manifest. It is the only document here whose figures a test checks: state a
+number it did not measure and the suite goes red.
 
 The console script reports; it does not run an incident:
 
 ```bash
-lpr-cpe topology   # compile the parent graph, then print its nodes, decisions and unwired exits
+lpr-cpe topology   # compile the parent graph, then print its nodes, decisions and where runs end
 lpr-cpe config     # the settings this process would run under, the safety switches first
 lpr-cpe            # both
 ```

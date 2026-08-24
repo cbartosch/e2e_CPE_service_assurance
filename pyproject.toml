@@ -59,6 +59,11 @@ dev = [
 
 [project.scripts]
 lpr-cpe = "lpr_cpe.cli:main"
+# Separate from `lpr-cpe` on purpose: that command promises to read no external system and write to
+# none, and this one runs six subprocesses and writes `audit/`. See `lpr_cpe/audit.py`.
+# `tests/unit/test_cli.py` covers both without being extended -- it reads this table and imports
+# whatever it names.
+lpr-cpe-audit = "lpr_cpe.audit:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lpr_cpe"]
@@ -154,6 +159,15 @@ branch = true
 omit = ["*/simulation/fixtures/*"]
 
 [tool.coverage.report]
+# `--cov-fail-under=85` did not mean 85% until this line existed, and the gap was half a point.
+# coverage compares the total *rounded to `precision`*, which defaults to 0, so 84.92% rounded to
+# 85 satisfied a bar of 85 and the run exited 0 while printing
+# `FAIL Required test coverage of 85% not reached. Total coverage: 84.92%`. Measured on 2026-08-24
+# against coverage 7.15.4 / pytest-cov 7.1.0: the identical run exits 1 with this line and 0
+# without it. So `make test` and `make check` had never once failed on coverage, and
+# IMPLEMENTATION_PLAN.md §5's "the gate is met ... and exits 0" was quoting an exit code that could
+# not have said otherwise. The printed word `reached` was evidence; the exit code was not.
+precision = 2
 show_missing = true
 skip_covered = false
 exclude_lines = [

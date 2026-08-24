@@ -1,0 +1,129 @@
+........................................................................ [  7%]
+........................................................................ [ 15%]
+........................................................................ [ 23%]
+........................................................................ [ 30%]
+........................................................................ [ 38%]
+........................................................................ [ 46%]
+........................................................................ [ 53%]
+........................................................................ [ 61%]
+........................................................................ [ 69%]
+........................................................................ [ 77%]
+........................................................................ [ 84%]
+........................................................................ [ 92%]
+.......................................................................  [100%]
+=============================== tests coverage ================================
+_______________ coverage: platform win32, python 3.14.2-final-0 _______________
+
+Name                                                    Stmts   Miss Branch BrPart   Cover   Missing
+----------------------------------------------------------------------------------------------------
+src\lpr_cpe\__init__.py                                     0      0      0      0 100.00%
+src\lpr_cpe\audit.py                                       98     33     12      1  63.64%   221-234, 254-255, 264-267, 309-317, 330, 338-366
+src\lpr_cpe\cli.py                                         72      1     20      1  97.83%   138
+src\lpr_cpe\config\__init__.py                              3      0      0      0 100.00%
+src\lpr_cpe\config\clock.py                                71     18     20      6  67.03%   50, 54, 72, 74, 94, 109, 112, 116-117, 119, 133-140
+src\lpr_cpe\config\settings.py                             94      3      6      3  94.00%   138, 144, 161
+src\lpr_cpe\decision_services\__init__.py                   2      0      0      0 100.00%
+src\lpr_cpe\decision_services\_payload.py                  19      0      6      0 100.00%
+src\lpr_cpe\decision_services\blast_radius.py              68      5     20      4  89.77%   91, 196, 235-236, 244
+src\lpr_cpe\decision_services\delimiter.py                 53     13     14      5  73.13%   100, 113-114, 120-121, 127-128, 145-150, 157-159
+src\lpr_cpe\decision_services\forecast.py                  37      1      8      1  95.56%   99
+src\lpr_cpe\decision_services\impact.py                    51      7     18      3  79.71%   77->76, 96, 105, 182-186
+src\lpr_cpe\decision_services\rca.py                       42      1      6      1  95.83%   193
+src\lpr_cpe\decision_services\resolution.py                43      4      8      2  88.24%   398-402, 404-408
+src\lpr_cpe\decision_services\restoration.py               77      2     32      2  96.33%   106, 180
+src\lpr_cpe\decision_services\sla.py                       76      5     18      2  92.55%   117-123, 195, 226
+src\lpr_cpe\detectors\__init__.py                           8      0      0      0 100.00%
+src\lpr_cpe\detectors\base.py                              98      5      8      2  93.40%   111, 118, 174, 281-282
+src\lpr_cpe\detectors\correlation.py                      110      5     40      6  92.67%   38, 45, 47, 67, 156->148, 226
+src\lpr_cpe\detectors\cpe_wifi.py                         160      6     78      9  93.70%   139, 142, 162, 166, 170->164, 230->235, 270, 319, 407->410
+src\lpr_cpe\detectors\localisation.py                      82      2     30      3  95.54%   212, 222->227, 262
+src\lpr_cpe\detectors\physical.py                         154      6     70     17  89.73%   45, 75, 90->95, 96->101, 102->107, 108->113, 114->121, 122->127, 128->133, 134, 151->153, 153->155, 271, 295-296, 309->313, 313->317, 317->321
+src\lpr_cpe\detectors\registry.py                          22      0      2      0 100.00%
+src\lpr_cpe\detectors\risk.py                              98      2     30      2  96.88%   54, 238
+src\lpr_cpe\dispatch\__init__.py                            2      0      0      0 100.00%
+src\lpr_cpe\dispatch\constraints.py                       147      6     40      4  94.65%   133-134, 209, 226, 250, 296
+src\lpr_cpe\dispatch\objective.py                          44      0     10      0 100.00%
+src\lpr_cpe\dispatch\optimizer.py                         183      3     40      4  96.86%   271->269, 332, 403, 481
+src\lpr_cpe\dispatch\travel.py                             73     14     14      1  73.56%   188->195, 222-244
+src\lpr_cpe\domain\__init__.py                             11      0      0      0 100.00%
+src\lpr_cpe\domain\base.py                                 24      4      0      0  83.33%   54, 58, 84-85
+src\lpr_cpe\domain\boundaries.py                           20      0      6      0 100.00%
+src\lpr_cpe\domain\closure.py                              95      8     20      7  86.96%   51, 56, 61, 100, 143, 148, 158, 163
+src\lpr_cpe\domain\diagnosis.py                           229     16     32     10  88.51%   59, 111, 118, 153, 167, 299-301, 330, 371, 389, 394, 399, 449-454
+src\lpr_cpe\domain\enums.py                               299      0      0      0 100.00%
+src\lpr_cpe\domain\field_ops.py                           250     15     32      8  90.43%   68, 81, 106, 124, 154, 216-218, 251, 326, 328, 406, 418-420
+src\lpr_cpe\domain\governance.py                          164     13     16      7  87.78%   56, 58, 103, 107, 115, 151, 200, 205, 241-243, 252, 340
+src\lpr_cpe\domain\lifecycle.py                            26      3      6      1  87.50%   247, 252, 256
+src\lpr_cpe\domain\records.py                             195     18     28     10  84.75%   68, 74, 114-124, 164, 168-170, 213, 215, 222, 252, 264-265, 288, 361
+src\lpr_cpe\domain\resolution.py                          117      7     10      2  91.34%   109, 179, 243, 246-249
+src\lpr_cpe\graph\__init__.py                               0      0      0      0 100.00%
+src\lpr_cpe\graph\builder.py                              141      7     58      7  92.96%   510, 621, 629, 637, 645, 656, 662
+src\lpr_cpe\graph\context.py                               31      0      0      0 100.00%
+src\lpr_cpe\graph\guards.py                                75      0     18      0 100.00%
+src\lpr_cpe\graph\inspect.py                               43      0     14      0 100.00%
+src\lpr_cpe\graph\interrupts.py                            48      0     10      0 100.00%
+src\lpr_cpe\graph\nodes\__init__.py                        12      0      0      0 100.00%
+src\lpr_cpe\graph\nodes\_runtime.py                       211     17     60      9  89.67%   88->87, 373-374, 385, 388, 393-394, 441->exit, 456, 466, 470-473, 498-500, 530, 548
+src\lpr_cpe\graph\nodes\closure.py                         36      0     10      0 100.00%
+src\lpr_cpe\graph\nodes\diagnosis.py                       82      3     14      3  93.75%   358, 375, 391
+src\lpr_cpe\graph\nodes\evidence.py                       318     24    102     15  90.24%   189-190, 293->288, 355-358, 366, 370, 447, 522->525, 612, 805, 811, 874-878, 895, 1047, 1109, 1122-1131, 1170-1171, 1230
+src\lpr_cpe\graph\nodes\governance.py                      64      1      8      1  97.22%   113
+src\lpr_cpe\graph\nodes\intake.py                         241     27    100     40  80.35%   136, 140-142, 155, 163, 193, 283, 287, 293-294, 307, 309, 414->422, 419, 424->454, 428->433, 435-437, 441->448, 449, 455->462, 464, 466, 470->473, 489->507, 533->535, 535->537, 537->539, 539->541, 541->543, 543->549, 612->616, 616->618, 618->620, 620->623, 629->641, 668, 674, 793, 831->837, 898, 900, 902, 929
+src\lpr_cpe\graph\routing.py                              261      0    132      1  99.75%   200->202
+src\lpr_cpe\graph\state.py                                169     12     40      9  89.95%   131, 144, 165, 182, 185, 197, 199, 206, 235->233, 477, 481-482, 486
+src\lpr_cpe\graph\subgraphs\__init__.py                    11      0      0      0 100.00%
+src\lpr_cpe\graph\subgraphs\_mr.py                         74      1     14      4  94.32%   105->112, 106->108, 110->112, 303
+src\lpr_cpe\graph\subgraphs\_shared.py                     53      7     12      2  86.15%   104, 140-145
+src\lpr_cpe\graph\subgraphs\field_execution.py            341     57     98     27  77.22%   259, 308, 347-348, 354, 356, 360-361, 365->371, 368, 392, 554, 751, 766, 795, 932, 1067->1073, 1151-1158, 1189, 1417->1419, 1419->1421, 1422, 1448, 1521, 1522->1527, 1524, 1526, 1527->1529, 1561, 1691, 1752->1764, 1824-1918
+src\lpr_cpe\graph\subgraphs\field_planning.py             227     14     46     13  89.38%   504->506, 506->511, 581, 610, 695, 776, 892, 926, 1022, 1051, 1270-1271, 1277, 1374-1380
+src\lpr_cpe\graph\subgraphs\plant_execution.py            151      7     36      5  93.58%   198, 201, 347, 376-377, 474, 663
+src\lpr_cpe\graph\subgraphs\plant_referral.py             128     10     22      7  88.67%   416->418, 464, 529, 637, 760, 863-869, 878-880
+src\lpr_cpe\graph\subgraphs\preventive_maintenance.py     127      1     24      1  98.68%   742
+src\lpr_cpe\graph\subgraphs\reconciliation_closure.py     321     37     94     22  83.37%   236, 240, 255, 277, 284, 295, 307-332, 375, 378, 414-415, 423, 425, 470, 487, 699, 765, 830, 867, 1019, 1022, 1024, 1096, 1178->1180
+src\lpr_cpe\graph\subgraphs\remote_resolution.py          154      7     36      8  92.11%   184, 294, 316, 443, 514, 595->598, 681, 733
+src\lpr_cpe\graph\subgraphs\restoration_validation.py     109      3     18      3  95.28%   161, 162->159, 222, 349
+src\lpr_cpe\graph\subgraphs\self_help.py                  234     32     74     18  82.47%   181, 269, 278, 281, 293-303, 315-347, 376, 393-395, 427, 507->526, 644, 705, 708, 711, 770, 804, 806->802, 896, 936, 1066, 1076-1081
+src\lpr_cpe\integrations\__init__.py                       11      5      2      0  46.15%   76-80, 85
+src\lpr_cpe\integrations\base.py                          111     32     18      1  62.02%   97, 115, 149-157, 160-161, 164-166, 170, 192-210
+src\lpr_cpe\integrations\communications\__init__.py         2      0      0      0 100.00%
+src\lpr_cpe\integrations\communications\simulator.py       85     22     24      6  66.97%   168-187, 221, 230, 279, 281, 328, 342, 368-373
+src\lpr_cpe\integrations\cpe\__init__.py                    2      0      0      0 100.00%
+src\lpr_cpe\integrations\cpe\simulator.py                 152      4     42      3  96.39%   590, 721, 739-740
+src\lpr_cpe\integrations\gis\__init__.py                    2      0      0      0 100.00%
+src\lpr_cpe\integrations\gis\simulator.py                  76      3     20      4  92.71%   109, 165, 234->238, 245
+src\lpr_cpe\integrations\hfc\__init__.py                    2      0      0      0 100.00%
+src\lpr_cpe\integrations\hfc\simulator.py                  43      3     10      3  88.68%   39, 81, 139
+src\lpr_cpe\integrations\inventory\__init__.py              2      0      0      0 100.00%
+src\lpr_cpe\integrations\inventory\simulator.py           131     58     58     11  49.74%   97, 101, 135, 146-163, 233-301, 307, 309, 311, 314, 323-337, 342, 356-362, 367, 370
+src\lpr_cpe\integrations\jtrack\__init__.py                 2      0      0      0 100.00%
+src\lpr_cpe\integrations\jtrack\simulator.py               75     16     26     10  72.28%   66, 73, 114, 122, 130, 147->168, 164, 178-191, 229->228, 231, 273-276
+src\lpr_cpe\integrations\nxt\__init__.py                    2      0      0      0 100.00%
+src\lpr_cpe\integrations\nxt\simulator.py                  54      3     16      3  91.43%   137, 178, 220
+src\lpr_cpe\integrations\pon\__init__.py                    2      0      0      0 100.00%
+src\lpr_cpe\integrations\pon\simulator.py                  56      4     14      4  88.57%   39, 83, 147, 194
+src\lpr_cpe\integrations\tmf\__init__.py                    2      0      0      0 100.00%
+src\lpr_cpe\integrations\tmf\simulator.py                  33      2      4      2  89.19%   66, 157
+src\lpr_cpe\integrations\wfm\__init__.py                    2      0      0      0 100.00%
+src\lpr_cpe\integrations\wfm\simulator.py                  74     23     32      5  62.26%   51, 59, 71, 99-102, 134-150, 179, 209-233
+src\lpr_cpe\observability\__init__.py                       4      0      0      0 100.00%
+src\lpr_cpe\observability\kpi.py                          291     34     98     24  83.55%   87, 98, 154, 202-203, 356, 376, 386, 400, 416, 441, 456, 462, 477, 503, 591, 598, 609, 625, 657, 695, 738->740, 741->743, 752, 756, 767, 821-829, 833
+src\lpr_cpe\observability\logging.py                       66     44     18      0  26.19%   68-74, 79, 95-146, 151, 161-162, 173-176, 196-204, 215, 220
+src\lpr_cpe\observability\tracing.py                      243    167     66      0  24.60%   102, 105, 108, 111, 124, 127-128, 131-132, 150-156, 159-163, 189-201, 206-208, 221-236, 253, 275-320, 329-335, 340, 345, 351-352, 368-376, 397-408, 418-429, 458-480, 484-486, 500-510, 521-530, 540-548, 552-558, 562-564, 568-573, 582-588
+src\lpr_cpe\persistence\__init__.py                         2      0      0      0 100.00%
+src\lpr_cpe\persistence\checkpointer.py                    19      0      4      0 100.00%
+src\lpr_cpe\persistence\serde.py                           10      0      0      0 100.00%
+src\lpr_cpe\policies\__init__.py                            4      0      0      0 100.00%
+src\lpr_cpe\policies\engine.py                            280      9    114      6  96.19%   223-226, 267, 640, 714, 728, 930->933, 940->943, 988
+src\lpr_cpe\policies\loader.py                             61      3     10      1  94.37%   66, 129-130
+src\lpr_cpe\policies\models.py                            393      9    104      8  96.58%   371, 417, 423, 470, 614, 616, 670, 776, 807
+src\lpr_cpe\security\__init__.py                            4      0      0      0 100.00%
+src\lpr_cpe\security\injection.py                          34     19     10      0  34.09%   162-165, 189-195, 206, 225-231
+src\lpr_cpe\security\rbac.py                               57      5      6      2  88.89%   63, 255, 323, 339, 344
+src\lpr_cpe\security\redaction.py                         163    120     84      1  17.81%   235, 261-267, 277-289, 299-305, 315-322, 332-336, 345-346, 358-365, 374-377, 386-401, 422-475, 498-525
+src\lpr_cpe\simulation\__init__.py                          0      0      0      0 100.00%
+src\lpr_cpe\simulation\loader.py                          112     10     12      3  89.52%   88-89, 94-95, 100, 113, 130-131, 174, 226
+src\lpr_cpe\simulation\simulated_base.py                   54      2     10      2  93.75%   86, 144, 167->169
+----------------------------------------------------------------------------------------------------
+TOTAL                                                    9797   1090   2542    418  85.14%
+Required test coverage of 85% reached. Total coverage: 85.14%
+935 passed in 82.07s (0:01:22)

@@ -1,0 +1,13 @@
+config
+  app_mode simulation
+  allow_production_writes False
+  writes_permitted False
+  environment local
+  model_provider fake
+  model_name claude-sonnet-4-5
+  postgres_enabled False
+  timezone America/Puerto_Rico
+  scan_windows 07:00, 21:00
+  max_graph_steps 60
+  max_diagnostic_cycles 6
+  max_resolution_cycles 6
