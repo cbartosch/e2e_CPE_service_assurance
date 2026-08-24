@@ -27,11 +27,11 @@ because a 0/0 contribution is not a measurement.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 
 from lpr_cpe.config.clock import Clock, SystemClock
 from lpr_cpe.domain.base import new_id
@@ -153,6 +153,38 @@ def mark(key: MetricTimestamp, when: datetime) -> dict[str, dict[str, str]]:
     if when.tzinfo is None:
         raise ValueError(f"metric timestamp {key} must be timezone-aware")
     return {"metrics_timestamps": {key.value: when.isoformat()}}
+
+
+def stamp(update: MutableMapping[str, Any], key: MetricTimestamp, when: datetime) -> None:
+    """Record a metric timestamp on an update **that may already carry one**. Use this, not `mark`.
+
+    `mark` returns the whole `{"metrics_timestamps": {...}}` shape, and its own docstring explains
+    that the shape is what makes `{**other_updates, **mark(...)}` safe. That is true of the literal
+    form and false of the other one: `update.update(mark(...))` is a plain `dict.update` on the
+    outer mapping, so it **replaces** the `metrics_timestamps` key rather than merging into it. The
+    stamp already there is gone, silently, and `merge_dict` never sees it -- the reducer merges what
+    a node *returned* into state, and by then the node has already dropped it.
+
+    Found by a mutation sweep on 2026-08-24, at three sites where two stamps were written in one
+    update and only the second survived:
+
+    | site | written | kept |
+    | --- | --- | --- |
+    | `restoration_validation.assess_restoration` | `validated_at`, `restored_at` | `restored_at` |
+    | `remote_resolution.verify_remote_repair` | `remote_fix_at`, `restored_at` | `restored_at` |
+    | `field_execution.record_field_arrival` | `dispatched_at`, `on_site_at` | `on_site_at` |
+
+    Each of the three sits directly under a comment asserting that both stamps matter and are
+    different facts. No KPI reads any of the three lost keys today, so no number was wrong -- which
+    is exactly why nothing noticed, and exactly why this is worth a helper rather than three fixes:
+    the failure is silent at the moment it happens and only becomes visible when somebody finally
+    reads the key.
+
+    Merges rather than replaces, and returns `None` so it cannot be mistaken for `mark` at a call
+    site. `mark` is kept for the literal form, which was always correct.
+    """
+    stamped = mark(key, when)["metrics_timestamps"]
+    update["metrics_timestamps"] = {**update.get("metrics_timestamps", {}), **stamped}
 
 
 def _read_ts(state: IncidentState, key: MetricTimestamp) -> datetime | None:

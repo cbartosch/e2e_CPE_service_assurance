@@ -53,6 +53,7 @@ from lpr_cpe.graph.interrupts import (
     request_approval,
 )
 from lpr_cpe.graph.state import IncidentState
+from lpr_cpe.observability.kpi import MetricTimestamp, mark, stamp
 from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 from lpr_cpe.security.rbac import approvers_for
 
@@ -748,3 +749,65 @@ async def test_the_asking_node_is_named_in_full_and_the_parents_next_names_only_
     )
     assert await gi.awaiting_node_path(nested, nested_config) == ()
     assert await gi.is_awaiting_human(nested, nested_config) is False
+
+
+# ------------------------------------------------------------------------------------------------
+# How a node composes a metric timestamp into an update it is already building
+# ------------------------------------------------------------------------------------------------
+
+
+def test_a_second_stamp_in_one_update_does_not_displace_the_first() -> None:
+    """`stamp` merges where `update.update(mark(...))` replaced, and this is the mechanism's owner.
+
+    `mark` returns the whole `{"metrics_timestamps": {...}}` shape, and its docstring explains that
+    the shape is what makes `{**other_updates, **mark(...)}` safe. That is true of the literal form
+    and false of the other one: `update.update(mark(...))` is a plain `dict.update` on the *outer*
+    mapping, so it replaces the `metrics_timestamps` key rather than merging into it. `merge_dict`
+    cannot recover the loss -- the reducer merges what a node returned, and the node has already
+    dropped it.
+
+    Three sites did exactly that, each writing two stamps into one update and keeping only the
+    second. Found by mutation sweep on 2026-08-24; `observability.kpi.stamp` lists them.
+
+    This test exists because the three sites cannot all hold themselves to account.
+    `restoration_validation` and `remote_resolution` each have an end-to-end guard that goes red
+    when the old idiom is reinstated. `field_execution` does not and cannot: both of its stamps are
+    conditional on their own absence from state, so the lap that loses `dispatched_at` re-writes it
+    on the next one and the fixture reaches its pause with both present. The end-to-end symptom is
+    masked there while the defect is not, so the mechanism is asserted directly instead -- which is
+    also the only place the *contrast* between the two idioms can be stated.
+
+    Shown red by reverting `stamp` to `update.update(mark(key, when))`:
+
+        AssertionError: the earlier stamp must survive a later one written into the same update
+        assert 'triaged_at' in {'restored_at': '2026-03-02T14:30:00+00:00'}
+    """
+    now = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
+    later = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)
+
+    # The literal form, which was always correct, and then a second stamp on top of it.
+    update: dict[str, Any] = {
+        "status": IncidentStatus.VALIDATING,
+        **mark(MetricTimestamp.TRIAGED_AT, now),
+    }
+    stamp(update, MetricTimestamp.RESTORED_AT, later)
+
+    assert MetricTimestamp.TRIAGED_AT.value in update["metrics_timestamps"], (
+        "the earlier stamp must survive a later one written into the same update"
+    )
+    assert update["metrics_timestamps"] == {
+        MetricTimestamp.TRIAGED_AT.value: now.isoformat(),
+        MetricTimestamp.RESTORED_AT.value: later.isoformat(),
+    }
+    assert update["status"] is IncidentStatus.VALIDATING, "nothing else on the update may move"
+
+    # The positive control: the idiom this replaced really did lose it, so the assertions above are
+    # about `stamp` doing something rather than about the situation being harmless.
+    clobbered: dict[str, Any] = {**mark(MetricTimestamp.TRIAGED_AT, now)}
+    clobbered.update(mark(MetricTimestamp.RESTORED_AT, later))
+    assert MetricTimestamp.TRIAGED_AT.value not in clobbered["metrics_timestamps"]
+
+    # And an update with no stamps yet is the ordinary case, which must still work.
+    fresh: dict[str, Any] = {}
+    stamp(fresh, MetricTimestamp.CLOSED_AT, later)
+    assert fresh == {"metrics_timestamps": {MetricTimestamp.CLOSED_AT.value: later.isoformat()}}

@@ -242,7 +242,7 @@ from lpr_cpe.graph.subgraphs._shared import (
     idempotency_key_for,
     policy_input_for,
 )
-from lpr_cpe.observability.kpi import MetricTimestamp, mark
+from lpr_cpe.observability.kpi import MetricTimestamp, mark, stamp
 
 # ------------------------------------------------------------------------------------------------
 # Reading the incident for the optimizer
@@ -1197,7 +1197,7 @@ async def commit_field_dispatch(state: IncidentState, ctx: GraphContext) -> Node
         # per key -- and an incident that tried a remote repair first already holds the true first
         # action. An unconditional stamp here would move "first" forward to whichever action ran
         # last, which is the one quantity the name promises it is not.
-        update.update(mark(MetricTimestamp.FIRST_ACTION_AT, now))
+        stamp(update, MetricTimestamp.FIRST_ACTION_AT, now)
     # `preview`, not `state`: `automation_coverage_rate`'s denominator is the executed entries of
     # `action_history`, and the entry that just executed is in `update`.
     update["kpi_events"] = emit_kpi(

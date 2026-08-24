@@ -71,7 +71,7 @@ from lpr_cpe.graph.subgraphs.remote_resolution import (
     verify_remote_repair,
 )
 from lpr_cpe.integrations.cpe.simulator import SUPPORTED_ACTIONS
-from lpr_cpe.observability.kpi import KPICalculator
+from lpr_cpe.observability.kpi import KPICalculator, MetricTimestamp
 from lpr_cpe.policies.loader import load_pack
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
@@ -417,6 +417,21 @@ async def test_an_approved_repair_executes_and_is_verified_against_a_fresh_read(
     assert verified.fixed_it is True, (
         "`fixed_it` is what D10 reads; an action that ran and verified must satisfy it or the "
         "incident loops back into diagnosis having already been repaired"
+    )
+
+    # Both stamps, which is what the source comment above them claims and what
+    # `update.update(mark(...))` silently made false: a plain `dict.update` replaces the
+    # `metrics_timestamps` key rather than merging into it, so only the second of the two survived
+    # the node. Found by mutation sweep on 2026-08-24 and fixed by `observability.kpi.stamp`, whose
+    # docstring carries the three sites. Reinstating `update.update(mark(...))` here fails on
+    # `remote_fix_at`; nothing else in the suite reads it.
+    stamps = final["metrics_timestamps"]
+    assert MetricTimestamp.REMOTE_FIX_AT.value in stamps, (
+        "this branch worked, and `remote_fix_at` is the record of that -- a second stamp written "
+        "into the same update must not displace it"
+    )
+    assert MetricTimestamp.RESTORED_AT.value in stamps, (
+        "a verified remote fix *is* the restoration, so both keys are written and both are real"
     )
 
     state = await graph.aget_state(config)

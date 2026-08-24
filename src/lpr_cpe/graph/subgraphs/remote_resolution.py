@@ -125,7 +125,7 @@ from lpr_cpe.graph.subgraphs._shared import (
     policy_input_for,
     reachability_verdict,
 )
-from lpr_cpe.observability.kpi import MetricTimestamp, mark
+from lpr_cpe.observability.kpi import MetricTimestamp, mark, stamp
 
 # ------------------------------------------------------------------------------------------------
 # Reading the incident for the policy engine
@@ -764,8 +764,8 @@ async def verify_remote_repair(state: IncidentState, ctx: GraphContext) -> NodeU
         # `restored_at` is when the customer's service came back, which `time_to_restore_seconds`
         # measures. They coincide here because a verified remote fix *is* the restoration, and they
         # would not for a fix that needed a truck.
-        update.update(mark(MetricTimestamp.REMOTE_FIX_AT, now))
-        update.update(mark(MetricTimestamp.RESTORED_AT, now))
+        stamp(update, MetricTimestamp.REMOTE_FIX_AT, now)
+        stamp(update, MetricTimestamp.RESTORED_AT, now)
     return update
 
 

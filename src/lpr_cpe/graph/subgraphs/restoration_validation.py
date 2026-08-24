@@ -103,7 +103,7 @@ from lpr_cpe.graph.nodes.evidence import (
     subject_of,
 )
 from lpr_cpe.graph.state import IncidentState
-from lpr_cpe.observability.kpi import MetricTimestamp, mark
+from lpr_cpe.observability.kpi import MetricTimestamp, mark, stamp
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -553,7 +553,7 @@ async def assess_restoration(state: IncidentState, ctx: GraphContext) -> NodeUpd
         # a fix nobody could verify at the moment it was applied -- a plant repair, a field visit.
         # `mark` merges, and `verify_remote_repair` may already have stamped the same instant for a
         # remote fix it could verify itself; the later stamp wins and both describe the same event.
-        update.update(mark(MetricTimestamp.RESTORED_AT, now))
+        stamp(update, MetricTimestamp.RESTORED_AT, now)
         # `preview`, not `state`: `time_to_restore_seconds` reads the stamp two lines above, which
         # is still sitting unreduced in `update`. See `select_remote_action` for the same trap.
         update["kpi_events"] = emit_kpi(

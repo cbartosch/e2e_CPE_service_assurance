@@ -21,6 +21,7 @@ wiring. P23 is not here either, for a stronger reason: it is a parent node. `tes
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -30,21 +31,25 @@ from langgraph.graph import END, START
 from langgraph.types import Command
 
 from lpr_cpe.config.clock import FrozenClock
+from lpr_cpe.decision_services.restoration import stability_window
 from lpr_cpe.detectors.base import DetectorResult
 from lpr_cpe.domain.diagnosis import AnomalyFinding
 from lpr_cpe.domain.enums import (
     ActionOutcome,
     ActionType,
     CaseType,
+    CrewType,
     EventSource,
     EvidenceKind,
     IncidentStatus,
+    KPIName,
     ReasonCode,
     Severity,
     Technology,
 )
+from lpr_cpe.domain.field_ops import WorkOrder
 from lpr_cpe.domain.governance import ActionRecord
-from lpr_cpe.domain.records import AssuranceEvent, SLAContext
+from lpr_cpe.domain.records import AssuranceEvent, EvidenceItem, SLAContext
 from lpr_cpe.graph.builder import build_parent_graph
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.guards import ESCALATED, ONWARD
@@ -56,9 +61,13 @@ from lpr_cpe.graph.subgraphs.restoration_validation import (
     build_restoration_validation_graph,
     fix_action_type,
     fix_completed_at,
+    post_fix_looks,
     window_deadline,
 )
+from lpr_cpe.observability.kpi import MetricTimestamp
+from lpr_cpe.policies.engine import PolicyEngine
 from lpr_cpe.policies.loader import load_pack
+from lpr_cpe.policies.models import ValidationPolicy
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
@@ -195,6 +204,68 @@ def test_the_deadline_is_the_repair_plus_the_window_that_repair_earns() -> None:
     assert window_deadline(state, policy) == finished + timedelta(
         minutes=policy.stability_window_minutes
     )
+
+
+def test_the_window_is_measured_from_the_last_repair_and_named_by_the_last_action() -> None:
+    """Three claims about *which* repair, all of which a mutation sweep found undefended.
+
+    The test above establishes that `window_deadline` composes the two helpers. It cannot establish
+    which record they pick, because it holds exactly one: with a single `ActionRecord`, `max` and
+    `min` over the timestamps agree, and dropping `work_orders` from `fix_completed_at` changes
+    nothing. So three separate defects were invisible to the whole suite, and each is asserted here
+    against a state that can tell them apart -- two actions at different instants with different
+    types, and a work order later than both.
+
+    * **The start is the latest fix, not the earliest.** `min(recorded)` survived the whole suite.
+      An incident repaired twice would measure its window from the attempt that did not hold, and a
+      window that expired an hour ago passes on the first sample.
+    * **A completed work order is a fix.** Deleting the `work_orders` line survived too. A truck
+      roll leaves no `ActionRecord`, so on the field path the whole window would be measured from
+      whatever remote attempt preceded the visit -- or, with none, from nothing at all.
+    * **The length is named by the latest action.** `record.completed_at < latest` survived. The
+      window a `cpe_reboot` earns and the one a plant repair earns are different pack values, so an
+      incident that rebooted and then had plant work would be scored against the reboot's window.
+
+    The work order is deliberately the newest record and carries no `ActionType`, which is the case
+    `window_deadline`'s own docstring describes: it moves the start without naming an action, so
+    `fix_action_type` still answers from `action_history` and `stability_window` reads that as the
+    plant case. Asserting the pair together is what stops one helper being fixed into agreement
+    with the other.
+    """
+    policy = load_pack().validation
+    early = NOW - timedelta(hours=3)
+    late = NOW - timedelta(minutes=40)
+    visit_finished = NOW - timedelta(minutes=10)
+    state: Any = {
+        "action_history": [
+            _repair("INC-W", finished=early, action=ActionType.CPE_REBOOT),
+            _repair("INC-W", finished=late, action=ActionType.OLT_PORT_RESET),
+        ],
+        "work_orders": [
+            WorkOrder(
+                work_order_id="WO-STAGE5",
+                incident_id="INC-W",
+                crew_type=CrewType.DIRTY,
+                created_at=early,
+                updated_at=visit_finished,
+                completed_at=visit_finished,
+            )
+        ],
+    }
+
+    # The work order is the last thing to finish, so it is the start -- and it is only reachable
+    # through the `work_orders` line.
+    assert fix_completed_at(state) == visit_finished
+    # ...while the action *type* still comes from the newest `ActionRecord`, which is the later of
+    # the two and not the first one written.
+    assert fix_action_type(state) is ActionType.OLT_PORT_RESET
+    assert window_deadline(state, policy) == visit_finished + stability_window(
+        ActionType.OLT_PORT_RESET, policy
+    )
+
+    # And the two helpers really do disagree about which record they read, which is the property
+    # that makes the assertions above independent rather than one fact stated twice.
+    assert fix_completed_at({**state, "work_orders": []}) == late  # type: ignore[arg-type]
 
 
 def test_no_recorded_repair_gives_no_deadline_rather_than_an_expired_one() -> None:
@@ -488,6 +559,223 @@ async def test_derived_detectors_are_dropped_from_both_sides_of_the_comparison(
     assert judged.detail["detectors_excluded_as_derived"] == ["no_fault_found_risk"]
     assert judged.detail["findings_before"] == 1
     assert judged.detail["findings_after"] == 1
+
+
+# ------------------------------------------------------------------------------------------------
+# What counts as a sample
+# ------------------------------------------------------------------------------------------------
+
+
+def _sample(kind: EvidenceKind, recorded_at: datetime) -> EvidenceItem:
+    return EvidenceItem(
+        kind=kind,
+        subject_ref="SVC-UT-001-A-03",
+        observed_at=recorded_at,
+        recorded_at=recorded_at,
+        source_system="cpe",
+        summary=f"{kind.value} at {recorded_at.isoformat()}",
+    )
+
+
+def test_only_a_cpe_read_inside_the_window_counts_as_a_post_fix_sample() -> None:
+    """`post_fix_looks` has two clauses and the suite defended neither. Both inflate the count.
+
+    `min_post_fix_samples` is the pack bar that decides whether a repair has held, so anything that
+    inflates this number closes incidents early -- which is the one direction of error this stage
+    exists to prevent.
+
+    * **The kind filter.** Dropping `item.kind is EvidenceKind.CPE_STATUS` survived the whole suite.
+      Every read the stage makes writes an evidence item, so counting all kinds counts one *look* as
+      several samples: measured here, four items become one sample or four depending on the clause.
+    * **The boundary.** `>` in place of `>=` survived too. A sample recorded at the exact instant the
+      window opens is the first sample of that window, and the fix's own read is routinely stamped
+      there -- `fix_completed_at` and the read that follows it share an instant whenever the clock
+      does not tick between them. It is asserted at the boundary and one second either side, which
+      is the shape `test_graph_foundations.py` settled on for every other bound in this repo.
+    """
+    start = NOW - timedelta(minutes=30)
+    state: Any = {
+        "evidence": [
+            _sample(EvidenceKind.CPE_STATUS, start - timedelta(seconds=1)),
+            _sample(EvidenceKind.CPE_STATUS, start),
+            _sample(EvidenceKind.CPE_STATUS, start + timedelta(seconds=1)),
+            _sample(EvidenceKind.RF_MEASUREMENT, start + timedelta(minutes=1)),
+            _sample(EvidenceKind.TOPOLOGY_LOOKUP, start + timedelta(minutes=2)),
+        ]
+    }
+
+    # Two of the three CPE reads are inside the window, and the one *at* the boundary is one of
+    # them: under `>` this is 1.
+    assert post_fix_looks(state, start) == 2
+    # The two non-CPE reads are inside the window too and are not samples: without the kind clause
+    # this is 4.
+    assert post_fix_looks(state, start - timedelta(hours=1)) == 3
+
+
+async def test_a_window_with_no_detector_reading_after_it_reports_no_samples(
+    diagnosed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`samples_in_window` is zero when nothing looked, however many reads are on the state.
+
+    The guard is `post_fix_looks(...) if ran_after else 0`, and deleting it survived the whole
+    suite. The failure it prevents is the sharpest one in this stage: evidence items are written by
+    `snapshot_post_fix_state` *before* any detector runs, so an incident whose adapters all answered
+    and whose detectors all declined to run would count those reads as samples and could satisfy
+    `min_post_fix_samples` having measured nothing at all.
+
+    Driven with `run_detectors` returning results that all report `ran=False`, which is what an
+    unavailable source looks like from the scorer's side -- not an empty list, which would be
+    indistinguishable from the detector set being empty.
+    """
+    state, ctx = diagnosed
+
+    async def _nothing_ran(_context: Any) -> list[DetectorResult]:
+        return [
+            DetectorResult(
+                detector_name="hfc_rf_pnm_degradation",
+                detector_version="1.0.0",
+                ran=False,
+                findings=[],
+            )
+        ]
+
+    monkeypatch.setattr(
+        "lpr_cpe.graph.subgraphs.restoration_validation.run_detectors", _nothing_ran
+    )
+    seeded = _with_repair(state, minutes_ago=90, action=ActionType.CPE_REBOOT)
+
+    _, _, out = await _run(seeded, ctx, thread="nothing-ran")
+
+    (judged,) = [event for event in out["audit_events"] if event.node == "assess_restoration"]
+    assert judged.detail["detectors_ran_after"] == []
+    assert judged.detail["samples_in_window"] == 0, (
+        "no detector looked after the fix, so nothing was sampled -- the reads on the state are "
+        "the snapshot node's, written before any detector ran"
+    )
+    assert out["validation"].passed is False
+
+
+# ------------------------------------------------------------------------------------------------
+# What a failed verdict must not stamp
+# ------------------------------------------------------------------------------------------------
+
+
+async def test_a_failed_validation_stamps_no_restore_time_and_emits_no_restore_kpi(
+    diagnosed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `if result.passed:` guard, which the whole suite left undefended.
+
+    Widening it to `result.passed or True` survived every test in the repository, and this is the
+    most consequential survivor the sweep found. Two things sit inside that branch:
+    `MetricTimestamp.RESTORED_AT` and `KPIName.TIME_TO_RESTORE_SECONDS`. Stamping them on a verdict
+    that *failed* does not break a run or raise anything -- it silently reports the incident as
+    restored at the instant it was found still broken, and feeds that interval into the headline
+    restoration KPI. An operator reading mean-time-to-restore would be reading a number computed
+    partly from incidents that never restored, and nothing anywhere would contradict it.
+
+    The failing verdict is produced by a detector that still scores after the repair, which is the
+    ordinary shape of "the fix did not hold" rather than a contrived one.
+    """
+    state, ctx = diagnosed
+
+    async def _still_broken(_context: Any) -> list[DetectorResult]:
+        return [
+            DetectorResult(
+                detector_name="hfc_rf_pnm_degradation",
+                detector_version="1.0.0",
+                ran=True,
+                findings=[_finding("hfc_rf_pnm_degradation", 0.95)],
+            )
+        ]
+
+    monkeypatch.setattr(
+        "lpr_cpe.graph.subgraphs.restoration_validation.run_detectors", _still_broken
+    )
+    seeded = {
+        **_with_repair(state, minutes_ago=90, action=ActionType.CPE_REBOOT),
+        "anomaly_findings": [_finding("hfc_rf_pnm_degradation", 1.0)],
+    }
+
+    _, _, out = await _run(seeded, ctx, thread="failed-verdict")
+
+    assert out["validation"].passed is False
+    assert MetricTimestamp.VALIDATED_AT.value in out["metrics_timestamps"], (
+        "the verdict was reached, so the validation instant is real whichever way it went"
+    )
+    assert MetricTimestamp.RESTORED_AT.value not in out["metrics_timestamps"], (
+        "a failed validation must not record a restoration instant; nothing was restored"
+    )
+    assert [
+        event
+        for event in out.get("kpi_events", [])
+        if event.kpi_name is KPIName.TIME_TO_RESTORE_SECONDS
+    ] == [], "time-to-restore must not be measured for an incident that did not restore"
+
+
+async def test_a_passing_validation_records_both_the_verdict_and_the_restoration(
+    diagnosed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two stamps, one update, and the second used to delete the first.
+
+    `assess_restoration` writes `validated_at` in its update literal and `restored_at` inside the
+    `if result.passed:` branch. The branch used `update.update(mark(...))`, which is a plain
+    `dict.update` on the outer mapping and therefore **replaces** `metrics_timestamps` rather than
+    merging into it -- so on every passing validation the verdict's own instant was dropped before
+    the reducer ever saw it. `merge_dict` cannot help: it merges what a node returned, and by then
+    the node had thrown it away. Found by mutation sweep on 2026-08-24; the fix is
+    `observability.kpi.stamp` and its docstring lists the three sites.
+
+    This is the only test in the repository that reaches a *passing* validation, which is why the
+    defect survived. Getting there needs the pack's `min_post_fix_samples` relaxed to 1: the shipped
+    3 is what `IMPLEMENTATION_PLAN.md` records as holding the closing run open for three laps, and a
+    single drive of this subgraph takes one look. That is a real property of the pack rather than a
+    convenience -- the companion tests above run at the shipped value and fail for the shipped
+    reason -- so it is lowered here explicitly rather than by seeding fake evidence.
+
+    Shown red by reinstating `update.update(mark(...))`::
+
+        AssertionError: the verdict has an instant of its own and a second stamp must not displace it
+        assert 'validated_at' in {'restored_at': '...'}
+    """
+    state, ctx = diagnosed
+
+    async def _now_clean(_context: Any) -> list[DetectorResult]:
+        return [
+            DetectorResult(
+                detector_name="hfc_rf_pnm_degradation",
+                detector_version="1.0.0",
+                ran=True,
+                findings=[],
+            )
+        ]
+
+    monkeypatch.setattr("lpr_cpe.graph.subgraphs.restoration_validation.run_detectors", _now_clean)
+    pack = load_pack()
+    lenient = pack.model_copy(
+        update={
+            "validation": ValidationPolicy(
+                **{**pack.validation.model_dump(), "min_post_fix_samples": 1}
+            )
+        }
+    )
+    clock = _Ticking(NOW)
+    relaxed = replace(ctx, policy=PolicyEngine(lenient, clock=clock))  # type: ignore[arg-type]
+    seeded = {
+        **_with_repair(state, minutes_ago=90, action=ActionType.CPE_REBOOT),
+        "anomaly_findings": [_finding("hfc_rf_pnm_degradation", 1.0)],
+    }
+
+    _, _, out = await _run(seeded, relaxed, thread="passing-verdict")
+
+    assert out["validation"].passed is True, (
+        "the anomaly cleared, the window elapsed and one sample is enough under this pack -- if "
+        "this is False the test is no longer reaching the branch it exists to guard"
+    )
+    stamps = out["metrics_timestamps"]
+    assert MetricTimestamp.RESTORED_AT.value in stamps
+    assert MetricTimestamp.VALIDATED_AT.value in stamps, (
+        "the verdict has an instant of its own and a second stamp must not displace it"
+    )
 
 
 # ------------------------------------------------------------------------------------------------

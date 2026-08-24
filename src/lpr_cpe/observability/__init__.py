@@ -30,6 +30,7 @@ from lpr_cpe.observability.kpi import (
     KPIValue,
     MetricTimestamp,
     mark,
+    stamp,
 )
 from lpr_cpe.observability.logging import (
     bind_context,
@@ -84,6 +85,7 @@ __all__ = [
     "reset_tracing_for_tests",
     "selected_lane",
     "span",
+    "stamp",
     "sync_span",
     "tracing_enabled",
     "tracing_status",

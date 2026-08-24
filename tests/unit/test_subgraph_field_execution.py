@@ -72,6 +72,7 @@ from lpr_cpe.graph.subgraphs.field_execution import (
     SUBMISSION_FIELDS,
     build_field_execution_graph,
 )
+from lpr_cpe.observability.kpi import MetricTimestamp
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
@@ -425,6 +426,18 @@ async def test_the_crew_is_briefed_and_asked_for_every_item_before_the_pause(
         "see EXEC-1 and the two tests that hold it to account"
     )
     assert payload["briefing"]["delimiter_topology"]["delimiter_ref"] == service["delimiter_ref"]
+
+    # Both arrival stamps are present, and this deliberately does *not* guard the clobber that
+    # `observability.kpi.stamp` was written for. That defect is real at this site -- the briefing
+    # node writes both into one update, and `update.update(mark(...))` replaces rather than merges
+    # -- but it self-heals here across laps: each stamp is conditional on its own absence from
+    # state, so the lap that loses `dispatched_at` re-writes it on the next one, and this fixture
+    # reaches the pause with both. Reinstating the defect leaves this assertion green, so it is
+    # recorded as a fact about the fixture rather than shipped as a guard that cannot fail. The
+    # mechanism's own owner is `test_a_second_stamp_in_one_update_does_not_displace_the_first`.
+    stamps = paused.values["metrics_timestamps"]
+    assert MetricTimestamp.DISPATCHED_AT.value in stamps
+    assert MetricTimestamp.ON_SITE_AT.value in stamps
 
 
 async def test_an_unusable_submission_records_no_finding_and_asks_the_crew_again(

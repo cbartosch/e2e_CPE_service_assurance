@@ -180,7 +180,7 @@ from lpr_cpe.graph.subgraphs._mr import (
     submit_mr,
 )
 from lpr_cpe.graph.subgraphs._shared import attempt_number
-from lpr_cpe.observability.kpi import MetricTimestamp, mark
+from lpr_cpe.observability.kpi import MetricTimestamp, mark, stamp
 
 # ------------------------------------------------------------------------------------------------
 # Reading the incident for the visit
@@ -659,9 +659,9 @@ async def open_field_visit(state: IncidentState, ctx: GraphContext) -> NodeUpdat
         ],
     }
     if MetricTimestamp.DISPATCHED_AT.value not in state.get("metrics_timestamps", {}):
-        update.update(mark(MetricTimestamp.DISPATCHED_AT, dispatched))
+        stamp(update, MetricTimestamp.DISPATCHED_AT, dispatched)
     if MetricTimestamp.ON_SITE_AT.value not in state.get("metrics_timestamps", {}):
-        update.update(mark(MetricTimestamp.ON_SITE_AT, arrived))
+        stamp(update, MetricTimestamp.ON_SITE_AT, arrived)
     # `preview`, not `state`: both KPIs are keyed on `truck_roll_count`, which counts orders whose
     # current status is a travelled one -- and the revision that makes this one travelled is in
     # `update`.
