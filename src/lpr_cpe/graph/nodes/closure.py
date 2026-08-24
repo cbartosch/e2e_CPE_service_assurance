@@ -154,7 +154,7 @@ async def confirm_customer_outcome(state: IncidentState, ctx: GraphContext) -> N
 #: linear edges -- so where this lands is wiring, not filing.
 #:
 #: It goes **before** `GOVERNANCE_NODES`, which ends with `record_escalation`. That node is declared
-#: in `builder._DELIBERATE_TERMINALS`: nothing follows an escalation, and it is terminal only
+#: in `builder.DELIBERATE_TERMINALS`: nothing follows an escalation, and it is terminal only
 #: because it is last. Appending Stage 5 after it would draw `record_escalation` ->
 #: `confirm_customer_outcome` and quietly resume an incident a human had been handed.
 CLOSURE_NODES: tuple[tuple[str, Any], ...] = (

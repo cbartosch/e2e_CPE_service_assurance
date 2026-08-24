@@ -648,7 +648,7 @@ def test_p23_sits_between_the_diagnosis_line_and_the_governance_five() -> None:
 
     Last would be the obvious alternative and is the one that is actually unsafe. `record_escalation`
     ends the tuple because `_plain_edges` reads a node with no successor as terminal and
-    `_DELIBERATE_TERMINALS` vouches for it; appending Stage 5 after it would draw
+    `DELIBERATE_TERMINALS` vouches for it; appending Stage 5 after it would draw
     `record_escalation -> confirm_customer_outcome` and resume an incident a human had been handed.
     """
     assert [name for name, _ in PARENT_NODES][11:12] == ["confirm_customer_outcome"]
@@ -664,7 +664,7 @@ def test_the_governance_five_are_appended_in_gate_pair_order() -> None:
     would either drop a gate's own edge or draw one from a gate into the next gate's question.
 
     `record_escalation` is last because a node with no successor is what `_plain_edges` reads as
-    terminal, and `_DELIBERATE_TERMINALS` is what stops `_check_pending_stages` reading that
+    terminal, and `DELIBERATE_TERMINALS` is what stops `_check_pending_stages` reading that
     terminal as owed work. Stage 5 arriving in front of these five rather than behind them is that
     same argument seen from the other side; `test_p23_sits_between_the_diagnosis_line_and_the_
     governance_five` holds it.

@@ -4,7 +4,7 @@
 out its stability window, is judged against the pre-fix readings and has the customer's word
 recorded, and stops at the point where the linked records would be brought into agreement". This is
 that point onwards, and it is the last stage of the lifecycle -- `IncidentStatus.CLOSED` has no
-outward transition, so `builder._DELIBERATE_TERMINALS` is where this subgraph belongs rather than
+outward transition, so `builder.DELIBERATE_TERMINALS` is where this subgraph belongs rather than
 `PENDING_STAGES`.
 
 Why nine nodes

@@ -1,4 +1,12 @@
-"""The parent graph: eleven steps, three subgraphs, twelve decisions, and the edges between them.
+"""The parent graph: seventeen steps, nine subgraphs, seventeen decisions, and the edges between.
+
+Those counts are measured rather than remembered -- 26 nodes read off
+`compile_parent_graph().get_graph()` on 2026-08-23, and 17 questions off `DECISION_AFTER` followed
+through `chain_from`. The line read "eleven steps, three subgraphs, twelve decisions" through six
+stages being added. Seventeen is the count *this module* wires; the other seven of the
+specification's twenty-four sit on a subgraph's own `add_conditional_edges` and are invisible from
+here, which is what `chain_from`'s docstring means by "complete for the parent and silent about the
+rest".
 
 This module is the only place that knows what the workflow's *shape* is. `graph.nodes` knows what
 each step does, `graph.routing` knows what each question asks, and neither knows what follows what.
@@ -9,17 +17,17 @@ Four tables and nothing else
 ----------------------------
 The topology is data, not control flow, and it is spread over exactly four places:
 
-* **`graph.nodes.PARENT_NODES`** -- the eleven steps in specification order. Consecutive entries
+* **`graph.nodes.PARENT_NODES`** -- the seventeen steps in specification order. Consecutive entries
   with no decision between them are joined by a plain edge, so the registry's *order* is what draws
   P01 -> P02, P06 -> P07, P08 -> P09 and P09 -> P10. Nothing here restates them.
 * **`SUBGRAPH_NODES`** -- the stages compiled as graphs rather than written as functions.
   Deliberately *not* in `PARENT_NODES`, and not merely because `graph.nodes` says nothing beyond P11
   lives there: they have no order to be in. Each is reached by name from a branch, never by falling
   off the end of the one before, so listing them in sequence would invite the plain edge that
-  `_plain_edges` draws between consecutive registry entries. Three of the four are here because
-  they own an interrupt and a paused stage should checkpoint its own resume point; the fourth,
-  `preventive_maintenance`, has none and is here because it fans out internally from one answer of
-  one decision, which is a shape the sequence cannot hold. `graph.subgraphs` states both reasons.
+  `_plain_edges` draws between consecutive registry entries. Most are here because they own an
+  interrupt and a paused stage should checkpoint its own resume point; `preventive_maintenance` has
+  none and is here because it fans out internally from one answer of one decision, which is a shape
+  the sequence cannot hold. `graph.subgraphs` states both reasons.
 * **`DECISION_AFTER`** -- which decision is asked after which node.
 * **`BRANCH_TARGETS`** -- where each answer goes.
 
@@ -75,11 +83,22 @@ same place the guard sends everything else.
 
 What is not wired yet
 ---------------------
-Several exits leave this graph for stages that do not exist. They go to `END`, which would otherwise
-be indistinguishable from a successful run, so each is named in `PENDING_STAGES` and `_check_tables`
-holds the two in agreement in both directions: an exit that goes to `END` without an entry there,
-or an entry whose exit no longer goes to `END`, both fail the build. Wiring a subgraph therefore
-cannot be done without deleting its line, and deleting its line cannot be done without wiring it.
+Nothing, as of 2026-08-23. `PENDING_STAGES` is empty for the first time.
+
+The mechanism stays, because it is the thing that made the list shrink rather than rot. An exit that
+leaves this graph for a stage that does not exist goes to `END`, which is indistinguishable from a
+successful run, so each such exit is named in `PENDING_STAGES` and `_check_tables` holds the two in
+agreement in both directions: an exit that goes to `END` without an entry there, or an entry whose
+exit no longer goes to `END`, both fail the build. Wiring a subgraph therefore cannot be done
+without deleting its line, and deleting its line cannot be done without wiring it.
+
+An empty table and a table nobody consults look identical from the outside, which is why
+`_check_pending_stages` is asserted in both directions by a test that monkeypatches a gap into
+existence rather than by the table's own contents.
+
+Three nodes now end the workflow, and all three are declared in `DELIBERATE_TERMINALS` rather than
+confessed in `PENDING_STAGES`. The last entry to leave was `__onward__:preventive_maintenance`, and
+it left by being **disproved rather than built**: see that table for the measurement.
 """
 
 from __future__ import annotations
@@ -348,24 +367,41 @@ BRANCH_TARGETS: Mapping[str, Mapping[str, str]] = {
 #: `<source>:<answer>` and explained. `_check_tables` keeps this exactly in step with the tables
 #: above; see the module docstring for why that is enforced rather than trusted.
 #:
-#: `quarantine` and the two `manual_review`s are **not** here. Those genuinely end the run: D01's
-#: remedy is "do not create an incident", and `manual_review` is only ever reached after
+#: **Empty since 2026-08-23**, and the way the last entry left is worth more than the fact that it
+#: did. `__onward__:preventive_maintenance` claimed the preventive stage owed an edge into
+#: `field_planning` and was waiting only on somebody deciding what a preventive `ResolutionOption`
+#: is. Measured, that edge cannot exist:
+#:
+#: * `field_planning` commits one action type. `is_dispatchable_option` is
+#:   `requires_truck_roll and action_type is CREATE_WORK_ORDER`, and its own docstring says why the
+#:   narrowing is load-bearing -- `wfm.create_work_order` refuses anything else by name.
+#: * Across all fifteen `FaultDomain` members, **every domain `boundaries.crew_for` calls `DIRTY`
+#:   offers no `CREATE_WORK_ORDER` at all**, and every domain that offers one is `CLEAN` or `JOINT`.
+#:   The correspondence is exact, and it is the Clean/Dirty delimiter itself rather than a property
+#:   of the catalogue: work upstream of the tap or ODP is an MR to OSP, and an MR is not a WFM work
+#:   order.
+#: * `plan_preventive_field_work` produces a `DIRTY` crew and nothing else -- measured over all 41
+#:   fixtures by gap PREVENTIVE-1, and again here through the parent: three services take the arm,
+#:   `SVC-PO-042-A-04` and `SVC-UT-001-A-03` on `distribution` and `SVC-VQ-002-A-01` on `power`.
+#:
+#: So P14 would find nothing to select for any arrival this arm can produce, `route_field_gate`
+#: would answer `escalate`, and the edge would land every preventive case in
+#: `abandon_field_planning` -- which writes `diagnosing`, and would then carry a service whose
+#: disposition was "monitor it" onward through field execution, restoration validation and closure.
+#: The parent cannot hold the other two dispositions back either: a conditional exit from a subgraph
+#: needs a `routing.DECISIONS` member, the specification declares twenty-four, and none of them
+#: follows D04's preventive arm.
+#:
+#: The disposition is therefore the end of the thread and `preventive_maintenance` is declared in
+#: `DELIBERATE_TERMINALS`. What is genuinely missing is a preventive-maintenance queue that re-reads
+#: the case -- gap PREVENTIVE-2, which no edge in this graph would have closed.
+#:
+#: `quarantine` and the two `manual_review`s were never here either. Those genuinely end the run:
+#: D01's remedy is "do not create an incident", and `manual_review` is only ever reached after
 #: `escalation_update` has already recorded the escalation and set `IncidentStatus.ESCALATED`. An
 #: incident may be resumed from either by a supervisor re-invoking the thread; neither is waiting on
 #: a stage that is missing.
-PENDING_STAGES: Mapping[str, str] = {
-    f"{ONWARD}:preventive_maintenance": (
-        "the seam from a preventive disposition into field planning. P14 now exists, but nothing "
-        "routes into it from here: the subgraph runs to completion and its three dispositions are "
-        "all real answers, and one of them, `plan_preventive_field_work`, records that a visit is "
-        "warranted and stops -- it writes the suspected domain and the crew "
-        "`boundaries.crew_for` derives, which is exactly what `build_field_requirement` consumes, "
-        "but the preventive case has no `resolution_plan` and no `ResolutionOption` for P14 to "
-        "select, so the two cannot simply be joined by an edge. The specification's separate Clean "
-        "Boots and Dirty Boots arms are that same seam; see the subgraph's module docstring and "
-        "docs/vendor-integration-gaps.md"
-    ),
-}
+PENDING_STAGES: Mapping[str, str] = {}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -420,11 +456,15 @@ def _plain_edges() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
 
     Nothing about that absence is silent. A subgraph reaching `END` because somebody *forgot* its
     decision looks identical here to one that ends deliberately, so the distinction is not drawn
-    here at all -- it is drawn in `PENDING_STAGES`, which `_check_pending_stages` requires an entry
-    in for every terminal node and refuses to let go stale. The two above are one of each kind,
-    which is the clearest that distinction has been: `reconciliation_closure` is declared in
-    `_DELIBERATE_TERMINALS`, and `preventive_maintenance` is the single remaining `PENDING_STAGES`
-    entry.
+    here at all -- it is drawn between `PENDING_STAGES` and `DELIBERATE_TERMINALS`, which
+    `_check_pending_stages` requires an entry in one or the other of for every terminal node, and
+    refuses to let either go stale.
+
+    **Both of the two are now in the second table, and that is new on 2026-08-23.** The sentence
+    above about `preventive_maintenance` -- "every disposition is the end of that thread's automated
+    work" -- was written while `PENDING_STAGES` simultaneously claimed the stage owed an edge into
+    `field_planning`. The two readings sat a hundred lines apart in this file and contradicted each
+    other for four revisions. `PENDING_STAGES` records which one measurement supports.
     """
     names = _node_names()
     pairs = tuple((left, right) for left, right in pairwise(names) if left not in DECISION_AFTER)
@@ -678,7 +718,7 @@ def _check_pending_stages() -> None:
         for answer, destination in targets.items()
         if destination == END and answer not in _DELIBERATE_ENDINGS.get(identifier, frozenset())
     }
-    gaps |= {f"{ONWARD}:{name}" for name in terminal_nodes if name not in _DELIBERATE_TERMINALS}
+    gaps |= {f"{ONWARD}:{name}" for name in terminal_nodes if name not in DELIBERATE_TERMINALS}
 
     undeclared = sorted(gaps - set(PENDING_STAGES))
     if undeclared:
@@ -687,7 +727,7 @@ def _check_pending_stages() -> None:
             "there looks like a run that finished. Add a PENDING_STAGES entry saying what is "
             "missing, or -- if the run really does end there -- declare it: an entry named "
             f"`Dnn:answer` belongs in _DELIBERATE_ENDINGS, one named `{ONWARD}:node` in "
-            "_DELIBERATE_TERMINALS."
+            "DELIBERATE_TERMINALS."
         )
 
     stale = sorted(set(PENDING_STAGES) - gaps)
@@ -716,7 +756,11 @@ _DELIBERATE_ENDINGS: Mapping[str, frozenset[str]] = {
 #: answer is excused by name; a *terminal node* -- one `_plain_edges` finds no successor for -- had
 #: no way to be excused at all, so the only way to declare one was a `PENDING_STAGES` line saying
 #: work was owed. For `record_escalation` that would be false: nothing is missing after it.
-_DELIBERATE_TERMINALS: frozenset[str] = frozenset(
+#:
+#: Public, unlike `_DELIBERATE_ENDINGS`, because with `PENDING_STAGES` empty this is the only table
+#: that answers "where does a run legitimately stop?" -- `cli.report_topology` prints it, and the
+#: three entries are three different ways to stop rather than one repeated.
+DELIBERATE_TERMINALS: frozenset[str] = frozenset(
     {
         # The incident is a human's now. `IncidentStatus.ESCALATED` moves onward to nine other
         # statuses, so a supervisor resumes the thread; there is no next node for the graph to run.
@@ -727,6 +771,18 @@ _DELIBERATE_TERMINALS: frozenset[str] = frozenset(
         # for reasons of their own: `abandon_closure` has escalated, and D23's exhausted-retry arm
         # escalates through the same guard.
         "reconciliation_closure",
+        # The third way, and the only one that is neither an escalation nor a closure: D04's
+        # preventive arm never opens an incident, so there is no incident here to escalate or to
+        # close. It creates a preventive-maintenance case, picks a disposition, and the disposition
+        # is the end of that thread's automated work -- which is the whole of what the
+        # specification's D04 asks for ("create or update", "select", "keep it linked").
+        #
+        # This entry replaced the last `PENDING_STAGES` line rather than being added beside it. The
+        # line claimed the arm owed an edge into `field_planning`; that table records why no such
+        # edge can exist, and D8 in IMPLEMENTATION_PLAN.md is the same argument from the other end
+        # -- a case whose `recommended_window` is `next_maintenance_window` must not hold a
+        # LangGraph thread open for a week waiting for it.
+        "preventive_maintenance",
     }
 )
 

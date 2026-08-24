@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from lpr_cpe.cli import REPORTS, main
-from lpr_cpe.graph.builder import BRANCH_TARGETS, PENDING_STAGES
+from lpr_cpe.graph.builder import BRANCH_TARGETS, DELIBERATE_TERMINALS, PENDING_STAGES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -171,6 +171,15 @@ def test_topology_names_every_answer_the_builder_declares(
 
     for exit_point in PENDING_STAGES:
         assert exit_point in printed, f"{exit_point} reaches END unwired but is not reported"
+
+    # `PENDING_STAGES` is empty as of 2026-08-23, so the loop above now iterates zero times and
+    # proves nothing -- which is the same failure mode as an assertion that cannot be shown red.
+    # `DELIBERATE_TERMINALS` is what carries the fact that loop was there for: a reader of this
+    # report has to be able to see where a run may legitimately stop, and with the frontier closed
+    # that is the only table that says.
+    assert DELIBERATE_TERMINALS, "nothing ends the workflow, which cannot be right"
+    for name in DELIBERATE_TERMINALS:
+        assert name in printed, f"{name} ends the workflow on purpose but is not reported"
 
 
 def test_config_reports_the_write_gate_without_printing_a_secret(

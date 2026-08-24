@@ -34,6 +34,7 @@ from lpr_cpe.config import get_settings
 from lpr_cpe.graph.builder import (
     BRANCH_TARGETS,
     DECISION_AFTER,
+    DELIBERATE_TERMINALS,
     PENDING_STAGES,
     SUBGRAPH_NODES,
     chain_from,
@@ -97,7 +98,10 @@ def report_topology(out: TextIO) -> None:
 
     The pending exits are printed rather than kept behind a flag, for the reason `PENDING_STAGES`
     exists at all: an `END` reached for want of a subgraph is otherwise indistinguishable from a
-    finished run, and a report that omitted them would recreate that ambiguity one level up.
+    finished run, and a report that omitted them would recreate that ambiguity one level up. That
+    table is empty as of 2026-08-23, which is exactly when the line under it starts earning its
+    place: `DELIBERATE_TERMINALS` is now the only table naming where a run may stop, and printing a
+    bare `0` without it would answer the ambiguity by deleting both halves of the question.
     """
     app = compile_parent_graph()
     drawn = [name for name in app.get_graph().nodes if name not in {START, END}]
@@ -132,6 +136,14 @@ def report_topology(out: TextIO) -> None:
     out.write(f"  exits awaiting a stage {len(PENDING_STAGES)}\n")
     for exit_point, missing in PENDING_STAGES.items():
         out.write(f"    {exit_point}: {missing}\n")
+
+    # Printed beside the count above rather than instead of it, and both are needed now that the
+    # count is zero. "Nothing is awaiting a stage" and "here is where a run legitimately stops" are
+    # different facts, and a report that showed only the first would leave a reader unable to tell
+    # an empty frontier from a report that had stopped looking.
+    out.write(f"  nodes that end the workflow on purpose {len(DELIBERATE_TERMINALS)}\n")
+    for name in sorted(DELIBERATE_TERMINALS):
+        out.write(f"    {name}\n")
 
 
 def report_config(out: TextIO) -> None:

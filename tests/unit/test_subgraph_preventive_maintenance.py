@@ -41,6 +41,7 @@ from langgraph.graph import END, START
 
 from lpr_cpe.config.clock import FrozenClock
 from lpr_cpe.decision_services.forecast import should_dispatch
+from lpr_cpe.decision_services.resolution import plan_resolution
 from lpr_cpe.domain.boundaries import crew_for
 from lpr_cpe.domain.enums import (
     CaseType,
@@ -54,13 +55,19 @@ from lpr_cpe.domain.enums import (
     Technology,
 )
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
-from lpr_cpe.graph.builder import PENDING_STAGES, build_parent_graph, compile_parent_graph
+from lpr_cpe.graph.builder import (
+    DELIBERATE_TERMINALS,
+    PENDING_STAGES,
+    build_parent_graph,
+    compile_parent_graph,
+)
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.guards import ESCALATED, ONWARD
 from lpr_cpe.graph.nodes._runtime import check_node_registry
 from lpr_cpe.graph.routing import route_predictive_or_active
 from lpr_cpe.graph.state import make_initial_state
 from lpr_cpe.graph.subgraphs._shared import evidence_support
+from lpr_cpe.graph.subgraphs.field_planning import is_dispatchable_option
 from lpr_cpe.graph.subgraphs.preventive_maintenance import (
     DISPOSITION_TARGETS,
     INSUFFICIENT_EVIDENCE,
@@ -445,7 +452,12 @@ def test_the_field_work_arm_records_the_domain_and_the_crew_and_stops(
     The crew is `crew_for`'s answer and not this stage's, which is the whole argument for collapsing
     Clean Boots and Dirty Boots into one arm: the fact has an owner, and this node reads it rather
     than minting a second copy. `within_24_hours` follows from the finding's `critical` severity,
-    and it is a named window rather than a date because P14 holds the calendar.
+    and it is a named window rather than a date because this stage holds no calendar.
+
+    "and stops" used to mean "and waits for P14", which is what the last `PENDING_STAGES` entry
+    claimed. It now means the thread is over --
+    `test_no_dirty_crew_domain_has_a_work_order_for_field_planning_to_commit` is the measurement
+    that retracted the claim, and `test_builder.py` holds the parent's half.
     """
     final = sweep[DEGRADED_OPTICAL_SERVICE]["final"]
     case = final["pm_case"]
@@ -459,8 +471,76 @@ def test_the_field_work_arm_records_the_domain_and_the_crew_and_stops(
     assert event.detail["crew"] == CrewType.DIRTY.value
     assert event.detail["detector"] == "pon_optical_degradation"
 
-    assert final.get("work_order") is None, "P14 owns the work order; this stage only recommends"
+    assert final.get("work_order") is None, "this stage recommends; it books nothing"
     assert case.linked_incident_id is None, "P06 is on D04's other arm; no incident exists here"
+
+
+def test_no_dirty_crew_domain_has_a_work_order_for_field_planning_to_commit(
+    sweep: dict[str, dict[str, Any]],
+) -> None:
+    """Why the field-work arm ends here: there is no option `field_planning` could accept.
+
+    This is the measurement that retracted `builder.PENDING_STAGES`' last entry, and it is asserted
+    over every `FaultDomain` rather than over the three services that reach the arm today, because
+    the claim it replaces was about the *seam* and not about the fixtures. The seam was described as
+    waiting on somebody deciding what a preventive `ResolutionOption` is. There is nothing to
+    decide:
+
+    * `field_planning.is_dispatchable_option` is `requires_truck_roll and action_type is
+      CREATE_WORK_ORDER`, narrowed on purpose because `wfm.create_work_order` refuses anything else
+      by name.
+    * Across all fifteen domains, every one `crew_for` calls `DIRTY` offers `raise_mr` and no work
+      order, and every one that offers a work order is `CLEAN` or `JOINT`. That is the Clean/Dirty
+      delimiter itself: work upstream of the tap or ODP is a maintenance request to OSP.
+    * `test_no_fixture_produces_a_clean_boots_crew` measures the third leg -- this arm produces a
+      `DIRTY` crew and nothing else.
+
+    Put together, an edge from here into P14 would hand it a plan with nothing selectable in it, on
+    every arrival the arm can produce. The three legs are asserted separately so that a change to
+    any one of them fails here with the leg named, rather than leaving a conclusion standing on a
+    premise that had quietly moved.
+
+    The domain sweep is the leg that would silently stop mattering: if the catalogue ever gave a
+    `DIRTY` domain a work order, the correspondence would break and the seam would be worth
+    re-opening. It fails rather than going quiet, and the message says so.
+    """
+    pack = load_pack()
+    offers_work_order: dict[FaultDomain, bool] = {}
+    for domain in FaultDomain:
+        plan = plan_resolution(
+            plan_id="PROBE",
+            created_at=NOW,
+            fault_domain=domain,
+            target_ref="probe",
+            allowlist=pack.remote_actions,
+            blast_radius_policy=pack.blast_radius,
+        )
+        offers_work_order[domain] = any(is_dispatchable_option(o) for o in plan.options)
+
+    dirty = {d for d in FaultDomain if crew_for(d) is CrewType.DIRTY}
+    assert dirty, "no domain classifies DIRTY, so this measures nothing"
+    assert not any(offers_work_order[d] for d in dirty), (
+        "a Dirty Boots domain now offers a create_work_order option: "
+        f"{sorted(d.value for d in dirty if offers_work_order[d])}. The preventive field-work arm "
+        "was retracted from PENDING_STAGES because no arrival it can produce carries an option "
+        "`field_planning` could commit; that is no longer true and the seam is worth re-opening."
+    )
+    assert {d for d in FaultDomain if offers_work_order[d]} == {
+        d
+        for d in FaultDomain
+        if offers_work_order[d] and crew_for(d) in (CrewType.CLEAN, CrewType.JOINT)
+    }, "a work order is offered for a domain no Clean or Joint crew attends"
+
+    # And the same conclusion read off the arm's own arrivals, so the general claim above is not
+    # left standing alone over a set that no run reaches.
+    reached = {
+        finding.suspected_domain
+        for ref, row in sweep.items()
+        if EXPECTED_DISPOSITIONS.get(ref) == "field_work"
+        for finding in physical_findings(row["final"])
+    }
+    assert reached == {FaultDomain.DISTRIBUTION, FaultDomain.POWER}, reached
+    assert not any(offers_work_order[d] for d in reached)
 
 
 def test_no_fixture_produces_a_clean_boots_crew(sweep: dict[str, dict[str, Any]]) -> None:
@@ -910,8 +990,11 @@ async def test_the_parent_runs_the_whole_branch_in_one_pass(fixtures: Any) -> No
     exactly rather than by count, so a run that entered two arms would fail here rather than total
     eight either way.
 
-    Ending is the correct behaviour and `PENDING_STAGES` is where it is explained, which is asserted
-    alongside so that "the run stopped" and "we know why the run stopped" cannot drift apart.
+    Ending is the correct behaviour, and where that is *explained* moved on 2026-08-23: it used to
+    be a `PENDING_STAGES` line saying P14 owed an edge, and it is now a `DELIBERATE_TERMINALS`
+    entry saying the disposition is the end of the thread. Both are asserted below -- the second
+    for what it says and the first for what it no longer does -- so that "the run stopped" and "we
+    know why the run stopped" cannot drift apart, which is what they did while both tables spoke.
     """
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
     final = await compile_parent_graph().ainvoke(
@@ -936,7 +1019,11 @@ async def test_the_parent_runs_the_whole_branch_in_one_pass(fixtures: Any) -> No
     assert final["pm_case"].status == "planned_field_work"
     assert list(ctx.adapters.gate.recorded) == []
 
-    assert f"{ONWARD}:preventive_maintenance" in PENDING_STAGES, (
-        "the run ends here on purpose and the reason -- P14 owns the work order -- has to be "
-        "written down where the builder checks it, or a finished-looking run is all anybody sees"
+    assert "preventive_maintenance" in DELIBERATE_TERMINALS, (
+        "the run ends here on purpose and the reason has to be written down where the builder "
+        "checks it, or a finished-looking run is all anybody sees"
+    )
+    assert f"{ONWARD}:preventive_maintenance" not in PENDING_STAGES, (
+        "this exit is no longer owed work -- it was retracted, not wired -- and an entry claiming "
+        "otherwise would make the build demand a stage that cannot receive what this arm produces"
     )

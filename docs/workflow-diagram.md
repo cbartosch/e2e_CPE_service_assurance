@@ -23,7 +23,7 @@ So the source of truth for this document is the tables the builder itself wires 
 | Which decision is asked after which node | `builder.DECISION_AFTER` |
 | Where each answer goes | `builder.BRANCH_TARGETS` |
 | The question text on each decision | `routing.DECISIONS[...].question` |
-| Which exits are unbuilt rather than deliberate | `builder.PENDING_STAGES`, `_DELIBERATE_TERMINALS` |
+| Which exits are unbuilt rather than deliberate | `builder.PENDING_STAGES`, `DELIBERATE_TERMINALS` |
 | Subgraph interiors | the `add_edge` / `add_conditional_edges` call sites in `graph/subgraphs/*.py` |
 
 To re-derive it, `python -m lpr_cpe.cli topology` prints the parent's shape. **Its `P01..P17` labels
@@ -65,17 +65,18 @@ document was first written.
 | Decisions | 24 | 24 | — |
 | Approval kinds with a gate | 6 | 6 | — |
 
-What is still open is not a step or a decision but a **seam**: a place where one stage ends a thread
-that the specification carries into another. `builder.PENDING_STAGES` has one entry left,
-`__onward__:preventive_maintenance`, and §5 says what it is waiting on.
+`builder.PENDING_STAGES` is **empty** as of 2026-08-23. The last entry,
+`__onward__:preventive_maintenance`, described a seam — a place where one stage ends a thread the
+specification carries into another — and §5 records why that description was wrong and what closed
+it. Nothing in the parent now reaches `END` for want of something unwritten.
 
-Nothing about that absence is implicit, and it cannot rot quietly either. `_check_pending_stages`
-fails the build in **both** directions: an exit that reaches `END` while neither listed nor declared
-deliberate in `_DELIBERATE_TERMINALS` / `_DELIBERATE_ENDINGS`, and a `PENDING_STAGES` line whose exit
-no longer reaches `END`. So wiring a stage without deleting its line is a red build, which is what
-keeps that list honest. The counts in the table above have no such guard — they are prose, which is
-why §0 says how to re-derive them. The remaining gap is drawn as a `PENDING` box below rather than
-as `END`.
+Nothing about that is implicit, and it cannot rot quietly either. `_check_pending_stages` fails the
+build in **both** directions: an exit that reaches `END` while neither listed nor declared deliberate
+in `DELIBERATE_TERMINALS` / `_DELIBERATE_ENDINGS`, and a `PENDING_STAGES` line whose exit no longer
+reaches `END`. So wiring a stage without deleting its line is a red build, which is what keeps that
+list honest — and with the list empty, what keeps *it* honest is that the check is mutation-tested
+against an injected entry rather than against whichever gap happens to be open. The counts in the
+table above have no such guard — they are prose, which is why §0 says how to re-derive them.
 
 **Built and wired is not the same as driven end to end.** Three of the 41 fixture services reach
 Stage 5 under a full sweep and one of them closes — the one whose fixture was healthy to begin with.
@@ -174,14 +175,10 @@ flowchart TD
 
     RC --> DONE
 
-    PM --> PEND_D
+    PM --> DONE
 
-    PEND_D["PENDING preventive to field-planning<br/>seam not built"]
-
-    classDef pending fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#000
     classDef human fill:#bfdbfe,stroke:#1d4ed8,color:#000
     classDef sub fill:#e9d5ff,stroke:#7e22ce,color:#000
-    class PEND_D pending
     class RLC,RBR human
     class PM,RR,SH,FP,FE,PR,PE,RV,RC sub
 ```
@@ -208,12 +205,18 @@ The two edges are declared in different tables by different mechanisms, so the c
 only by reading them back out of the same `StateGraph`; `tests/unit/test_builder.py` asserts it there.
 The `await_plant` self-loop is a third way in, and the reason those ten incidents escalate in §6.
 
-**`reconciliation_closure -> END` is the end of the workflow, not a gap.** It is one of the two
-entries in `_DELIBERATE_TERMINALS`, alongside `record_escalation`. Its main line ends at
-`update_kpis_and_learning`, which writes `IncidentStatus.CLOSED`, and `domain.lifecycle` gives
-`closed` no outward transition — so there is not merely no next node but no legal one. That table
-exists because a terminal node had no other way to be excused: without it the only way to declare one
-was a `PENDING_STAGES` line claiming work was owed, which for these two would be false.
+**`reconciliation_closure -> END` is the end of the workflow, not a gap.** It is one of the three
+entries in `DELIBERATE_TERMINALS`, alongside `record_escalation` and — since 2026-08-23 —
+`preventive_maintenance`. Its main line ends at `update_kpis_and_learning`, which writes
+`IncidentStatus.CLOSED`, and `domain.lifecycle` gives `closed` no outward transition — so there is
+not merely no next node but no legal one. That table exists because a terminal node had no other way
+to be excused: without it the only way to declare one was a `PENDING_STAGES` line claiming work was
+owed, which for all three would be false.
+
+The three are three *different* endings and the table is where that is worth reading:
+`record_escalation` hands the incident to a human, `reconciliation_closure` closes it, and
+`preventive_maintenance` never opened one — D04's preventive arm creates a maintenance case and P06
+is on the other arm, so there is nothing to close and nothing to escalate. §5 has the measurement.
 
 ---
 
@@ -483,8 +486,10 @@ flowchart TD
     M --> Z
 ```
 
-All three dispositions end the thread. `plan_preventive_field_work` is the seam that ought to reach
-`field_planning` and does not — see §5.
+All three dispositions end the thread, and all three are meant to.
+`plan_preventive_field_work` was described until 2026-08-23 as the seam that ought to reach
+`field_planning`; §5 has the measurement that retracted that, and gap PREVENTIVE-4 has what is
+actually missing — a queue that drains the case, not an edge that dispatches it.
 
 ---
 
@@ -529,10 +534,9 @@ later looked for are the same token.
 
 ---
 
-## 5. The one open exit, and what it is waiting on
+## 5. The last open exit, and why it was retracted rather than built
 
-This is `builder.PENDING_STAGES`, which now holds a single line. The builder's own entry is longer
-than what follows; it is summarised here and quoted in full by `python -m lpr_cpe.cli topology`.
+`builder.PENDING_STAGES` is empty. Its final line was:
 
 **`__onward__:preventive_maintenance`** — the seam from a preventive disposition into field planning.
 P14 exists, but nothing routes into it from here. `plan_preventive_field_work` records that a visit
@@ -541,11 +545,35 @@ which is exactly what `build_field_requirement` consumes, but a preventive case 
 `resolution_plan` and no `ResolutionOption` for P14 to select, so the two cannot be joined by an edge
 without first deciding what a preventive `ResolutionOption` is.
 
-That is a seam and not an oversight, and the distinction is worth keeping: every other entry that ever
-sat in this list waited on a stage that did not exist, while this one waits on two stages that both
-exist and disagree about what is handed over between them. The sweeps in §6 reach
-`preventive_maintenance` zero times under either crew answer, so nothing measures the seam from
-outside either.
+That was described as a seam and not an oversight — every other entry that ever sat in this list
+waited on a stage that did not exist, while this one was said to wait on two stages that both exist
+and disagree about what is handed over between them. **The description was wrong in its last clause,
+and measuring it is what showed that.** There is no preventive `ResolutionOption` to decide on:
+
+* `field_planning` commits one action type. `is_dispatchable_option` is `requires_truck_roll and
+  action_type is CREATE_WORK_ORDER`, narrowed deliberately because `wfm.create_work_order` refuses
+  anything else by name.
+* Over all fifteen `FaultDomain` members against the shipped pack, every domain `crew_for` calls
+  `DIRTY` offers `raise_mr` and **no** work order, and every domain that offers a work order is
+  `CLEAN` or `JOINT`. That is the Clean/Dirty delimiter, not a hole in the catalogue.
+* `plan_preventive_field_work` produces a `DIRTY` crew and nothing else — gap PREVENTIVE-1's
+  measurement over all 41 fixtures.
+
+So P14 would find nothing to select on every arrival the arm can produce. And the edge could not be
+conditional: a subgraph's exit is a parent edge, only `routing.DECISIONS` members may sit on one, and
+the specification declares no decision after D04's preventive arm — so `monitoring` and
+`remote_prevention` would follow the field-work disposition onward through field execution,
+restoration validation and closure. `preventive_maintenance` is therefore declared in
+`DELIBERATE_TERMINALS`, and gap PREVENTIVE-4 records the measurement and what is still missing:
+a preventive-maintenance queue with an owner, which is not an edge in this graph.
+
+**The sweeps in §6 reach `preventive_maintenance` zero times, and that is a property of the sweeps
+rather than of the stage.** They file every service as `PROACTIVE_ALARM`, and
+`route_predictive_or_active` only answers `preventive` for `predictive_maintenance` and
+`post_install_baseline`. Re-swept on 2026-08-23 with the case type changed and nothing else: **17 of
+the 41 enter the stage**, splitting 3 field work / 2 remote prevention / 12 monitoring, none
+escalating. The sentence this paragraph replaces — that nothing measures the seam from outside —
+was true of the sweeps and not of the fixture set.
 
 ### What is no longer open
 
@@ -630,6 +658,13 @@ Runs entering each stage, on the same two sweeps:
 | `remote_resolution` | 2 | 2 |
 | `self_help` | 1 | 1 |
 | `preventive_maintenance` | 0 | 0 |
+
+**That last row measures the sweeps and not the stage.** Both file every service as
+`PROACTIVE_ALARM`, and `route_predictive_or_active` answers `preventive` only for
+`predictive_maintenance` and `post_install_baseline`, so D04 can never take the arm here. Filed as
+`PREDICTIVE_MAINTENANCE` and otherwise unchanged, **17 of the 41 enter it** — 3 field work, 2 remote
+prevention, 12 monitoring, none escalating, and no other stage entered by any of them. The two crew
+answers do not apply to that sweep at all: D04 diverts before any visit exists to report on.
 
 **Three causes account for that shape, not one**, and each is a gap already written down elsewhere.
 The previous revision named a single cause, and it was the wrong one for most of the runs.

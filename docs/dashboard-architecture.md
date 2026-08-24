@@ -257,13 +257,17 @@ of the answers, not fewer: counted per source node, the arms the drawing fails t
 lossy in different halves — `xray=False` has the parent's answers and none of the interiors,
 `xray=True` has the interiors and loses three times as many answers — and neither is a topology.
 
-**The one remaining `PENDING_STAGES` exit is still mislabelled rather than merely dropped.**
-`__onward__:preventive_maintenance` leaves a terminal node whose `ONWARD` and `ESCALATED` arms both
-point at `END`; the drawing keeps one edge for the pair and labels it `__escalated__`. All three
-terminal nodes are drawn that way — `preventive_maintenance`, `reconciliation_closure` and
-`record_escalation` — and only the first is an unwritten seam. So the label a naive rendering shows
-does not distinguish a deliberate ending from a missing one, and it reports the missing one as a
-budget escalation, which is a different and far more reassuring lie.
+**Every terminal node is mislabelled rather than merely drawn plainly.** A terminal node's `ONWARD`
+and `ESCALATED` arms both point at `END`; the drawing keeps one edge for the pair and labels it
+`__escalated__`. All three are drawn that way — `preventive_maintenance`, `reconciliation_closure`
+and `record_escalation` — so a naive rendering reports a preventive case that reached its
+disposition, and an incident that was *closed*, as budget escalations.
+
+This paragraph used to add that only the first of the three was an unwritten seam, and that the
+label therefore hid a missing stage. It no longer does: `PENDING_STAGES` is empty as of 2026-08-23
+and `preventive_maintenance` is a declared terminal (gap PREVENTIVE-4). What survives the correction
+is the sharper half — the drawing cannot tell a *closure* from an escalation either, and that is the
+one a dashboard's users will read every day.
 
 `builder.BRANCH_TARGETS` + `DECISION_AFTER` + `routing.DECISIONS` are the authoritative topology,
 and `_check_tables()` already holds them against each other at compile time.
@@ -418,7 +422,7 @@ streaming API is required for any of it** (C5):
 | done (×n) | `node_visits[name]` | written by the `@node` decorator on **every** node, unconditionally — including the budget-escalation path. Reduces per-key `max`, so a replay cannot inflate it |
 | **waiting on a human** | `awaiting_node_path()` (§3) | the only node that can be *currently* paused |
 | what it did | `audit_events` filtered on `.node` | every event carries the node name, and `check_node_registry` guarantees at import that the name in the audit trail equals the name in the topology |
-| unreachable today | `builder.PENDING_STAGES` | the one unwired exit, named rather than hidden |
+| where a run may stop | `builder.DELIBERATE_TERMINALS`, `PENDING_STAGES` | the three deliberate endings and the (currently empty) list of unwired exits, named rather than hidden |
 
 That last row is a deliberate inclusion, and the argument behind it has now inverted twice. When six
 of twenty-four decisions were wired, the point was simply that most of the graph was unbuilt and a
@@ -426,7 +430,9 @@ tidy drawing would hide it. On 2026-08-18 that became eighteen of twenty-four, a
 that three quarters wired *renders as a workflow that looks finished*. Re-measured on 2026-08-21 from
 `python -m lpr_cpe.cli topology` and the subgraphs' own `add_conditional_edges` call sites: **all 24
 are wired — 17 on a parent edge and 7 inside a subgraph — and `PENDING_STAGES` is down to a single
-entry.** Every router is now reachable from some graph.
+entry.** Every router is now reachable from some graph. On 2026-08-23 that last entry was retracted
+rather than paid off (gap PREVENTIVE-4), so the table is empty and the row above has shifted to the
+question it was always standing in for: not "what is unbuilt?" but "where may a run stop?".
 
 **So the row cannot go, but it can no longer carry the argument on its own, because what a rendering
 now conceals is not an absence.** Built and wired is not the same as driven end to end. §6 of
@@ -449,20 +455,18 @@ the field run's peak. The peak is also the crew's to decide: 20 services reach `
 seven times when the crew confirms a plant fault and none do when it reports a fix on site, where the
 most any service reaches is six. A
 node with a 7 beside it is the visible shape of a loop that is not converging; the same node marked
-merely "done" is indistinguishable from one that ran once and succeeded. **The `PENDING_STAGES` row
-and the visit counts are answers to the same question at two different scales** — what this graph
-cannot do, and what it does not in practice manage to do — and a dashboard that shows only the first
-will be reassuring for the wrong reason.
+merely "done" is indistinguishable from one that ran once and succeeded. **The terminal-node row and
+the visit counts are answers to the same question at two different scales** — how a run is allowed to
+stop, and how it stops in practice — and a dashboard that shows only the first will be reassuring for
+the wrong reason.
 
-§3 measured what the one remaining exit's arrow is labelled, and it is worse than dropped: the
-drawing calls it `__escalated__`, identically to the two terminal nodes that are *meant* to end
-there. So a naive rendering does not merely omit the seam — it reports it as a budget escalation.
-**And the camouflage is what makes that expensive here rather than merely untidy:** thirty-eight of
-the forty-one runs above really do end in a budget escalation and two more end escalated for another
-reason, so the one arrow that says "escalated" falsely is hidden among a great many that say it
-truthfully, and no reader has a reason to look twice.
+§3 measured what a terminal node's arrow is labelled, and it is worse than dropped: the drawing calls
+it `__escalated__` for all three, including the one that means *closed*. **And the camouflage is what
+makes that expensive here rather than merely untidy:** thirty-eight of the forty-one runs above
+really do end in a budget escalation and two more end escalated for another reason, so the single run
+that closes is hidden among a great many that did not, and no reader has a reason to look twice.
 
-Naming the unreachable exit is therefore the same failure the README's "four things this table
+Naming how a run may stop is therefore the same failure the README's "four things this table
 would otherwise be expected to list" paragraph exists to prevent, applied to the one part of the
 graph that a plausible rendering makes look complete.
 

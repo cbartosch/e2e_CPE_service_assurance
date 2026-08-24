@@ -42,6 +42,7 @@ from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.builder import (
     BRANCH_TARGETS,
     DECISION_AFTER,
+    DELIBERATE_TERMINALS,
     ESCALATED,
     ONWARD,
     PENDING_STAGES,
@@ -282,9 +283,10 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
             "field_planning": "field_planning",
             ESCALATED: END,
         },
-        # D07's other arm, and the one node in the graph that is terminal on purpose rather than
-        # for want of a successor. `_DELIBERATE_TERMINALS` is what tells `_check_pending_stages`
-        # the difference; without the entry this node would be reported as an unbuilt exit.
+        # D07's other arm, and the only *ordered step* that is terminal on purpose rather than for
+        # want of a successor -- the other two entries in `DELIBERATE_TERMINALS` are subgraphs.
+        # That table is what tells `_check_pending_stages` the difference; without the entry this
+        # node would be reported as an unbuilt exit.
         "record_escalation": {ONWARD: END, ESCALATED: END},
         # P16 -> P17, and the only edge in the graph that comes from neither a decision nor a
         # position in `PARENT_NODES`. A subgraph has no position, so `_plain_edges` cannot pair it
@@ -307,13 +309,17 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
         #
         # `field_execution` used to be the second of these and is not any more: it now carries D16,
         # below. Its exits were never a terminal disposition -- they stopped for want of the plant
-        # stage, which is the correction `PENDING_STAGES` records.
+        # stage, which is the correction `PENDING_STAGES` recorded while that entry existed.
         #
-        # `reconciliation_closure` is the third, and the only one of the three that is terminal
-        # because the workflow is *over* rather than because something is unwritten -- which is why
-        # it is the second name in `_DELIBERATE_TERMINALS` and has no `PENDING_STAGES` line. Its
-        # main line ends at P26, which writes `IncidentStatus.CLOSED`, and `domain.lifecycle` gives
-        # `closed` no outward transition: there is not merely no next node here but no legal one.
+        # `reconciliation_closure` is the third. Both of these are in `DELIBERATE_TERMINALS` now and
+        # neither has a `PENDING_STAGES` line, but they are terminal for different reasons and the
+        # distinction is the one this comment used to draw wrongly. `reconciliation_closure` is
+        # terminal because the workflow is *over*: its main line ends at P26, which writes
+        # `IncidentStatus.CLOSED`, and `domain.lifecycle` gives `closed` no outward transition, so
+        # there is not merely no next node here but no legal one. `preventive_maintenance` is
+        # terminal because no incident was ever opened -- nothing to close and nothing to escalate,
+        # only a case handed to a maintenance queue. It was listed as *unwritten* until 2026-08-23;
+        # `PENDING_STAGES` carries the measurement that says otherwise.
         #
         # Guarded even so, and these are the three guarded edges in the graph where that buys
         # nothing: both keys go to `END`, so `guarded` reading `escalated` cannot change where the
@@ -400,8 +406,8 @@ def test_langgraph_holds_the_topology_the_specification_numbers() -> None:
             ESCALATED: END,
         },
         # D22 -> the reconciliation stage, which is now written. This edge used to be the fourth of
-        # four exits falling to `END` for want of something unwritten; the remaining three are in
-        # `PENDING_STAGES`, which says what each waits on.
+        # four exits falling to `END` for want of something unwritten; the other three have since
+        # gone the same way, and `PENDING_STAGES` is empty.
         "confirm_customer_outcome": {
             "reconcile": "reconciliation_closure",
             "retry_diagnosis": "determine_root_cause",
@@ -1306,20 +1312,50 @@ def test_wiring_a_pending_stage_forces_its_line_to_be_deleted(
     than a nuisance: the check is a property of the table, not of whichever gap happened to be open
     when it was written.
 
-    The one entry left is node-shaped, so the mutation had to change shape with it -- and that is a
-    gain and not a compromise. `_check_pending_stages` derives its gaps twice, once from the
-    `BRANCH_TARGETS` answers that end at `END` and once from the terminal nodes `_plain_edges` finds
-    no successor for, and both previous mutations were `Dnn:answer`, so only the first set was ever
-    exercised. Giving `preventive_maintenance` a `SUBGRAPH_SUCCESSOR` entry takes it out of the
-    second set, which puts the half of the check that had never been mutated under test.
+    The last entry was node-shaped, so the mutation changed shape with it -- and that was a gain and
+    not a compromise. `_check_pending_stages` derives its gaps twice, once from the `BRANCH_TARGETS`
+    answers that end at `END` and once from the terminal nodes `_plain_edges` finds no successor for,
+    and both earlier mutations were `Dnn:answer`, so only the first set was ever exercised. Giving
+    `preventive_maintenance` a `SUBGRAPH_SUCCESSOR` entry took it out of the second set, which put
+    the half of the check that had never been mutated under test.
+
+    **`PENDING_STAGES` is now empty, and that cost this test its subject for the third time.** The
+    docstring above said the check is a property of the table rather than of whichever gap happened
+    to be open, and this is where that has to be made true instead of asserted: there is no open gap
+    left to borrow, and the next one may be years away. Both halves of the mutation are therefore
+    injected -- the entry *and* the wiring that makes it stale -- so the test no longer depends on
+    the frontier being non-empty. Dropping the `PENDING_STAGES` patch alone leaves the graph valid
+    and the test red at `DID NOT RAISE`, which is what proves the injected entry is what the check
+    is reading.
+
+    Both node-shaped and answer-shaped are driven, for the reason the paragraph above gives about
+    the two derivations: with the real table empty neither half has a live subject, so an injected
+    pair is the only thing keeping the answer-shaped derivation under mutation at all.
     """
+    monkeypatch.setattr(
+        builder_module,
+        "PENDING_STAGES",
+        {f"{ONWARD}:preventive_maintenance": "an injected claim that work is owed here"},
+    )
     monkeypatch.setattr(
         builder_module,
         "SUBGRAPH_SUCCESSOR",
         {**SUBGRAPH_SUCCESSOR, "preventive_maintenance": "assemble_case_evidence"},
     )
-    with pytest.raises(GraphTopologyError, match="no longer reach END"):
+    with pytest.raises(GraphTopologyError, match="no longer reach END") as node_shaped:
         build_parent_graph()
+    assert f"{ONWARD}:preventive_maintenance" in str(node_shaped.value)
+
+    # The answer-shaped half of the same derivation: an entry naming a `Dnn:answer` that reaches a
+    # real node. `D01:quarantine` genuinely ends at `END`, so `continue` is used -- it reaches P03,
+    # which is exactly the "the stage was wired; delete its line" case.
+    monkeypatch.setattr(
+        builder_module, "PENDING_STAGES", {"D01:continue": "an injected claim about a live answer"}
+    )
+    monkeypatch.setattr(builder_module, "SUBGRAPH_SUCCESSOR", SUBGRAPH_SUCCESSOR)
+    with pytest.raises(GraphTopologyError, match="no longer reach END") as answer_shaped:
+        build_parent_graph()
+    assert "D01:continue" in str(answer_shaped.value)
 
 
 def test_a_new_dead_end_has_to_say_why_it_is_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1334,24 +1370,41 @@ def test_a_new_dead_end_has_to_say_why_it_is_one(monkeypatch: pytest.MonkeyPatch
 
 
 def test_a_node_that_ends_the_workflow_has_to_say_so(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The node-shaped half of the same rule, and the only entry in the table that carries it.
+    """The node-shaped half of the same rule, and the table that now carries the whole frontier.
 
     `record_escalation` is terminal on purpose: the incident is a human's, and
     `IncidentStatus.ESCALATED` moves onward to nine other statuses so a supervisor resumes the
     thread. `_plain_edges` cannot tell that apart from P11's old fall off the end, which was a
-    missing stage -- both are a node with no successor. `_DELIBERATE_TERMINALS` is the difference,
+    missing stage -- both are a node with no successor. `DELIBERATE_TERMINALS` is the difference,
     and emptying it shows the check reaches the node half at all::
 
         E   GraphTopologyError: these exits reach END with nothing to explain them:
-            ['__onward__:record_escalation'].
+            ['__onward__:preventive_maintenance', '__onward__:reconciliation_closure',
+             '__onward__:record_escalation'].
 
     Before D07's escalation arm was wired there was nothing in this table, so the branch that reads
     it ran on every build and excused nothing. That is worth a test rather than a comment: an empty
     frozenset and a table nobody consults look identical from the outside.
+
+    All three names are asserted rather than only the first, and that is not thoroughness for its
+    own sake -- with `PENDING_STAGES` empty this table is the *only* thing standing between a
+    terminal node and a build error, so a test that watched one name would leave two entries whose
+    removal nothing noticed. Dropping `preventive_maintenance` alone is the mutation that matters,
+    because that name arrived by replacing a `PENDING_STAGES` line rather than by a stage being
+    built, and it is asserted separately below.
     """
-    monkeypatch.setattr(builder_module, "_DELIBERATE_TERMINALS", frozenset())
-    with pytest.raises(GraphTopologyError, match=r"__onward__:record_escalation"):
+    monkeypatch.setattr(builder_module, "DELIBERATE_TERMINALS", frozenset())
+    with pytest.raises(GraphTopologyError, match="nothing to explain them") as raised:
         build_parent_graph()
+    for name in ("record_escalation", "reconciliation_closure", "preventive_maintenance"):
+        assert f"{ONWARD}:{name}" in str(raised.value)
+
+    # One name at a time, because the message above is satisfied by any non-empty set of gaps and a
+    # table that had silently lost two entries would still produce it.
+    for name in DELIBERATE_TERMINALS:
+        monkeypatch.setattr(builder_module, "DELIBERATE_TERMINALS", DELIBERATE_TERMINALS - {name})
+        with pytest.raises(GraphTopologyError, match=rf"{ONWARD}:{name}"):
+            build_parent_graph()
 
 
 def test_the_unbuilt_exits_are_the_ones_named() -> None:
@@ -1407,7 +1460,7 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     `graph.nodes.governance` is the whole of what they were waiting for. Nothing replaced them:
     the two gates re-enter the decisions they came from, and `record_escalation` is terminal on
     purpose, which is a different thing from terminal for want of a successor and is spelled out in
-    `_DELIBERATE_TERMINALS` rather than here. An exit can be closed by a node; a stage cannot.
+    `DELIBERATE_TERMINALS` rather than here. An exit can be closed by a node; a stage cannot.
 
     Wiring Stage 5's first half is the second edit to make the list shorter, and it is the field
     planning collapse again: `D10:verify` and `D12:verify` were one missing stage named twice
@@ -1427,9 +1480,12 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     a new subgraph is terminal until whatever follows it is written, and a terminal subgraph owes an
     `__onward__` line. `reconciliation_closure` owes none: its main line ends at P26, which writes
     `IncidentStatus.CLOSED`, and `domain.lifecycle` gives `closed` no outward transition. So it is
-    declared in `_DELIBERATE_TERMINALS` beside `record_escalation` -- the two ways this workflow can
-    legitimately stop -- rather than confessed here. That is the difference between a frontier that
-    advances and a frontier that closes, and it is the first time this list has recorded the second.
+    declared in `DELIBERATE_TERMINALS` beside `record_escalation` -- at the time, the two ways this
+    workflow could legitimately stop -- rather than confessed here. That is the difference between a
+    frontier that advances and a frontier that closes, and it is the first time this list recorded
+    the second. There are three ways now: `preventive_maintenance` joined on 2026-08-23, and it is a
+    third kind again -- neither escalated nor closed, because D04's preventive arm never opened an
+    incident for either word to apply to.
 
     Wiring the plant branch is the second edit to add a stage and put nothing in its place, and the
     first where the stage that was added is not itself terminal. `plant_execution` is followed by
@@ -1461,13 +1517,29 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
     `topology` resolved. `field_execution` was migrated onto the same helper, so the derivation has
     one owner and not two.
 
-    What is left is one entry, and it is the seam kind: a stage that exists on each side and no edge
-    that may join them, because the receiving stage reads a model the sending one never builds.
+    What was left after that was one entry, and it was described as the seam kind: a stage that
+    exists on each side and no edge that may join them, because the receiving stage reads a model the
+    sending one never builds.
+
+    **The list is empty, and the last entry left by being disproved rather than built.** That is a
+    kind this docstring had no line for. `__onward__:preventive_maintenance` said P14 was the owner
+    of what came next and that the seam waited only on somebody deciding what a preventive
+    `ResolutionOption` is. Measured on 2026-08-23: every domain `crew_for` calls `DIRTY` offers
+    `raise_mr` and no `create_work_order`, every domain that offers a work order is `CLEAN` or
+    `JOINT`, and `plan_preventive_field_work` produces a `DIRTY` crew and nothing else. So there is
+    no preventive `ResolutionOption` to decide on -- `field_planning` commits `CREATE_WORK_ORDER`
+    alone, and the arm can never carry one. The stage is declared in `DELIBERATE_TERMINALS` and the
+    measurement lives in `PENDING_STAGES`' own comment, next to the empty table it explains.
+
+    A frontier can therefore close three ways, not two: a stage is built, an exit turns out to be
+    the real end of the workflow, or -- this one -- the destination an entry named turns out to be
+    unable to receive what the source produces. Only the third obliges the entry to be *retracted*,
+    and it is the one where nothing failed.
 
     `_check_pending_stages` is what makes this shrink rather than rot: the entries here are checked
     against the tables in both directions, so an exit that stops reaching `END` fails the build. Both
-    directions were seen red on this edit rather than reasoned about. Leaving the line in place with
-    the stage wired::
+    directions were seen red on the plant edit rather than reasoned about. Leaving the line in place
+    with the stage wired::
 
         GraphTopologyError: PENDING_STAGES still lists exits that no longer reach END:
           ['D08:plant_path']. The stage was wired; delete its line.
@@ -1477,10 +1549,17 @@ def test_the_unbuilt_exits_are_the_ones_named() -> None:
         GraphTopologyError: these exits reach END with nothing to explain them: ['D08:plant_path'].
           A run that stops there looks like a run that finished. [...]
 
-    The first is the direction nothing else in the codebase would have caught.
+    The first is the direction nothing else in the codebase would have caught. Neither fires on this
+    edit, and that is the point of the assertion below being paired with the one in
+    `test_a_node_that_ends_the_workflow_has_to_say_so`: an empty `PENDING_STAGES` is checked by
+    nothing on its own, so what holds the retraction honest is the *other* table having grown by the
+    name this one lost.
     """
-    assert set(PENDING_STAGES) == {f"{ONWARD}:preventive_maintenance"}
-    assert all(text.strip() for text in PENDING_STAGES.values()), "each has to say what is missing"
+    assert set(PENDING_STAGES) == set()
+    assert "preventive_maintenance" in DELIBERATE_TERMINALS, (
+        "the last pending exit was retracted rather than wired, so the name has to appear in the "
+        "table that excuses a terminal node -- otherwise the build stops explaining where runs end"
+    )
 
 
 def test_the_guards_branch_cannot_be_confused_with_an_answer() -> None:

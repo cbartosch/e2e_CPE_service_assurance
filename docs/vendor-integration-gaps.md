@@ -567,8 +567,9 @@ disposition. **Invented:** everything about what a preventive case is worth, and
   over all 41 fixtures: **every physical finding this stage can produce classifies to
   `CrewType.DIRTY`, and not one produces `CrewType.CLEAN`** — so splitting the arm would have added
   a branch no fixture takes, to answer a question this stage does not own. The arm records the
-  domain and the derived crew, and `builder.PENDING_STAGES` names P14/D13 as the owner of what
-  happens next. **The open question is whether the crew split is a scheduling decision at all**, or
+  domain and the derived crew. This entry used to add that `builder.PENDING_STAGES` names P14/D13 as
+  the owner of what happens next; it does not, and PREVENTIVE-4 is the measurement that retracted
+  it. **The open question is whether the crew split is a scheduling decision at all**, or
   a consequence of the fault domain that no stage should be asked to choose. If it is genuinely a
   decision — if a distribution fault can ever warrant a Clean Boots visit — then `crew_for` is the
   wrong shape and the fixtures are missing the case that would show it. A test asserts the
@@ -599,6 +600,51 @@ disposition. **Invented:** everything about what a preventive case is worth, and
   itself.** Two systems reporting the same reading because one derives it from the other is two
   sources by this measure. The bar cannot tell independence from duplication, and nothing in the
   evidence record says which it has.
+* **PREVENTIVE-4** — **A planned preventive visit is never scheduled, and the seam that was supposed
+  to schedule it could not have.** `builder.PENDING_STAGES` carried one entry until 2026-08-23,
+  `__onward__:preventive_maintenance`, saying the arm owed an edge into `field_planning` and waited
+  only on somebody deciding what a preventive `ResolutionOption` is. There is nothing to decide.
+  Measured across all fifteen `FaultDomain` members against the shipped pack:
+
+  | crew | domains | offers `create_work_order` |
+  | --- | --- | --- |
+  | `clean` | `cpe`, `inside_home_wiring`, `drop` | yes |
+  | `clean` | `customer_environment` | no — self-help and radio levers only |
+  | `joint` | `tap_or_odp` | yes |
+  | `dirty` | `distribution`, `feeder`, `node_or_olt`, `headend_or_co`, `power` | **no, all five** |
+  | none | `service_platform`, `provisioning`, and the three non-domains | no |
+
+  Every Dirty Boots domain offers `raise_mr` and no work order, and every domain that offers a work
+  order is Clean or Joint. That is the delimiter itself rather than a property of the catalogue —
+  `raise_mr` carrying the `clean_to_dirty_handover` approval kind is the same fact — and
+  `field_planning` commits `CREATE_WORK_ORDER` and nothing else, because `wfm.create_work_order`
+  refuses any other action type by name. PREVENTIVE-1 measured the third leg: this arm produces a
+  `DIRTY` crew and never a `CLEAN` one. So an edge into P14 would hand it a plan with nothing
+  selectable in it on **every** arrival the arm can produce — driven through the real parent, three
+  of the 41 services take it, `SVC-PO-042-A-04` and `SVC-UT-001-A-03` on `distribution` and
+  `SVC-VQ-002-A-01` on `power`.
+
+  Nor could the edge be conditional. A subgraph's exit is a parent edge, `_check_tables` admits only
+  `routing.DECISIONS` members there, and the specification declares twenty-four decisions with none
+  after D04's preventive arm — so the two dispositions that must *not* continue, `monitoring` and
+  `remote_prevention`, would follow the field-work one through field execution, restoration
+  validation and closure. Fourteen of the seventeen arrivals are one of those two.
+
+  The stage is therefore declared in `builder.DELIBERATE_TERMINALS` and the entry was retracted
+  rather than paid off. **What remains genuinely missing is unchanged and is PREVENTIVE-2**: three
+  services with measured, actionable plant faults — a PON span attenuating both ways, DOCSIS RF out
+  of spec at a tap, an ONT with no utility power — get a case with `status=planned_field_work` and
+  `recommended_window` as tight as `within_24_hours`, and nothing reads it. **Who drains the
+  preventive-maintenance queue?** Until that has an owner the disposition is a record and not an
+  action, and no edge in this graph would have changed that.
+
+  The nearest thing to an answer, if one is wanted inside the workflow, is a preventive MR rather
+  than a preventive work order: `graph/subgraphs/_mr.py` already files one from two entrances, and a
+  Dirty Boots preventive finding wants exactly what those two file. It would need P19's approval
+  without an RCA to authorise against — `plant_referral_packet` reads `rca.summary`,
+  `rca.evidence_refs` and `rca.ruled_out`, and this path has none by construction, which is the same
+  wall the preventive stage already documents for `PolicyEngine.evaluate`. That is a stage-sized
+  piece of work, it would still end here, and it is not started.
 
 ## Field planning (`graph/subgraphs/field_planning.py`, P14–P16, D13–D15)
 

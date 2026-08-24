@@ -63,8 +63,48 @@ owners, and the one that drifted would be the one nothing loaded.
 It is not a hypothetical seam either way. Measured over all 41 fixtures, every physical finding
 this stage can produce classifies to `CrewType.DIRTY`; not one produces `CrewType.CLEAN`. Splitting
 the arm would therefore have added a branch that no fixture takes, to answer a question this stage
-does not own. `plan_preventive_field_work` records the domain and the crew `crew_for` derives, and
-`builder.PENDING_STAGES` names P14/D13 as the owner of what happens next.
+does not own. `plan_preventive_field_work` records the domain and the crew `crew_for` derives.
+
+Where the field-work arm does *not* go, and why that is a measurement
+---------------------------------------------------------------------
+`builder.PENDING_STAGES` used to name P14/D13 as the owner of what happens next, and to hold this
+stage's exit open on that basis: the seam was said to be waiting only on somebody deciding what a
+preventive `ResolutionOption` is. It is not waiting on that. **No such option can exist**, and the
+measurement is the all-`DIRTY` one above read together with the resolution catalogue:
+
+    domain                crew    offers create_work_order
+    cpe                   clean   yes
+    inside_home_wiring    clean   yes
+    drop                  clean   yes
+    tap_or_odp            joint   yes
+    distribution          dirty   no      <- two of the three arrivals
+    feeder                dirty   no
+    node_or_olt           dirty   no
+    headend_or_co         dirty   no
+    power                 dirty   no      <- the third
+    service_platform      none    no
+
+Every `DIRTY` domain offers `raise_mr` and no work order; every domain that offers a work order is
+`CLEAN` or `JOINT`. That is not a gap in the catalogue -- it is the Clean/Dirty delimiter, which is
+what `raise_mr` carrying the `clean_to_dirty_handover` approval kind already says. Work upstream of
+the tap or ODP is a maintenance request to OSP, and `field_planning` commits exactly one action
+type: `is_dispatchable_option` is `requires_truck_roll and action_type is CREATE_WORK_ORDER`,
+narrowed on purpose because `wfm.create_work_order` refuses anything else by name.
+
+So an edge from here to P14 would hand it a plan it must reject. Driven through the real parent on
+2026-08-23, three of the 41 services take this arm -- `SVC-PO-042-A-04` and `SVC-UT-001-A-03` on
+`distribution`, `SVC-VQ-002-A-01` on `power` -- and all three would reach `route_field_gate`'s
+`escalate` and land in `abandon_field_planning`, which writes `diagnosing`. The other two
+dispositions cannot be held back from following them: a conditional exit from a subgraph needs a
+`routing.DECISIONS` member and the specification declares no decision after D04's preventive arm,
+so the edge would be unconditional and a service whose disposition was *monitor it* would walk on
+through field execution, restoration validation and closure.
+
+The stage is therefore terminal on purpose and is declared in `builder.DELIBERATE_TERMINALS`. The
+arm records the domain, the crew and a window; what is missing is a preventive-maintenance queue
+that re-reads the case, which is gap PREVENTIVE-2 and is not an edge in this graph. PREVENTIVE-4
+records what it would take to make this arm *act* -- a preventive MR through `subgraphs._mr`, which
+is a third entrance to a filing mechanism that already has two, and which would still end here.
 
 Why the policy engine is not consulted
 --------------------------------------
@@ -573,10 +613,15 @@ def _case_or_raise(state: IncidentState, node_name: str) -> PreventiveMaintenanc
 async def plan_preventive_field_work(state: IncidentState, ctx: GraphContext) -> NodeUpdate:
     """Record that this case needs a visit, and which crew, and stop.
 
-    Records rather than dispatches, and the specification's verb for D04 is "select". P14 owns work
-    order creation and D13 owns the crew assignment; what this node contributes is the finding's
-    `suspected_domain` and the crew `boundaries.crew_for` derives from it, so that P14 reads a
-    decision rather than re-deriving one from evidence that will by then be older.
+    Records rather than dispatches, and the specification's verb for D04 is "select". What this
+    node contributes is the finding's `suspected_domain` and the crew `boundaries.crew_for` derives
+    from it, written onto the case where a maintenance queue can read them.
+
+    **Stopping here is the end of the thread and not a handover to P14.** That is a change of
+    reading rather than of behaviour -- this node has always stopped -- and the module docstring
+    carries the measurement: every crew this arm can name is `DIRTY`, no `DIRTY` domain has a
+    work-order option, and `field_planning` commits nothing else. The crew named here is for the
+    queue and for a human, not for a stage downstream.
 
     A finding with no `suspected_domain` yields no crew, and that is recorded as `None` rather than
     guessed at. `crew_for` returns `None` for `UNKNOWN` deliberately -- "diagnosis incomplete" is
@@ -599,7 +644,7 @@ async def plan_preventive_field_work(state: IncidentState, ctx: GraphContext) ->
         note=(
             f"planned field work: {domain.value if domain else 'unclassified'} fault, "
             f"{crew.value if crew else 'crew undetermined'}. "
-            "P14 owns the work order and D13 the crew assignment"
+            "Selection only -- this case is queued for a maintenance window, not dispatched"
         ),
         detail={
             "suspected_domain": domain.value if domain is not None else None,
