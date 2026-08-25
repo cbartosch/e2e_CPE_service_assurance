@@ -43,9 +43,16 @@ from lpr_cpe.config.clock import FrozenClock
 from lpr_cpe.decision_services.forecast import should_dispatch
 from lpr_cpe.decision_services.resolution import plan_resolution
 from lpr_cpe.domain.boundaries import crew_for
+from lpr_cpe.domain.diagnosis import (
+    AnomalyFinding,
+    PredictionResult,
+    PreventiveMaintenanceCase,
+)
 from lpr_cpe.domain.enums import (
+    ActionType,
     CaseType,
     CrewType,
+    DataQualityFlag,
     EventSource,
     FaultDomain,
     HealthBand,
@@ -72,6 +79,7 @@ from lpr_cpe.graph.subgraphs.preventive_maintenance import (
     DISPOSITION_TARGETS,
     INSUFFICIENT_EVIDENCE,
     PREVENTIVE_MAINTENANCE_NODES,
+    _priority_of,
     apply_remote_prevention,
     build_preventive_maintenance_graph,
     physical_findings,
@@ -83,7 +91,7 @@ from lpr_cpe.graph.subgraphs.preventive_maintenance import (
 from lpr_cpe.observability.kpi import NOT_DERIVABLE_FROM_STATE
 from lpr_cpe.policies.engine import PolicyEngine
 from lpr_cpe.policies.loader import load_pack
-from lpr_cpe.policies.models import EvidencePolicy
+from lpr_cpe.policies.models import EvidencePolicy, PolicyPack
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
@@ -541,6 +549,443 @@ def test_no_dirty_crew_domain_has_a_work_order_for_field_planning_to_commit(
     }
     assert reached == {FaultDomain.DISTRIBUTION, FaultDomain.POWER}, reached
     assert not any(offers_work_order[d] for d in reached)
+
+
+# ------------------------------------------------------------------------------------------------
+# The nine claims the 2026-08-24 sweep found nothing holding
+# ------------------------------------------------------------------------------------------------
+#
+# Every mutation closed below survived this module's own tests *and* the whole suite. Four of the
+# nine are **equivalent over the fixture set** rather than weakly tested, and that is the pattern:
+# this module's tests are driven from `sweep`, and the 17 cases that reach the stage are too uniform
+# to tell several of its rules apart. Measured on 2026-08-25:
+#
+#   * 0 of 17 hold two actionable findings, so `max(..., key=score)` and `min` agree;
+#   * 0 of 17 hold a finding score and a forecast that are both non-zero and different, so
+#     `max(worst, forecast)` and `worst + forecast` agree;
+#   * 0 of 17 hold both a finding and a radio lever, so the two clauses of the disposition router
+#     can be swapped without moving any arm;
+#   * every case has 6 or 7 evidence sources against a bar of 2, so `>=` and `>` agree.
+#
+# A rule that no reachable state can falsify still has to be pinned, because the fixture set is not
+# the specification. Each of those four is closed by a constructed case and says so.
+
+_FINDING_FIELDS: dict[str, Any] = {
+    "detector_version": "1.0.0",
+    "observed_at": NOW,
+    "explanation": "constructed for a regression test",
+}
+
+
+def _finding(
+    detector: str,
+    *,
+    score: float,
+    confidence: float = 0.9,
+    domain: FaultDomain | None = FaultDomain.DISTRIBUTION,
+    warnings: tuple[DataQualityFlag, ...] = (),
+    severity: Severity = Severity.HIGH,
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        detector_name=detector,
+        score=score,
+        confidence=confidence,
+        severity=severity,
+        suspected_domain=domain,
+        data_quality_warnings=warnings,
+        **_FINDING_FIELDS,
+    )
+
+
+def test_physical_findings_takes_the_access_layer_detectors_and_only_the_actionable_ones() -> None:
+    """Two filters, two survivors, one reader. Both could be dropped without failing anything.
+
+    `physical_findings` is what the field-work arm acts on, and it narrows twice: to the two
+    access-layer detectors this stage actually ran, and to findings `AnomalyFinding.actionable`
+    admits — confidence at or above 0.6 and no data-quality warning. Dropping either filter left the
+    suite green, because every finding the fixtures produce passes both, so the sweep could not tell
+    a filter from a no-op.
+
+    What each one costs is different and both are worth a crew's afternoon. Without the detector
+    filter, anything that happened to be in `anomaly_findings` counts as an access-layer fault —
+    which is empty at D04 today and is exactly the field a later edit would fill. Without
+    `actionable`, a crew is sent on a reading the detector itself flagged as computed over something
+    it could not fully see.
+
+    Watched red twice::
+
+        drop `.actionable`:      AssertionError: a finding the detector flagged as unreliable is
+                                 not something to send a crew on
+        drop the name filter:    AssertionError: only the two access-layer detectors this stage ran
+                                 may speak for the access layer
+    """
+    good = _finding("pon_optical_degradation", score=0.8)
+    unreliable = _finding("hfc_rf_pnm_degradation", score=0.9, confidence=0.4)
+    flagged = _finding(
+        "hfc_rf_pnm_degradation", score=0.9, warnings=(DataQualityFlag.LOW_SAMPLE_COUNT,)
+    )
+    stranger = _finding("cpe_offline", score=0.95)
+
+    state: Any = {"anomaly_findings": [good, unreliable, flagged, stranger]}
+    found = physical_findings(state)
+
+    assert unreliable not in found and flagged not in found, (
+        "a finding the detector flagged as unreliable is not something to send a crew on"
+    )
+    assert stranger not in found, (
+        "only the two access-layer detectors this stage ran may speak for the access layer"
+    )
+    assert found == [good]
+
+
+def test_the_access_layer_is_asked_before_the_radios(now: datetime) -> None:
+    """The disposition order the module docstring defends at length, pinned by a constructed case.
+
+    `route_preventive_disposition` asks three questions in a fixed order, and the second — "did the
+    access layer say anything actionable?" — comes before the radios deliberately: the module
+    docstring's measurement is that the Wi-Fi forecast is *blind* to the three services with real
+    access-layer degradation, two of which band `healthy`. Asking the radios first would send a
+    technician for a busy 2.4 GHz channel while the fibre died.
+
+    Swapping the two clauses passed every test in the repository, and the reason is not a weak
+    assertion: **no fixture holds both signals at once**, measured 0 of 17, so the order cannot
+    change any arm the sweep can reach. The case here is therefore built rather than found — a case
+    carrying an actionable finding *and* a lever — which is the only state in which the two orders
+    disagree.
+
+    Watched red by swapping the clauses::
+
+        AssertionError: assert 'remote_prevention' == 'field_work'
+    """
+    both = PreventiveMaintenanceCase(
+        case_id="PMC-1",
+        created_at=now,
+        subject_ref="SVC-1",
+        technology=Technology.PON.value,
+        trigger=CaseType.PREDICTIVE_MAINTENANCE.value,
+        prediction=PredictionResult(
+            model_name="wifi_forecast",
+            model_version="1.0.0",
+            predicted_at=now,
+            horizon=timedelta(hours=24),
+            subject_ref="SVC-1",
+            failure_probability=0.4,
+            confidence=0.8,
+            # The band cannot be set without the score it is derived from -- `PredictionResult`
+            # refuses the pair, which is the model keeping the two from disagreeing.
+            wifi_health_score=54.0,
+            band=HealthBand.AT_RISK,
+            recommended_actions=(ActionType.WIFI_CHANNEL_CHANGE,),
+        ),
+        findings=[_finding("pon_optical_degradation", score=0.8)],
+        recommended_window="",
+        priority_score=0.8,
+        status="open",
+        notes=[],
+    )
+
+    assert route_preventive_disposition({"pm_case": both}) == "field_work", (  # type: ignore[arg-type]
+        "a dying ONT outranks a busy channel; the access layer is asked first"
+    )
+
+    # The lever alone still reaches the radios, so the ordering above is a precedence rather than
+    # the second clause being unreachable.
+    levers_only = both.model_copy(update={"findings": []})
+    assert route_preventive_disposition({"pm_case": levers_only}) == "remote_prevention"  # type: ignore[arg-type]
+
+    # And question 1 outranks both, whatever they say.
+    thin = both.model_copy(update={"status": INSUFFICIENT_EVIDENCE})
+    assert route_preventive_disposition({"pm_case": thin}) == "monitoring"  # type: ignore[arg-type]
+
+
+def test_priority_is_the_worse_of_the_two_readings_and_not_their_sum() -> None:
+    """A measured optical fault outranks a forecast; the two are not added.
+
+    `_priority_of` takes `max(worst_finding, forecast)`, and the docstring's argument is an
+    ordering claim: "a service with a dying ONT and perfect Wi-Fi should outrank one with mediocre
+    both, and adding them would invert that". Replacing `max` with `+` passed everything, because
+    no case holds two non-zero readings that differ — measured 0 of 17 — so the sum and the maximum
+    are the same number on every state the sweep reaches.
+
+    Tested directly on the helper rather than through `case.priority_score`, because the observable
+    cannot distinguish them and the claim is about the arithmetic. The inversion the docstring names
+    is asserted too, since that is the consequence the choice was made for.
+
+    Watched red by summing::
+
+        AssertionError: assert 1.5 == 0.9
+    """
+    dying_ont = _priority_of(_prediction(0.6), [_finding("pon_optical_degradation", score=0.9)])
+    mediocre_both = _priority_of(_prediction(0.7), [_finding("pon_optical_degradation", score=0.7)])
+
+    assert dying_ont == 0.9, "the worse reading is the score, not the total"
+    assert mediocre_both == 0.7
+    assert dying_ont > mediocre_both, (
+        "a dying ONT with a fair forecast must outrank mediocre-both; summing inverts this"
+    )
+
+    assert _priority_of(None, []) == 0.0, "nothing readable ranks last, which is a real answer"
+    assert _priority_of(_prediction(0.5), []) == 0.5, "a forecast alone still ranks"
+
+
+def _prediction(probability: float) -> PredictionResult:
+    return PredictionResult(
+        model_name="wifi_forecast",
+        model_version="1.0.0",
+        predicted_at=NOW,
+        horizon=timedelta(hours=24),
+        subject_ref="SVC-1",
+        failure_probability=probability,
+        confidence=0.8,
+    )
+
+
+async def test_the_field_work_arm_plans_around_the_worst_finding_not_the_mildest() -> None:
+    """Which finding the visit is planned around, when there is more than one.
+
+    `plan_preventive_field_work` takes `max(findings, key=score)` and reads the domain, the crew and
+    the window off it. Replacing `max` with `min` changed nothing anywhere, because **no case holds
+    two actionable findings** — measured 0 of 17 — so the two agree on every reachable state.
+
+    The state is therefore constructed with two findings whose scores, domains and severities all
+    differ, so that the wrong choice is visible in three fields at once rather than one. The node is
+    driven through `__wrapped__`, which is how `test_nodes.py` drives a node without a LangGraph
+    runtime underneath it.
+
+    Watched red with `min`::
+
+        AssertionError: the visit is planned around the worst finding
+        assert 'power' == 'distribution'
+    """
+    mild = _finding(
+        "hfc_rf_pnm_degradation",
+        score=0.4,
+        domain=FaultDomain.POWER,
+        severity=Severity.MEDIUM,
+    )
+    severe = _finding(
+        "pon_optical_degradation",
+        score=0.95,
+        domain=FaultDomain.DISTRIBUTION,
+        severity=Severity.CRITICAL,
+    )
+    case = PreventiveMaintenanceCase(
+        case_id="PMC-1",
+        created_at=NOW,
+        subject_ref="SVC-1",
+        technology=Technology.PON.value,
+        trigger=CaseType.PREDICTIVE_MAINTENANCE.value,
+        findings=[mild, severe],
+        recommended_window="",
+        priority_score=0.95,
+        status="open",
+        notes=[],
+    )
+    state: Any = {
+        "incident_id": "INC-1",
+        "pm_case": case,
+        "anomaly_findings": [mild, severe],
+    }
+
+    ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+    update = await plan_preventive_field_work.__wrapped__(state, ctx)
+
+    (event,) = [e for e in update["audit_events"] if e.node == "plan_preventive_field_work"]
+    assert event.detail["detector"] == "pon_optical_degradation", (
+        "the visit is planned around the worst finding"
+    )
+    assert event.detail["suspected_domain"] == FaultDomain.DISTRIBUTION.value
+    assert event.detail["score"] == 0.95
+    assert update["pm_case"].recommended_window == "within_24_hours", (
+        "the window follows the worst finding's severity, which is critical here"
+    )
+
+
+async def test_a_fault_no_crew_attends_is_recorded_as_undetermined_rather_than_dirty() -> None:
+    """`crew_for` returning `None` is an answer, and the arm must not substitute a default.
+
+    The node reads `crew_for(domain) if domain is not None else None`, and the docstring is explicit
+    that "a stage that substituted `DIRTY` because most faults are would be sending the more
+    expensive crew on the strength of a default". Making it do exactly that survived everything,
+    because every fixture finding classifies to `DIRTY` anyway — so the default and the derivation
+    agree on all 17.
+
+    **Two different causes reach the same answer, and only one of them reaches the defaulting
+    branch.** The node is `crew_for(domain) if domain is not None else None`, so:
+
+    * a finding that *named* a domain no crew attends — `service_platform` — takes the first branch
+      and gets `None` out of `crew_for`;
+    * a finding with **no** `suspected_domain` at all takes the `else`, which is the branch the
+      mutation replaces.
+
+    The first case alone leaves the mutation alive, which is how this test failed its own
+    verification the first time it was written. Both are driven, and the module docstring's own
+    wording is why that is not redundancy: `crew_for` returns `None` for `UNKNOWN` deliberately, and
+    "diagnosis incomplete" is one of its three distinct causes — a different fact from "no crew
+    attends this layer", reached by a different route, and each needs its own case.
+
+    Watched red by defaulting to `DIRTY`::
+
+        AssertionError: a finding that named no domain leaves the crew undetermined
+        assert 'dirty' is None
+    """
+    ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+
+    async def crew_recorded_for(domain: FaultDomain | None) -> Any:
+        found = _finding("pon_optical_degradation", score=0.8, domain=domain)
+        case = PreventiveMaintenanceCase(
+            case_id="PMC-1",
+            created_at=NOW,
+            subject_ref="SVC-1",
+            technology=Technology.PON.value,
+            trigger=CaseType.PREDICTIVE_MAINTENANCE.value,
+            findings=[found],
+            recommended_window="",
+            priority_score=0.8,
+            status="open",
+            notes=[],
+        )
+        state: Any = {"incident_id": "INC-1", "pm_case": case, "anomaly_findings": [found]}
+        update = await plan_preventive_field_work.__wrapped__(state, ctx)
+        (event,) = [e for e in update["audit_events"] if e.node == "plan_preventive_field_work"]
+        return event.detail, update["pm_case"]
+
+    assert crew_for(FaultDomain.SERVICE_PLATFORM) is None
+    detail, case = await crew_recorded_for(FaultDomain.SERVICE_PLATFORM)
+    assert detail["crew"] is None, "no crew attends a service-platform fault, and the arm says so"
+    assert detail["suspected_domain"] == FaultDomain.SERVICE_PLATFORM.value
+    assert "crew undetermined" in case.notes[-1]
+
+    # The `else` branch: the detector could not place the fault at all.
+    detail, case = await crew_recorded_for(None)
+    assert detail["crew"] is None, "a finding that named no domain leaves the crew undetermined"
+    assert detail["suspected_domain"] is None
+    assert "unclassified" in case.notes[-1]
+
+
+async def test_the_evidence_bar_admits_a_case_that_exactly_meets_it(fixtures: Any) -> None:
+    """`>=`, at the boundary, which no fixture can reach.
+
+    `open_preventive_case` gates the disposition on `source_count >= minimum`. Every case that
+    reaches this stage has 6 or 7 distinct evidence sources against a shipped bar of 2 — measured
+    2026-08-25 — so `>` and `>=` agree on all 17 and the off-by-one is invisible.
+
+    Both sides of the boundary are driven by moving the bar rather than the evidence: at exactly the
+    count the case must open, and one above it must not. That is the same technique
+    `test_raising_the_bar_overrules_an_actionable_finding` uses, narrowed to the boundary.
+
+    Read off `open_preventive_case`'s **audit outcome** rather than off `case.status`, for the
+    reason the `sweep` fixture's docstring gives about re-reading the router: the arm that runs next
+    overwrites `case.status` with its own disposition, so a case the bar refused reads `monitoring`
+    by the time the run ends. The audit event is the only record of what the bar actually said.
+
+    Watched red with `>`::
+
+        AssertionError: a case with exactly the minimum number of sources meets the bar
+        assert 'insufficient_evidence' == 'opened'
+    """
+    service = fixtures.services[DEGRADED_OPTICAL_SERVICE]
+
+    plain, _ = await _through(service)
+    measured, _age = evidence_support(plain, NOW)
+    assert measured >= 2, "this test needs a case with evidence to move the bar against"
+
+    at_bar, _ = await _through(service, policy=PolicyEngine(_pack_with_bar(measured)))
+    assert _bar_said(at_bar) == "opened", (
+        "a case with exactly the minimum number of sources meets the bar"
+    )
+
+    above_bar, _ = await _through(service, policy=PolicyEngine(_pack_with_bar(measured + 1)))
+    assert _bar_said(above_bar) == INSUFFICIENT_EVIDENCE, "one source short of the bar is below it"
+
+
+def _bar_said(final: dict[str, Any]) -> str:
+    (event,) = [e for e in final["audit_events"] if e.node == "open_preventive_case"]
+    return str(event.outcome)
+
+
+def _pack_with_bar(minimum: int) -> PolicyPack:
+    pack = load_pack()
+    return pack.model_copy(
+        update={"evidence": pack.evidence.model_copy(update={"min_sources_for_diagnosis": minimum})}
+    )
+
+
+def test_the_wifi_forecast_cites_the_radio_read_and_not_every_read(
+    sweep: dict[str, dict[str, Any]],
+) -> None:
+    """What the forecast is evidenced by. Citing everything makes it look doubly corroborated.
+
+    `assess_predictive_risk` passes `evidence_refs=((refs_by_name["cpe.wifi"],) ...)` — the radio
+    read alone — and the comment says why: "a forecast derived from the Wi-Fi snapshot is not
+    evidenced by an optical measurement, and citing both would make the assessment look doubly
+    corroborated to anything counting refs". Widening it to every ref passed everything.
+
+    Asserted against the evidence actually on the state, so the claim is "the ref it cites is the
+    `cpe.wifi` one" rather than "it cites one ref", which a single-source case would satisfy by
+    accident.
+
+    Watched red by citing every read::
+
+        AssertionError: the forecast cites the radio read alone
+        assert 2 == 1
+    """
+    checked = 0
+    for ref, row in sweep.items():
+        final = row["final"]
+        prediction = final.get("prediction")
+        if prediction is None:
+            continue
+        wifi = [item.ref for item in final["evidence"] if item.source_system == "cpe.wifi"]
+        if not wifi:
+            continue
+        checked += 1
+        assert list(prediction.evidence_refs) == wifi, (
+            f"{ref}: the forecast cites the radio read alone, not every source it happened to read"
+        )
+    assert checked, "no case produced a forecast with a radio read behind it"
+
+
+def test_a_cpe_that_answered_with_no_readable_radio_is_noted(
+    sweep: dict[str, dict[str, Any]],
+) -> None:
+    """ "The CPE did not answer" and "it answered and said nothing useful" are different facts.
+
+    `assess_predictive_risk` writes a data-quality note for the second, and only the second:
+    `if prediction is None and "cpe.wifi" in payloads`. Deleting it left every test green, and the
+    note is the only thing separating a gateway that is dark from one that is up and unhelpful — the
+    first is a reachability problem and the second is a telemetry one, and they go to different
+    people.
+
+    Three of the 17 cases reach it, measured 2026-08-25, and every case with no forecast at all is
+    one of them: `forecast_wifi` returning `None` while the CPE answered is the whole of what this
+    branch is for. Both directions are asserted, because a note that appeared unconditionally would
+    satisfy a one-sided test while saying nothing.
+
+    Watched red by neutering the condition::
+
+        AssertionError: SVC-UT-001-B-01: the CPE answered and reported no readable Wi-Fi metric,
+        and that has to be recorded
+    """
+    note = "the CPE answered but reported no readable Wi-Fi metric"
+    silent = 0
+    for ref, row in sweep.items():
+        final = row["final"]
+        quality = final.get("data_quality")
+        notes = list(quality.notes) if quality is not None else []
+        answered = any(item.source_system == "cpe.wifi" for item in final["evidence"])
+
+        if final.get("prediction") is None and answered:
+            silent += 1
+            assert note in notes, (
+                f"{ref}: the CPE answered and reported no readable Wi-Fi metric, and that has to "
+                "be recorded"
+            )
+        elif final.get("prediction") is not None:
+            assert note not in notes, (
+                f"{ref}: a forecast was produced, so the radios were readable and the note is a lie"
+            )
+    assert silent, "no case reached the branch, so this test proves nothing"
 
 
 def test_no_fixture_produces_a_clean_boots_crew(sweep: dict[str, dict[str, Any]]) -> None:

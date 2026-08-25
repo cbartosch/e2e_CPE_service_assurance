@@ -1,15 +1,15 @@
 {
   "all_gates_passed": true,
-  "commit": "b217c1fb9d0d27581fad644ef4c2743520ac31c2",
+  "commit": "35f11c249b5b78e16c8c2bd56bd6d446dd6c2a52",
   "dirty": true,
   "figures": {
     "coverage_gate_percent": 85.0,
-    "coverage_percent": 85.48,
+    "coverage_percent": 85.57,
     "files_formatted": 137,
     "source_files_typechecked": 110,
     "tests_failed": 0,
-    "tests_passing": 945,
-    "tests_total": 945
+    "tests_passing": 964,
+    "tests_total": 964
   },
   "gates": [
     {
@@ -18,7 +18,7 @@
       "name": "ruff-check",
       "output_file": "latest/ruff-check.txt",
       "proves": "no lint finding in the shipped source or its tests",
-      "seconds": 0.48
+      "seconds": 0.47
     },
     {
       "command": "python -m ruff format --check src tests",
@@ -34,7 +34,7 @@
       "name": "mypy",
       "output_file": "latest/mypy.txt",
       "proves": "strict-mode type checking over src/lpr_cpe, with pydantic's plugin",
-      "seconds": 1.09
+      "seconds": 1.68
     },
     {
       "command": "python -m pytest --cov --cov-report=term-missing --cov-fail-under=85",
@@ -42,7 +42,7 @@
       "name": "pytest",
       "output_file": "latest/pytest.txt",
       "proves": "the committed suite, behind the coverage gate `make test` uses",
-      "seconds": 93.13
+      "seconds": 100.07
     },
     {
       "command": "python -m lpr_cpe.cli topology",
@@ -50,7 +50,7 @@
       "name": "topology",
       "output_file": "latest/topology.txt",
       "proves": "the parent graph compiles, so its four topology tables agree",
-      "seconds": 2.25
+      "seconds": 2.14
     },
     {
       "command": "python -m lpr_cpe.cli config",
@@ -58,10 +58,10 @@
       "name": "config",
       "output_file": "latest/config.txt",
       "proves": "the settings this process would run under, with no secret printed",
-      "seconds": 2.01
+      "seconds": 2.17
     }
   ],
-  "generated_at": "2026-08-25T02:37:21+00:00",
+  "generated_at": "2026-08-25T06:38:41+00:00",
   "interpreter": "C:\\Users\\bartosch christian\\Downloads\\e2e_CPE_service_assurance\\.venv\\Scripts\\python.exe",
   "packages": {
     "fastapi": "0.141.1",

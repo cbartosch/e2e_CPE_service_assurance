@@ -60,8 +60,10 @@ from lpr_cpe.domain import IncidentStatus, can_transition
 from lpr_cpe.domain.boundaries import crew_for
 from lpr_cpe.domain.enums import (
     ActionOutcome,
+    ActionType,
     ApprovalKind,
     CaseType,
+    CrewType,
     EventSource,
     FaultDomain,
     KPIName,
@@ -84,10 +86,17 @@ from lpr_cpe.graph.subgraphs._mr import REQUIRED_MR_FIELDS
 from lpr_cpe.graph.subgraphs.plant_referral import (
     ENTRY_NODE,
     REFERRAL_TARGETS,
+    abandon_plant_referral,
     build_plant_referral_graph,
+    evaluate_plant_referral,
     plant_referral_packet,
     receiving_owner,
+    referral_fault_domain,
+    referral_round,
+    route_plant_referral_gate,
 )
+from lpr_cpe.policies.engine import PolicyEngine
+from lpr_cpe.policies.loader import load_pack
 from lpr_cpe.simulation.loader import build_simulated_adapters
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
@@ -563,6 +572,190 @@ async def test_a_back_office_referral_names_no_crew(back_office_arrival: Any) ->
     assert final["status"] is IncidentStatus.MR_RAISED
     (record,) = current_mr_records(final).values()
     assert record.plant_object_ref == "TAP-PO-042-A"
+
+
+# ------------------------------------------------------------------------------------------------
+# The six claims the 2026-08-24 sweep found nothing holding
+# ------------------------------------------------------------------------------------------------
+#
+# Each survived this module's own tests and the whole suite. Four are pure readers, and the reason
+# nothing held them is the same in every case: the fixtures that reach this arm all carry a policy
+# decision, a resolved fault domain and one referral round, so the absent-value branch of each
+# reader is never entered.
+
+
+def test_the_gate_will_not_put_a_referral_to_a_human_the_engine_never_evaluated() -> None:
+    """No `RAISE_MR` decision must abandon, exactly as a blocked one does.
+
+    `route_plant_referral_gate` opens with `if decision is None or decision.blocked: return
+    "abandon"`, and rewriting it so a *missing* decision falls through answered `refer` — putting a
+    plant referral to a supervisor as though the engine had assessed it and asked for a signature.
+    An approver seeing that question has no way to tell it from one the pack really demanded.
+
+    It survived because `evaluate_plant_referral` runs immediately before the gate on every wired
+    path and always records a decision, so the clause guards a state the graph cannot currently
+    produce — and until something else routes here, only a direct test can say whether it works.
+
+    The empty state is the whole of the mutation's reach, so it is the whole of the test. The
+    decision-bearing arms are driven for real elsewhere in this module rather than reconstructed
+    here — see the module docstring on why a hand-written `PolicyDecision` tests the node against a
+    verdict the engine never gave.
+
+    Watched red::
+
+        AssertionError: a referral the engine never evaluated must not reach a human
+        assert 'refer' == 'abandon'
+    """
+    assert route_plant_referral_gate({}) == "abandon", (  # type: ignore[arg-type]
+        "a referral the engine never evaluated must not reach a human"
+    )
+
+
+def test_the_referral_reports_the_fault_domain_the_diagnosis_reached() -> None:
+    """`referral_fault_domain` reads state and falls back to `UNKNOWN`; the read could be deleted.
+
+    Replacing the whole reader with a bare `FaultDomain.UNKNOWN` passed everything. What it costs is
+    the one field OSP routes on: the packet's `fault_domain`, `03_proposed_domain` and the crew
+    `receiving_owner` derives all come from it, so an MR would arrive at OSP describing a fault
+    nobody had placed, with no crew type named.
+
+    The fallback is asserted too, since `or FaultDomain.UNKNOWN` is doing real work for a state that
+    never reached P10 — and a reader that returned the domain but crashed on its absence would be a
+    different defect.
+
+    Watched red::
+
+        AssertionError: the referral reports the domain the diagnosis reached
+        assert <FaultDomain.UNKNOWN: 'unknown'> is <FaultDomain.DISTRIBUTION: 'distribution'>
+    """
+    placed: Any = {"fault_domain": FaultDomain.DISTRIBUTION}
+    assert referral_fault_domain(placed) is FaultDomain.DISTRIBUTION, (
+        "the referral reports the domain the diagnosis reached"
+    )
+    assert receiving_owner(referral_fault_domain(placed)) == CrewType.DIRTY.value
+
+    assert referral_fault_domain({}) is FaultDomain.UNKNOWN, (  # type: ignore[arg-type]
+        "a referral with no domain resolved says so rather than raising"
+    )
+
+
+def test_the_referral_round_counts_the_entries_that_have_completed() -> None:
+    """One off-by-one, and the id it keys.
+
+    `referral_round` is `node_visits[ENTRY_NODE]`, and `@node` writes the visit *after* the body
+    returns — so inside the stage it is the count of completed passes, and adding one makes every
+    reader off by one against its own packet. The approval question carries it ("Referral 1"), the
+    filing carries it as `referral_round`, and `submit_mr`'s discriminator is keyed on it.
+
+    Watched red::
+
+        AssertionError: the first pass through this stage is referral 0, not 1
+        assert 1 == 0
+    """
+    assert referral_round({}) == 0, (  # type: ignore[arg-type]
+        "the first pass through this stage is referral 0, not 1"
+    )
+    assert referral_round({"node_visits": {ENTRY_NODE: 2}}) == 2  # type: ignore[arg-type]
+
+
+async def test_an_abandon_says_which_of_the_three_refusals_it_was(plant_arrival: Any) -> None:
+    """`policy_blocked`, `approval_refused` and `no_policy_decision` are three different remedies.
+
+    `abandon_plant_referral` asks about the policy decision first and the approval second, and
+    neutering the first clause makes a pack-blocked referral report `approval_refused` — naming a
+    supervisor who never saw it, and sending whoever reads the escalation to argue with a person
+    instead of with the pack. The reason code goes the same way: the decision's own code is replaced
+    by the approval's.
+
+    **The blocked decision is a real engine verdict, not a constructed one.** The module docstring
+    refuses to write a `PolicyDecision` into state by hand, and the objection holds here: the
+    ordering claim is about what the node does with the engine's answer, so an invented answer would
+    prove nothing about it. The fixtures never produce a block — all ten file — so the block is
+    produced the way an operator would produce it, by running `evaluate_plant_referral` against a
+    pack whose `raise_mr` rule is off, and the verdict that comes back is the engine's own.
+
+    Watched red::
+
+        AssertionError: a pack-blocked referral is not an approval refusal
+        assert 'approval_refused' == 'policy_blocked'
+    """
+    _service, arrival, _adapters = plant_arrival
+    refusing = build_context(  # type: ignore[arg-type]
+        clock=_Ticking(NOW), policy=PolicyEngine(_pack_refusing_mrs())
+    )
+
+    evaluated = await evaluate_plant_referral.__wrapped__(arrival, refusing)
+    (verdict,) = evaluated["policy_decisions"]
+    assert verdict.blocked, "the pack was meant to refuse this referral outright"
+    assert verdict.reason_codes, "a blocked verdict names why, and the abandon reads that"
+
+    blocked_state: Any = {**arrival, "policy_decisions": [verdict]}
+    ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+    update = await abandon_plant_referral.__wrapped__(blocked_state, ctx)
+    (event,) = [e for e in update["audit_events"] if e.node == "abandon_plant_referral"]
+    assert event.detail["arrival"] == "policy_blocked", (
+        "a pack-blocked referral is not an approval refusal"
+    )
+    assert event.reason_code is verdict.reason_codes[0], (
+        "the escalation carries the pack's reason, not the approver's"
+    )
+
+    bare = await abandon_plant_referral.__wrapped__({**arrival, "policy_decisions": []}, ctx)
+    (bare_event,) = [e for e in bare["audit_events"] if e.node == "abandon_plant_referral"]
+    assert bare_event.detail["arrival"] == "no_policy_decision"
+
+    assert update["escalated"] is True and bare["escalated"] is True
+
+
+def _pack_refusing_mrs() -> Any:
+    """The shipped pack with `raise_mr` disallowed, so the engine really blocks the referral."""
+    pack = load_pack()
+    rule = pack.remote_actions[ActionType.RAISE_MR]
+    return pack.model_copy(
+        update={
+            "remote_actions": {
+                **pack.remote_actions,
+                ActionType.RAISE_MR: rule.model_copy(update={"allowed": False}),
+            }
+        }
+    )
+
+
+async def test_the_packet_names_the_domain_and_the_access_it_is_handing_over(
+    plant_arrival: Any,
+) -> None:
+    """Two packet fields OSP reads and nothing asserted.
+
+    `03_proposed_domain` is who the case is being handed *to* — the crew `boundaries.crew_for`
+    derives — and blanking it survived everything. So did dropping the access archetype from
+    `safety_notes`, which is the only thing in the packet telling a crew what kind of site they are
+    attending when no survey was done.
+
+    Both are asserted against values derived from the arrival rather than written out, so the test
+    says "the packet carries what the state resolved" rather than "the packet carries this string".
+
+    Watched red twice::
+
+        03_proposed_domain -> None:   AssertionError: the packet says which crew the case is for
+        drop the archetype:           AssertionError: the safety note names the access archetype
+    """
+    _service, arrival, _adapters = plant_arrival
+    ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
+    packet = plant_referral_packet(arrival, ctx)
+
+    expected_crew = receiving_owner(referral_fault_domain(arrival))
+    assert expected_crew is not None, "this fixture must reach a domain a crew attends"
+    assert packet["03_proposed_domain"] == expected_crew, (
+        "the packet says which crew the case is for"
+    )
+    assert packet["07_crew_and_equipment_requirement"]["crew_type"] == expected_crew
+
+    topology = arrival.get("topology")
+    assert topology is not None and topology.area_archetype is not None
+    assert topology.area_archetype.value in packet["safety_notes"], (
+        "the safety note names the access archetype, which is all a crew has without a survey"
+    )
+    assert "no site survey" in packet["safety_notes"]
 
 
 def test_the_answer_vocabulary_both_sides_of_the_seam_agree_on() -> None:

@@ -55,6 +55,7 @@ from lpr_cpe.domain.enums import (
     ApprovalKind,
     CaseType,
     CrewType,
+    DelimiterKind,
     EventSource,
     FaultDomain,
     IncidentStatus,
@@ -64,6 +65,7 @@ from lpr_cpe.domain.enums import (
     Technology,
     WorkOrderStatus,
 )
+from lpr_cpe.domain.field_ops import DispatchRequirement, WorkOrder
 from lpr_cpe.domain.governance import PolicyDecision
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.builder import build_parent_graph
@@ -74,11 +76,15 @@ from lpr_cpe.graph.state import make_initial_state
 from lpr_cpe.graph.subgraphs.field_planning import (
     DISPATCH_TARGETS,
     FIELD_PLANNING_NODES,
+    _crew_slot,
+    _distinct_work_orders,
+    _priority_of,
     abandon_field_planning,
     build_field_planning_graph,
     build_field_requirement,
     commit_field_dispatch,
     dispatch_round,
+    field_requirement,
     is_dispatchable_option,
     optimize_field_schedule,
     queue_for_dispatcher,
@@ -257,6 +263,253 @@ def test_the_gate_router_is_wired_on_both_edges_that_ask_the_question(paused: An
         f"answers approve_dispatch here and puts a blocked action to a human. Got {answers}"
     )
     assert [route(dict(first)) for route in routers] == ["approve_dispatch", "approve_dispatch"]
+
+
+# ------------------------------------------------------------------------------------------------
+# The nine claims the 2026-08-24 sweep found nothing holding
+# ------------------------------------------------------------------------------------------------
+#
+# Each survived this module's own tests and the whole suite. Most are readers whose absent-value or
+# second-item branch no fixture enters: one requirement per incident, one dispatch round, one work
+# order, and every crew the WFM returns has capacity left.
+
+
+def test_the_requirement_being_scheduled_is_the_latest_one_written() -> None:
+    """`field_requirement` takes the last entry, and every state in the suite has exactly one.
+
+    `dispatch_requirements` is a plain list with last-write-wins, so today the first and the last
+    are the same record and `[0]` and `[-1]` cannot be told apart. The docstring says why it is
+    `[-1]` anyway: "taking the last is what keeps this correct if a stage is ever added that plans
+    two visits, where the one being scheduled is the one most recently written". A rule held only by
+    a docstring is the thing this sweep exists to find.
+
+    Constructed rather than driven, because the state that discriminates -- two requirements -- is
+    one no stage currently produces.
+
+    Watched red with `[0]`::
+
+        AssertionError: the requirement being scheduled is the one most recently written
+        assert 'REQ-first' == 'REQ-second'
+    """
+    first = _requirement("REQ-first")
+    second = _requirement("REQ-second")
+
+    assert field_requirement({"dispatch_requirements": [first, second]}).requirement_id == (  # type: ignore[arg-type,union-attr]
+        "REQ-second"
+    ), "the requirement being scheduled is the one most recently written"
+    assert field_requirement({}) is None, (  # type: ignore[arg-type]
+        "before P14 has run there is no requirement, and that is not an error"
+    )
+
+
+def _requirement(requirement_id: str) -> DispatchRequirement:
+    return DispatchRequirement(
+        requirement_id=requirement_id,
+        incident_id="INC-1",
+        created_at=NOW,
+        crew_type=CrewType.CLEAN,
+        fault_domain=FaultDomain.DROP,
+        delimiter_kind=DelimiterKind.TAP,
+        estimated_duration=timedelta(minutes=60),
+        priority_score=0.5,
+    )
+
+
+def test_the_crew_gate_needs_both_an_option_and_a_requirement(paused: Any) -> None:
+    """D13's precondition is two facts, and either one alone let the sweep through.
+
+    `route_field_gate` escalates unless P14 recorded *both* a selected option and a requirement, and
+    each clause could be deleted on its own without failing anything. They are not redundant:
+    `optimize_field_schedule` raises `ValueError` outright when there is no requirement, and
+    `commit_field_dispatch` builds an `ActionRequest` from the option -- so dropping either clause
+    turns an escalation into a crash one node later.
+
+    Driven from the real paused state, with each fact removed in turn, so the positive case is the
+    one the parent actually produces rather than a hand-built pair.
+
+    Watched red twice::
+
+        drop the requirement clause:  AssertionError: no requirement means nothing to schedule
+                                      assert 'clean' == 'escalate'
+        drop the option clause:       AssertionError: no option means nothing to send a crew to do
+    """
+    _graph, _ctx, _config, values, _parent = paused
+
+    assert route_field_gate(values) != "escalate", "this fixture is meant to reach a crew"
+
+    without_requirement = {**values, "dispatch_requirements": []}
+    assert route_field_gate(without_requirement) == "escalate", (
+        "no requirement means nothing to schedule, whatever the fault domain says"
+    )
+
+    plan = values["resolution_plan"]
+    without_option = {**values, "resolution_plan": plan.model_copy(update={"options": []})}
+    assert route_field_gate(without_option) == "escalate", (
+        "no option means nothing to send a crew to do"
+    )
+
+
+def test_a_crew_with_no_capacity_left_is_not_offered_as_a_slot() -> None:
+    """`_crew_slot` drops a full crew, and `CrewSlot` is why it cannot merely pass `max_jobs=0`.
+
+    The WFM's `jobs_already_booked` is subtracted from `max_jobs`, and a crew with nothing left is
+    returned as `None` rather than as a slot -- "a full crew is not a slot", and `CrewSlot` refuses
+    `max_jobs=0` with `ge=1` anyway, so the alternative is a `ValidationError` inside a node. The
+    sweep relaxed `remaining < 1` to `remaining < 0` and nothing noticed, because every crew the
+    fixture WFM returns has capacity.
+
+    The boundary is driven on both sides, since `< 1` and `< 0` differ only at exactly zero.
+
+    Watched red::
+
+        AssertionError: a crew with nothing left is not a slot
+    """
+    booked_out = _crew_row(max_jobs=3, booked=3)
+    assert _crew_slot(booked_out) is None, "a crew with nothing left is not a slot"
+
+    one_left = _crew_slot(_crew_row(max_jobs=3, booked=2))
+    assert one_left is not None and one_left.max_jobs == 1, (
+        "the slot offered is what the crew has left, not what its shift allows"
+    )
+
+    over_booked = _crew_slot(_crew_row(max_jobs=2, booked=5))
+    assert over_booked is None, "a crew booked past its limit is still not a slot"
+
+
+def _crew_row(*, max_jobs: int, booked: int) -> dict[str, Any]:
+    return {
+        "crew_id": "CREW-1",
+        "crew_type": CrewType.CLEAN.value,
+        "available_from": NOW,
+        "available_until": NOW + timedelta(hours=8),
+        "max_jobs": max_jobs,
+        "jobs_already_booked": booked,
+    }
+
+
+async def test_the_visit_number_counts_distinct_orders_and_not_revisions(paused: Any) -> None:
+    """`work_orders` reduces with `append_revision`, so `len()` counts status changes.
+
+    `_distinct_work_orders` counts distinct ids for that reason, and the node's docstring says
+    `field_visit_count` "is written as an absolute count of distinct work orders, never as
+    `state.get(...) + 1`". Replacing it with `len(work_orders) + 1` passed everything, because no
+    state in the suite holds a revised order -- Stage 4 is what revises them, and this stage's tests
+    stop before it.
+
+    **The helper and its call site are both driven, and the first alone is not enough.** A version
+    of this test that asserted only `_distinct_work_orders` left the mutation alive, because the
+    mutation does not go through the helper -- it replaces the call with `len(...) + 1`. Pinning a
+    helper says nothing about whether anybody uses it.
+
+    Watched red::
+
+        helper:     AssertionError: an order revised three times is one visit
+        call site:  AssertionError: the visit number counts distinct orders, not revisions
+                    assert 4 == 2
+    """
+    order = _work_order("WO-1", WorkOrderStatus.REQUESTED)
+    revised = [
+        order,
+        _work_order("WO-1", WorkOrderStatus.EN_ROUTE),
+        _work_order("WO-1", WorkOrderStatus.ON_SITE),
+    ]
+
+    assert _distinct_work_orders({"work_orders": revised}, "WO-1") == 1, (  # type: ignore[arg-type]
+        "an order revised three times is one visit"
+    )
+    assert _distinct_work_orders({"work_orders": revised}, "WO-2") == 2, (  # type: ignore[arg-type]
+        "a second order is a second visit"
+    )
+    assert _distinct_work_orders({}, "WO-1") == 1  # type: ignore[arg-type]
+
+    # The call site, on a state carrying an earlier visit that has since been revised twice -- which
+    # is what Stage 4 leaves behind and what this stage's own runs never produce.
+    graph, ctx, config, _first, _parent = paused
+    committed = await graph.ainvoke(Command(resume=APPROVAL), context=ctx, config=config)
+    earlier = [
+        _work_order("WO-EARLIER", WorkOrderStatus.REQUESTED),
+        _work_order("WO-EARLIER", WorkOrderStatus.ON_SITE),
+    ]
+    again = await commit_field_dispatch.__wrapped__(
+        {**committed, "work_orders": [*committed["work_orders"], *earlier]}, ctx
+    )
+    (booked,) = again["work_orders"]
+    assert booked.visit_number == 2, (
+        "the visit number counts distinct orders, not revisions: one earlier visit and this one"
+    )
+    assert again["field_visit_count"] == 2
+
+
+def _work_order(work_order_id: str, status: WorkOrderStatus) -> WorkOrder:
+    return WorkOrder(
+        work_order_id=work_order_id,
+        incident_id="INC-1",
+        crew_type=CrewType.CLEAN,
+        status=status,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def test_the_blast_radius_is_not_weighted_into_priority_twice(paused: Any) -> None:
+    """`_priority_of` folds in the affected count as a tie-break, not as a weighting.
+
+    The docstring is explicit: `objective.urgency_rank` already folds the SLA and the blast radius
+    from `JobContext`, "so this term must not repeat either -- counting the same customers twice
+    would let one large outage outrank every SLA in the queue". The affected count therefore enters
+    as `min(affected, 100) / 1000.0`, which cannot exceed 0.1 and cannot reorder two options whose
+    success probabilities differ by more than that.
+
+    Replacing it with `affected / 10.0` passed everything. Both properties are asserted -- the cap,
+    and that the term stays a tie-break -- because either alone would admit a mutant.
+
+    Watched red::
+
+        AssertionError: the affected count is a tie-break and cannot outweigh success probability
+    """
+    _graph, _ctx, _config, values, _parent = paused
+    option = selected_field_option(values)
+    assert option is not None
+
+    small = _priority_of(option, 1)
+    large = _priority_of(option, 10_000)
+
+    assert large - small <= 0.1 + 1e-9, (
+        "the affected count is capped at 100/1000, so it cannot move priority by more than 0.1"
+    )
+
+    weaker = option.model_copy(update={"estimated_success_probability": 0.5})
+    stronger = option.model_copy(update={"estimated_success_probability": 0.9})
+    assert _priority_of(stronger, 1) > _priority_of(weaker, 10_000), (
+        "the affected count is a tie-break and cannot outweigh success probability"
+    )
+
+
+async def test_the_first_solve_is_dispatch_round_one(paused: Any) -> None:
+    """`dispatch_round` counts *completed* passes, so P15 -- mid-pass -- has to add one.
+
+    The docstring calls this a measured defect rather than a matter of taste: folding the `+ 1` into
+    the helper made every downstream reader off by one against its own plan, and
+    `prepare_dispatch_approval` asked an operator to "approve dispatch proposal 2" for the first
+    proposal ever made. Removing it from P15 is the same error in the other direction, and it
+    survived -- the audit and the plan id both then start at zero, and no test read either.
+
+    Asserted on the first solve alone, because that is where a one-based count and a zero-based one
+    first disagree; the round the *operator* is shown has its own test.
+
+    Watched red by dropping the `+ 1`::
+
+        AssertionError: the first solve is dispatch round 1, not 0
+        assert 0 == 1
+    """
+    _graph, _ctx, _config, first, _parent = paused
+
+    (solve,) = [e for e in first["audit_events"] if e.node == "optimize_field_schedule"]
+    assert solve.detail["round"] == 1, "the first solve is dispatch round 1, not 0"
+    assert first["dispatch_plan"].plan_id.endswith(solve.detail["plan_id"].split("-")[-1])
+    assert dispatch_round(first) == 1, (
+        "and once the pass has completed, the helper agrees with the plan it produced"
+    )
 
 
 def test_every_node_is_guarded_or_terminal() -> None:
@@ -609,6 +862,20 @@ async def test_the_committed_option_is_marked_attempted_so_a_later_cycle_skips_i
     assert option is not None
     assert final["resolution_plan"].attempted_option_ids == [option.option_id]
     assert option not in final["resolution_plan"].untried()
+
+    # And the guard the docstring above describes, which the 2026-08-24 sweep found nothing holding:
+    # dropping the membership check left the assertions above green, because the graph enters this
+    # node once and a doubled entry needs a second entry to appear. Re-entered on the state it just
+    # produced, the list must not grow -- `attempted_option_ids` is a plain list on a model this
+    # node `model_copy`s, so an unconditional append doubles it.
+    again = await commit_field_dispatch.__wrapped__(final, ctx)
+    # The guard skips the write entirely, so a correct re-entry carries no `resolution_plan` at all.
+    # Falling back to the state's own plan is what lets one assertion cover both that and the
+    # mutant, which writes a plan holding the option twice.
+    replayed = again.get("resolution_plan", final["resolution_plan"])
+    assert replayed.attempted_option_ids == [option.option_id], (
+        "re-entering the commit on the same option must not double the entry"
+    )
 
 
 async def test_the_first_action_timestamp_is_not_moved_by_a_later_dispatch(paused: Any) -> None:

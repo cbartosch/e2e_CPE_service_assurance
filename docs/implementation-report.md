@@ -123,8 +123,8 @@ whoever is reading it, and deliberately not here.
 
 | figure | value | note |
 | --- | --- | --- |
-| `tests_total` | 945 | all unit tests; see the caveat below |
-| `coverage_percent` | 85.48 | line and branch, over `src/lpr_cpe` |
+| `tests_total` | 964 | all unit tests; see the caveat below |
+| `coverage_percent` | 85.57 | line and branch, over `src/lpr_cpe` |
 | `coverage_gate_percent` | 85 | enforced from 2026-08-24; see below |
 | `source_files_typechecked` | 110 | `mypy --strict`, no issues |
 | `files_formatted` | 137 | `ruff format --check` |
@@ -165,13 +165,16 @@ suite rather than just their own module, and **that caught nothing beyond the th
 `restoration_validation` had already yielded: 0 of the remaining 37**. A survivor of a module's own
 tests survives the repository.
 
-Three of the six are now closed and mutation-checked: `restoration_validation` (7 real gaps),
-`reconciliation_closure` (6) and `plant_execution` (7, of which one is a proven equivalent mutant).
-**`plant_referral`, `preventive_maintenance` and `field_planning` have 24 open survivors between
-them and no fixes.** Gap 8 in IMPLEMENTATION_PLAN.md carries every number and the severity notes.
+**All six are now closed and mutation-checked.** 47 survivors: 45 were real gaps, now held by
+named tests each watched red, and 2 are proven equivalent mutants — a non-mapping plant report that
+falls through to `MRStatus("")` anyway, and a `blocking_code` guard whose input for an assigned plan
+is a satisfied-set summary no `ConstraintCode` parses. Gap 8 in IMPLEMENTATION_PLAN.md carries every
+number and the severity notes.
 
-Treat any subgraph row not marked *mutation-checked* as having tests whose strength is unknown —
-and, on this evidence, as having roughly one unheld claim for every two mutations anyone writes.
+Every subgraph row in IMPLEMENTATION_PLAN.md §5 now carries the mark. What that is worth is
+bounded by the mutations someone thought to write: a sweep measures the claims it tries, and half of
+the ones tried here were unheld. Treat the mark as "these 93 defects are refused", not as "the tests
+are complete".
 
 ---
 
