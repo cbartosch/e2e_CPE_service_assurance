@@ -1,15 +1,15 @@
 {
   "all_gates_passed": true,
-  "commit": "a568c629fb0005907902206b730fc0a19383b90b",
+  "commit": "b217c1fb9d0d27581fad644ef4c2743520ac31c2",
   "dirty": true,
   "figures": {
     "coverage_gate_percent": 85.0,
-    "coverage_percent": 85.14,
+    "coverage_percent": 85.48,
     "files_formatted": 137,
     "source_files_typechecked": 110,
     "tests_failed": 0,
-    "tests_passing": 935,
-    "tests_total": 935
+    "tests_passing": 945,
+    "tests_total": 945
   },
   "gates": [
     {
@@ -18,7 +18,7 @@
       "name": "ruff-check",
       "output_file": "latest/ruff-check.txt",
       "proves": "no lint finding in the shipped source or its tests",
-      "seconds": 0.45
+      "seconds": 0.48
     },
     {
       "command": "python -m ruff format --check src tests",
@@ -26,7 +26,7 @@
       "name": "ruff-format",
       "output_file": "latest/ruff-format.txt",
       "proves": "every file is formatted as the committed configuration formats it",
-      "seconds": 0.38
+      "seconds": 0.4
     },
     {
       "command": "python -m mypy",
@@ -34,7 +34,7 @@
       "name": "mypy",
       "output_file": "latest/mypy.txt",
       "proves": "strict-mode type checking over src/lpr_cpe, with pydantic's plugin",
-      "seconds": 1.07
+      "seconds": 1.09
     },
     {
       "command": "python -m pytest --cov --cov-report=term-missing --cov-fail-under=85",
@@ -42,7 +42,7 @@
       "name": "pytest",
       "output_file": "latest/pytest.txt",
       "proves": "the committed suite, behind the coverage gate `make test` uses",
-      "seconds": 85.62
+      "seconds": 93.13
     },
     {
       "command": "python -m lpr_cpe.cli topology",
@@ -50,7 +50,7 @@
       "name": "topology",
       "output_file": "latest/topology.txt",
       "proves": "the parent graph compiles, so its four topology tables agree",
-      "seconds": 2.45
+      "seconds": 2.25
     },
     {
       "command": "python -m lpr_cpe.cli config",
@@ -58,10 +58,10 @@
       "name": "config",
       "output_file": "latest/config.txt",
       "proves": "the settings this process would run under, with no secret printed",
-      "seconds": 2.25
+      "seconds": 2.01
     }
   ],
-  "generated_at": "2026-08-24T15:37:42+00:00",
+  "generated_at": "2026-08-25T02:37:21+00:00",
   "interpreter": "C:\\Users\\bartosch christian\\Downloads\\e2e_CPE_service_assurance\\.venv\\Scripts\\python.exe",
   "packages": {
     "fastapi": "0.141.1",

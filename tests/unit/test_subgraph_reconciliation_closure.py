@@ -58,19 +58,21 @@ from lpr_cpe.domain.enums import (
     CaseType,
     CrewType,
     EventSource,
+    FaultDomain,
     IncidentStatus,
+    MRStatus,
     ReasonCode,
     Severity,
     Technology,
     WorkOrderStatus,
 )
-from lpr_cpe.domain.field_ops import WorkOrder
+from lpr_cpe.domain.field_ops import MRRecord, WorkOrder
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.builder import build_parent_graph
 from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.guards import ESCALATED, ONWARD
 from lpr_cpe.graph.routing import PRIOR_INCIDENTS_KEY, latest_policy_decision
-from lpr_cpe.graph.state import make_initial_state
+from lpr_cpe.graph.state import make_initial_state, truck_roll_count
 from lpr_cpe.graph.subgraphs.reconciliation_closure import (
     GATE_TARGETS,
     RECONCILERS,
@@ -79,8 +81,11 @@ from lpr_cpe.graph.subgraphs.reconciliation_closure import (
     SERVICE_PROBLEM_KEY,
     build_reconciliation_closure_graph,
     reconcile_communications,
+    reconcile_jtrack,
     reconcile_nxt,
+    reconcile_tmf,
     reconcile_wfm,
+    route_closure_gate,
 )
 from lpr_cpe.policies.engine import PolicyEngine
 from lpr_cpe.policies.loader import load_pack
@@ -358,6 +363,239 @@ def test_a_finished_work_order_the_wfm_still_has_open_is_a_disagreement(now: dat
 
     (denial,), _ = reconcile_communications(state, [{"response": "still_broken"}])
     assert denial["system"] == "communications"
+
+
+# ------------------------------------------------------------------------------------------------
+# The five readers the 2026-08-24 sweep found nothing holding
+# ------------------------------------------------------------------------------------------------
+#
+# Every test in this block closes a mutation that survived both this module's own tests and the
+# whole suite. None of them is a boundary quibble: each is a reader deciding whether to hold an
+# incident open, and the mutation that survived made it say no.
+
+
+def test_the_gate_will_not_close_an_incident_the_engine_never_evaluated() -> None:
+    """No `CLOSE_INCIDENT` decision at all must abandon, exactly as a blocked one does.
+
+    The severest survivor of the sweep. `route_closure_gate` opens
+    `if decision is None or decision.blocked: return "abandon"`, and rewriting that to
+    `if decision is not None and decision.blocked` — so a *missing* decision falls through to the
+    `is not REQUIRES_APPROVAL` clause and answers `close` — passed every test in this repository.
+    An incident would be closed, a `ClosureRecord` written and `IncidentStatus.CLOSED` set, on an
+    action the policy engine had never been asked about.
+
+    It survived because nothing reached the gate without a decision: `evaluate_closure_policy` runs
+    immediately before it on every wired path and always records one. That makes this a guard on a
+    state the graph cannot currently produce — which is exactly the kind the sweep is for, because
+    the clause is load-bearing the moment anything else routes here, and until then nothing else
+    can tell whether it works.
+
+    Watched red under that mutation::
+
+        AssertionError: an incident with no CLOSE_INCIDENT decision was closed
+        assert 'close' == 'abandon'
+    """
+    assert route_closure_gate({}) == "abandon", (  # type: ignore[arg-type]
+        "an incident with no CLOSE_INCIDENT decision was closed"
+    )
+
+
+def test_only_the_two_terminal_wfm_statuses_excuse_a_finished_work_order(now: datetime) -> None:
+    """Which WFM statuses count as agreement, asserted as a set rather than by one example.
+
+    `reconcile_wfm` excuses `{"cancelled", "completed"}` and reports everything else as a
+    disagreement. The existing positive test uses `dispatched`, so **adding a third member to that
+    set changes nothing it asserts** — and the sweep's mutation added `in_progress`, which is the
+    one status a real WFM is most likely to be sitting in when a crew is still on site. The failure
+    that hides is the one this module exists to prevent, in the module's own words: a live work
+    order behind a closed incident sends a crew to a fault nobody is expecting them at.
+
+    Driven over the whole vocabulary rather than the one extra member, so a fourth status added to
+    the WFM cannot arrive unclassified.
+
+    Watched red by adding `in_progress` to the excused set::
+
+        AssertionError: 'in_progress' in the WFM behind a finished work order is a disagreement
+    """
+    order = WorkOrder(
+        work_order_id="WO-1",
+        incident_id="INC-1",
+        crew_type=CrewType.DIRTY,
+        status=WorkOrderStatus.COMPLETED,
+        created_at=now,
+        updated_at=now,
+    )
+    state: Any = {"work_orders": [order]}
+
+    excused = {"cancelled", "completed"}
+    for status in ("requested", "dispatched", "in_progress", "on_site", "completed", "cancelled"):
+        mismatches, _ = reconcile_wfm(state, {"work_order_ref": "WO-1", "status": status})
+        if status in excused:
+            assert not mismatches, f"{status!r} is terminal in the WFM and agrees with us"
+        else:
+            assert mismatches, (
+                f"{status!r} in the WFM behind a finished work order is a disagreement"
+            )
+
+
+def test_an_mr_finished_here_and_open_in_jtrack_is_a_disagreement(now: datetime) -> None:
+    """`reconcile_jtrack` had no test of any kind, and its mismatch clause could be deleted whole.
+
+    The sweep replaced `if ours.terminal and bool(payload.get("open")):` with `if False:` and
+    nothing anywhere went red. That clause is the jTrack half of the same failure the WFM half is
+    written for, and gap EXEC-2 records it as a live condition rather than a hypothetical: two of
+    the 41 fixture runs escalate on exactly this mismatch, so the branch is reached in a sweep and
+    was still held to account by nothing in the committed suite.
+
+    All four of the function's answers are driven, because the mismatch is only meaningful against
+    the three cases that must *not* produce one.
+
+    Watched red by neutering the clause::
+
+        AssertionError: an MR finished here and open in jTrack is a disagreement
+    """
+    record = MRRecord(
+        mr_id="MR-1",
+        incident_id="INC-1",
+        external_ref="JT-1",
+        plant_object_ref="ODP-1",
+        fault_domain=FaultDomain.DISTRIBUTION,
+        status=MRStatus.CLOSED,
+        created_at=now,
+        updated_at=now,
+    )
+    state: Any = {"mr_records": [record]}
+
+    (open_there,), _ = reconcile_jtrack(
+        state, {"mr_ref": "JT-1", "status": "in_progress", "open": True}
+    )
+    assert open_there["system"] == "jtrack"
+    assert open_there["ours"] == MRStatus.CLOSED.value
+    assert open_there["theirs"] == "in_progress", (
+        "an MR finished here and open in jTrack is a disagreement"
+    )
+
+    agreed, notes = reconcile_jtrack(state, {"mr_ref": "JT-1", "status": "closed", "open": False})
+    assert not agreed and notes, "a closed MR on both sides is a note"
+
+    unknown, unknown_notes = reconcile_jtrack(state, {"mr_ref": "JT-9", "status": "open"})
+    assert not unknown, "an MR jTrack holds and we do not is a note, not a disagreement"
+    assert "unknown here" in unknown_notes[0]
+
+    missing, missing_notes = reconcile_jtrack(
+        state, {"mr_ref": "JT-1", "found": False, "simulated": True}
+    )
+    assert not missing, "a simulator that has forgotten the MR is not a disagreement"
+    assert "not treated as a disagreement" in missing_notes[0]
+
+
+def test_a_service_record_that_could_not_be_read_is_a_disagreement() -> None:
+    """An unreadable TMF record must hold the closure, not pass it.
+
+    `reconcile_tmf`'s `data_available is False` arm could be removed whole without failing anything.
+    What it guards is the difference between "we checked the customer's service record and it
+    matches" and "we could not read it" — and closing on the second while reporting the first is a
+    closure with no customer-facing check behind it at all.
+
+    The `no record returned` arm is asserted beside it because the two are one claim: an answer this
+    reader cannot use is a reason to keep looking, whatever shape the non-answer arrived in.
+
+    Watched red by neutering the `data_available` clause::
+
+        AssertionError: a service record that could not be read is not agreement
+    """
+    state: Any = {"service_ref": "SVC-1", "customer_ref": "CUST-1"}
+
+    unreadable, _ = reconcile_tmf(
+        state,
+        {"service_ref": "SVC-1", "data_available": False, "data_quality_notes": ["upstream 503"]},
+    )
+    assert unreadable, "a service record that could not be read is not agreement"
+    assert "upstream 503" in unreadable[0]["detail"], "the reason has to reach the operator"
+
+    absent, _ = reconcile_tmf(state, None)
+    assert absent, "no record at all is not agreement either"
+
+    wrong_customer, _ = reconcile_tmf(state, {"service_ref": "SVC-1", "customer_ref": "CUST-2"})
+    assert wrong_customer and wrong_customer[0]["theirs"] == "CUST-2"
+
+    agreed, notes = reconcile_tmf(
+        state, {"service_ref": "SVC-1", "customer_ref": "CUST-1", "state": "active"}
+    )
+    assert not agreed and notes, "the same customer on both sides is a note"
+
+
+def test_a_cleared_alarm_is_not_counted_as_a_live_one() -> None:
+    """The alarm count an operator reads must be of alarms that are still up.
+
+    `reconcile_nxt` produces no mismatch by design, so the *only* thing it contributes is that
+    sentence — and dropping `row.get("cleared_at") is None` from the filter left every test green
+    while turning "1 uncleared alarm(s) of 3" into "3 uncleared alarm(s) of 3". A note nobody can
+    trust is worse than no note, because this one is the reason the reader refuses to call an alarm
+    a disagreement at all.
+
+    Watched red by dropping the filter::
+
+        AssertionError: assert '1 uncleared alarm(s) of 3' in 'nxt: 3 uncleared alarm(s) of 3 ...'
+    """
+    rows = [
+        {"alarm_id": "A-1", "cleared_at": None},
+        {"alarm_id": "A-2", "cleared_at": "2026-03-02T14:00:00+00:00"},
+        {"alarm_id": "A-3", "cleared_at": "2026-03-02T14:05:00+00:00"},
+    ]
+    mismatches, notes = reconcile_nxt({}, rows)  # type: ignore[arg-type]
+    assert not mismatches, "an alarm is cleared by the network, not by us"
+    assert "1 uncleared alarm(s) of 3" in notes[0]
+
+
+async def test_the_closure_record_counts_the_trucks_the_incident_actually_used(
+    confident: Any,
+) -> None:
+    """`ClosureRecord.truck_rolls` is the incident's own count, and no fixture could show it.
+
+    The sweep replaced `truck_rolls=truck_roll_count(state)` with `truck_rolls=0` and nothing went
+    red. That is not a weak assertion — it is an **equivalent mutant over every reachable state**,
+    and measuring why is the useful part: only one of the 41 fixture services reaches `closed` at
+    all, `SVC-UT-001-B-01`, and it gets there on the remote path with no work order ever booked. So
+    `truck_roll_count` is 0 on every closure this system can currently produce, and `0` and the real
+    count are the same number.
+
+    An equivalent mutant is normally left alone. This one is not, because the equivalence is a
+    property of the *fixtures* rather than of the code — the field-path incidents all escalate today
+    (gap EXEC-1), and the day one of them closes this field starts carrying a number somebody reads.
+    So the truck roll is seeded rather than waited for.
+
+    `en_route` is the weakest status that counts: `WorkOrder.counted_as_truck_roll` deliberately
+    excludes `requested`, because a booking is not a visit. Seeding the weakest one means the test
+    fails if that boundary is ever widened *or* narrowed.
+
+    No `linked_records["work_order"]` is seeded with it, and that is deliberate: `_probe_targets`
+    only asks the WFM when one is present, so this keeps the reconciliation consistent and the run
+    on its unattended path. The claim under test is what the record counts, not what the WFM says.
+
+    Watched red by the mutation::
+
+        AssertionError: the closure record says 0 truck rolls for an incident that used 1
+    """
+    state, ctx = confident
+    visited = WorkOrder(
+        work_order_id="WO-SEEDED",
+        incident_id=str(state["incident_id"]),
+        crew_type=CrewType.CLEAN,
+        status=WorkOrderStatus.EN_ROUTE,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    _, _, out = await _run(
+        _validated(state, passed=True, work_orders=[visited]), ctx, thread="trucks"
+    )
+
+    assert out["status"] is IncidentStatus.CLOSED, "the seeded order must not divert the run"
+    assert truck_roll_count(out) == 1, "en_route is a truck that travelled"
+    assert out["closure"].truck_rolls == 1, (
+        f"the closure record says {out['closure'].truck_rolls} truck rolls for an incident that "
+        "used 1"
+    )
 
 
 # ------------------------------------------------------------------------------------------------

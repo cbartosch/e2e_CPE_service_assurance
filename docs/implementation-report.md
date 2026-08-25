@@ -123,8 +123,8 @@ whoever is reading it, and deliberately not here.
 
 | figure | value | note |
 | --- | --- | --- |
-| `tests_total` | 935 | all unit tests; see the caveat below |
-| `coverage_percent` | 85.14 | line and branch, over `src/lpr_cpe` |
+| `tests_total` | 945 | all unit tests; see the caveat below |
+| `coverage_percent` | 85.48 | line and branch, over `src/lpr_cpe` |
 | `coverage_gate_percent` | 85 | enforced from 2026-08-24; see below |
 | `source_files_typechecked` | 110 | `mypy --strict`, no issues |
 | `files_formatted` | 137 | `ruff format --check` |
@@ -159,12 +159,19 @@ A green suite is not evidence that its assertions are load-bearing, so rows in I
 §5 marked *mutation-checked* mean every regression assertion was verified by reinstating the defect
 it names and watching that test fail.
 
-Four subgraphs and the graph foundations have been swept. **Six subgraphs were swept for the first
-time on 2026-08-24 and roughly half of every sweep survived** — 93 mutations, 46 caught. One module
-was taken to completion (`restoration_validation`, seven real gaps found and closed); the other
-five have a measured survivor count and no fixes. Gap 8 in IMPLEMENTATION_PLAN.md carries the
-numbers. Treat any subgraph row not marked *mutation-checked* as having tests whose strength is
-unknown.
+**Six subgraphs were swept for the first time on 2026-08-24 and roughly half of every sweep
+survived** — 93 mutations, 46 caught, 47 through. All 47 were then re-run against the entire test
+suite rather than just their own module, and **that caught nothing beyond the three
+`restoration_validation` had already yielded: 0 of the remaining 37**. A survivor of a module's own
+tests survives the repository.
+
+Three of the six are now closed and mutation-checked: `restoration_validation` (7 real gaps),
+`reconciliation_closure` (6) and `plant_execution` (7, of which one is a proven equivalent mutant).
+**`plant_referral`, `preventive_maintenance` and `field_planning` have 24 open survivors between
+them and no fixes.** Gap 8 in IMPLEMENTATION_PLAN.md carries every number and the severity notes.
+
+Treat any subgraph row not marked *mutation-checked* as having tests whose strength is unknown —
+and, on this evidence, as having roughly one unheld claim for every two mutations anyone writes.
 
 ---
 

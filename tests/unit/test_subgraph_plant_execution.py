@@ -61,13 +61,15 @@ from lpr_cpe.domain.enums import (
     CaseType,
     EventSource,
     EvidenceKind,
+    FaultDomain,
     KPIName,
     MRStatus,
     ReasonCode,
     Severity,
     Technology,
 )
-from lpr_cpe.domain.field_ops import HandoverContract
+from lpr_cpe.domain.field_ops import HandoverContract, MRRecord
+from lpr_cpe.domain.governance import AuditEvent
 from lpr_cpe.domain.lifecycle import STAGE_TRANSITIONS
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph.builder import build_parent_graph
@@ -82,8 +84,12 @@ from lpr_cpe.graph.subgraphs.plant_execution import (
     PLANT_TARGETS,
     SEARCH_NODE,
     build_plant_execution_graph,
+    known_open_mr_refs,
+    latest_mr,
+    outstanding_plant_mr,
     plant_report,
     plant_report_extras,
+    route_plant_gate,
 )
 from lpr_cpe.simulation.loader import build_simulated_adapters
 
@@ -288,13 +294,22 @@ async def _arrival(fixtures: Any, ref: str, tag: str, *, seed: bool = True) -> A
     return service, (await stage.aget_state(stage_config)).values, adapters
 
 
-async def _drive(state: Any, tag: str, answer: Any, *, adapters: Any = None, laps: int = 8) -> Any:
+async def _drive(
+    state: Any, tag: str, answer: Any, *, adapters: Any = None, laps: int = 8, clock: Any = None
+) -> Any:
     """Run this stage to a standstill, answering every pause, and report the payloads seen.
 
     `adapters=None` is not a default so much as a case: it makes `build_context` construct a fresh
     set, which is the process-restart arrangement `not_held` exists for.
+
+    `clock=None` builds a fresh `_Ticking(NOW)`, which is right for a single drive and **wrong for
+    a caller driving the stage more than once**. Each fresh clock restarts at `NOW` and advances on
+    read, so two drives that run the same nodes stamp the same instants -- measured, a second OSP
+    report re-stamped `accepted_at` with a value equal to the first, and the mutation that proves
+    the field is write-once survived because the two instants collided. A caller modelling D19's
+    self-loop passes one clock through every round.
     """
-    ctx = build_context(clock=_Ticking(NOW), adapters=adapters)  # type: ignore[arg-type]
+    ctx = build_context(clock=clock or _Ticking(NOW), adapters=adapters)  # type: ignore[arg-type]
     graph = build_plant_execution_graph().compile(
         name="lpr_cpe_plant_execution", checkpointer=InMemorySaver()
     )
@@ -336,6 +351,195 @@ async def with_mr(fixtures: Any) -> Any:
 async def without_mr(fixtures: Any) -> Any:
     """The incident arriving having filed nothing, which is what `no_plant_action` is for."""
     return await _arrival(fixtures, NO_ORDER_SERVICE, "nomr", seed=False)
+
+
+# ------------------------------------------------------------------------------------------------
+# The four readers the 2026-08-24 sweep found nothing holding
+# ------------------------------------------------------------------------------------------------
+#
+# Every mutation closed below survived this module's own tests *and* the whole suite. They are
+# grouped as four claims rather than seven tests because that is how many distinct questions they
+# are: which MR, whether to chase it, what jTrack said last, and what OSP's answer is allowed to
+# change.
+
+
+def _mr(mr_id: str, *, status: MRStatus, updated_at: datetime, **extra: Any) -> MRRecord:
+    return MRRecord(
+        mr_id=mr_id,
+        incident_id="INC-1",
+        external_ref=f"JT-{mr_id}",
+        plant_object_ref="ODP-1",
+        fault_domain=FaultDomain.DISTRIBUTION,
+        status=status,
+        created_at=NOW,
+        updated_at=updated_at,
+        **extra,
+    )
+
+
+def test_the_stage_chases_the_newest_mr_and_only_while_osp_holds_it() -> None:
+    """Which MR this stage acts on, and whether it acts at all. Three survivors, one question.
+
+    `latest_mr` takes `max(..., key=updated_at)`; the sweep replaced it with the dict head and
+    nothing noticed, because every state in the suite holds exactly one MR. `outstanding_plant_mr`
+    then narrows to `awaiting_osp`, and dropping that clause also went unnoticed — which matters
+    more than the first, because `route_plant_gate` reads it: an incident whose MR OSP has already
+    **closed** would be chased again, `update_plant_mr` would file a fresh chase note against a
+    finished repair, and D19's `await_plant` self-loop would spin until the re-entry budget stopped
+    it.
+
+    Two MRs are seeded with distinct `updated_at`, and the newest is deliberately *not* first in
+    insertion order, so the dict head and the newest are different records rather than accidentally
+    the same one.
+
+    Watched red three ways::
+
+        latest_mr -> next(iter(...)):        assert 'MR-old' == 'MR-new'
+        outstanding_plant_mr -> record:      assert 'chase' == 'no_plant_action'
+        route_plant_gate -> latest_mr:       assert 'chase' == 'no_plant_action'
+    """
+    older = _mr("MR-old", status=MRStatus.SUBMITTED, updated_at=NOW)
+    newer = _mr("MR-new", status=MRStatus.IN_PROGRESS, updated_at=NOW + timedelta(hours=1))
+    state: Any = {"mr_records": [older, newer]}
+
+    assert latest_mr(state) is not None
+    assert latest_mr(state).mr_id == "MR-new", "the newest revision is the one this stage acts on"
+
+    # Both are still with OSP, so there is something to chase.
+    assert outstanding_plant_mr(state) is not None
+    assert route_plant_gate(state) == "chase"
+
+    # The newest is finished. Nothing is outstanding, whatever the older one says -- and the older
+    # one is deliberately left `submitted` so that a reader taking the dict head would still chase.
+    finished: Any = {
+        "mr_records": [
+            older,
+            _mr("MR-new", status=MRStatus.CLOSED, updated_at=NOW + timedelta(hours=2)),
+        ]
+    }
+    assert outstanding_plant_mr(finished) is None, "OSP has closed the MR this stage was chasing"
+    assert route_plant_gate(finished) == "no_plant_action"
+
+
+def test_the_open_mr_refs_are_the_ones_the_latest_search_returned(now: datetime) -> None:
+    """`known_open_mr_refs` walks the audit trail backwards, and the direction is load-bearing.
+
+    `update_plant_mr` refuses to send an update for an MR jTrack is not holding open, and this is
+    the reader that decides. Reversing the walk — taking the *first* search rather than the last —
+    survived everything, because no state in the suite held two searches. On a second lap it would
+    answer with the previous lap's refs: an MR jTrack had since closed would still be chased, and
+    one it had just opened would be refused as `not_held`.
+
+    Watched red by dropping `reversed`::
+
+        AssertionError: assert ('JT-2',) == ('JT-1',)
+    """
+
+    def _search(refs: list[str], at: datetime) -> AuditEvent:
+        return AuditEvent(
+            event_id=f"EV-{at.isoformat()}",
+            incident_id="INC-1",
+            occurred_at=at,
+            node=SEARCH_NODE,
+            action="fetch_open_mrs",
+            outcome="searched",
+            actor="automation",
+            detail={"open_mr_refs": refs},
+        )
+
+    state: Any = {
+        "audit_events": [
+            _search(["JT-1"], now),
+            _search(["JT-2"], now + timedelta(minutes=5)),
+        ]
+    }
+    assert known_open_mr_refs(state) == ("JT-2",), "the latest search is the one jTrack answered"
+
+    assert known_open_mr_refs({}) == (), "no search yet is not the same as an empty search"
+
+
+def test_a_report_that_is_not_a_mapping_is_refused_rather_than_read_as_empty() -> None:
+    """OSP's answer has to be a mapping with a status this system knows, or it is not a report.
+
+    `plant_report` returns `None` for anything else, and `capture_plant_evidence` records
+    `unusable_report` and asks again rather than writing a revision. The sweep replaced the
+    `isinstance` refusal with `answer = {}`, which then falls through to the `MRStatus("")`
+    `ValueError` and still returns `None` — so that one is equivalent. What was **not** equivalent,
+    and survived, is the pair together: coercing an unparseable status to `SUBMITTED` writes a
+    revision claiming OSP said something it did not.
+
+    Driven over the shapes a webhook actually produces, because that is where a non-mapping comes
+    from: a bare string, a list, `None`, and a mapping whose status is not an `MRStatus`.
+
+    Watched red by defaulting the status to `SUBMITTED`::
+
+        AssertionError: 'in_the_van' is not an MRStatus and must not be read as one
+    """
+    for answer in (None, "closed", ["closed"], 7, {"status": "in_the_van"}, {}):
+        assert plant_report(answer) is None, (
+            f"{answer!r} is not a plant report and must not be read as one"
+        )
+
+    usable = plant_report({"status": "completed", "osp_owner": "osp.crew"})
+    assert usable is not None and usable["status"] is MRStatus.COMPLETED
+
+
+async def test_osps_answer_moves_only_the_fields_that_answer_names(with_mr: Any) -> None:
+    """`accepted_at` is stamped once and `closed_at` only by a close. Two survivors, one rule.
+
+    Both mutations widened what a report may overwrite. `accepted_at` is
+    `now if newly_accepted else record.accepted_at`, where `newly_accepted` requires
+    `record.accepted_at is None`; dropping that half re-stamps the acceptance instant every time OSP
+    re-reports `accepted`, so "when did OSP take this" becomes "when did we last ask". And
+    `closed_at` is stamped `if status is MRStatus.CLOSED`; widening it to `if finished` back-dates a
+    closure onto an MR that OSP reported merely `completed`, which is the distinction
+    `MRRecord.terminal` and the jTrack reconciler both read.
+
+    Three rounds are driven against the real node rather than the model, because the rule is the
+    node's: `accepted`, `accepted`, then `completed`.
+
+    Each round is a **separate invocation**, and that is the shape rather than a convenience.
+    `capture_plant_evidence` runs straight to `END` inside this subgraph, so a second report is not
+    another lap within one run -- it is D19 answering `await_plant` and the parent re-entering the
+    stage. Driving it as three invocations of the compiled subgraph, each fed the previous one's
+    state, is that loop with the parent left out.
+
+    Watched red twice::
+
+        newly_accepted -> status is ACCEPTED:  AssertionError: accepted_at moved on the second
+                                               accepted report
+        closed_at -> if finished:              AssertionError: a completed MR that OSP never closed
+                                               has no closed_at
+    """
+    _service, arrival, adapters = with_mr
+
+    def reporting(status: str) -> Any:
+        def answer(payload: Any) -> Any:
+            del payload
+            return {"status": status, "osp_owner": "osp.crew", "note": f"OSP says {status}"}
+
+        return answer
+
+    # One clock across all three rounds. A fresh one per drive restarts at `NOW` and reaches the
+    # stamp after the same number of reads, so the two `accepted` instants come out equal and the
+    # re-stamping mutation becomes invisible -- measured, and `_drive`'s docstring records it.
+    clock = _Ticking(NOW)
+    state = arrival
+    for round_number, status in enumerate(("accepted", "accepted", "completed"), start=1):
+        state, seen = await _drive(
+            state, f"osp-{round_number}", reporting(status), adapters=adapters, laps=2, clock=clock
+        )
+        assert seen, f"round {round_number} did not reach the report gate"
+
+    accepted = [r for r in state["mr_records"] if r.accepted_at is not None]
+    assert accepted, "an accepted report has to stamp accepted_at at least once"
+    stamps = {r.accepted_at for r in accepted}
+    assert len(stamps) == 1, f"accepted_at moved on the second accepted report: {sorted(stamps)}"
+
+    final = max(state["mr_records"], key=lambda r: r.revision)
+    assert final.status is MRStatus.COMPLETED
+    assert final.completed_at is not None, "a completed MR carries a completion instant"
+    assert final.closed_at is None, "a completed MR that OSP never closed has no closed_at"
 
 
 # ------------------------------------------------------------------------------------------------
