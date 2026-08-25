@@ -1,0 +1,43 @@
+# The build context is `.`, so without this the daemon receives `.venv` -- hundreds of megabytes of
+# platform-specific wheels that the image then reinstalls anyway, and which would invalidate the
+# layer cache on every local `pip install`.
+#
+# Mirrors `.gitignore` for the caches, and adds the things that are tracked but have no business in
+# an image: the audit bundle is evidence about a run on somebody's laptop, and the tests are not
+# installed by `pip install -e .`.
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+.git/
+.github/
+
+# Tracked, and deliberately not in the image.
+audit/
+tests/
+docs/
+IMPLEMENTATION_PLAN.md
+
+# Secrets never enter a build context. `.env.example` is committed and is not one.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

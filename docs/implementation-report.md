@@ -43,8 +43,8 @@ preferred to more stubs.
 | `api` — the FastAPI surface, state reads, approval resume, webhooks | done |
 | model provider and the deterministic fake | **not built** |
 | the seventeen specification scenarios | **not built** — `lpr-cpe run` drives one scripted path, which is not the same thing |
-| Docker Compose development environment | **not built** |
-| CI | **none exists** |
+| Docker Compose development environment | written; the build is unverified locally (DOCKER-1) |
+| CI | written, never executed |
 
 Of the specification's seventeen deliverables, seven are complete (1, 2, 3, 4, 7, 11 in part, 16),
 and the rest are partial or unstarted. Deliverables 5, 6 and 15 — FastAPI, the PostgreSQL profile
@@ -215,8 +215,10 @@ Ordered by what would hurt soonest.
    sequence and the `setup=False` path are exercised against an injected stand-in. `setup()`'s DDL
    and resume-after-restart are the two things a stand-in cannot prove, and both are exactly what a
    production restart depends on.
-3. **No CI.** Every gate in this repository is manual. The audit bundle makes a run reproducible and
-   recorded; it does not make it automatic, and nothing stops a commit that never ran one.
+3. **CI exists and has never run.** `.github/workflows/ci.yml` runs the audit bundle, a real
+   Postgres and the compose stack, but this repository has no workflow runs yet -- so every gate is
+   still, in practice, manual, and the workflow itself is unproven. A file that has never executed
+   is a claim.
 4. **The suite is unit-only and half the subgraphs have unmeasured test strength.** Five of the six
    swept modules have known survivors and no fixes. A green suite over those modules is not evidence.
 5. **Every vendor field name is invented.** 76 gaps. First contact with a real ServAssure NXT,

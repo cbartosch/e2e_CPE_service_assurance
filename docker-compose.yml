@@ -1,0 +1,77 @@
+# The development environment: Postgres, and the API against it.
+#
+# Two services and no more. The specification asks for "a Docker Compose development environment",
+# and what this system actually needs from one is a PostgreSQL to exercise the durable checkpointer
+# against -- IMPLEMENTATION_PLAN.md gap 5 records that no checkpoint has ever been written to
+# Postgres, and that `setup()`'s DDL and the resume-after-restart path are the two things an
+# injected stand-in cannot prove. This file is what makes proving them possible.
+#
+# Every external system this workflow talks to is a fixture-backed simulator inside the process, so
+# there is deliberately nothing here for NXT, jTrack, the WFM or the CRM. Adding a container that
+# pretended to be one of them would be inventing the vendor endpoints assumption A2 exists to
+# refuse.
+#
+# `api` runs in the **simulation** profile even though it has a real database, and that pairing is
+# the point: durable checkpoints, simulated adapters. Setting LPR_APP_MODE=production here would
+# turn on the write gate for adapters that have nowhere to write, and would require a webhook secret
+# for a development stack.
+
+name: lpr-cpe
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lpr
+      POSTGRES_PASSWORD: lpr
+      POSTGRES_DB: lpr_cpe
+      # Deterministic collation, so an index built here sorts the way it will in CI.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` and not a TCP probe: the port accepts connections before the database is ready
+      # to serve them, and `AsyncPostgresSaver.setup()` runs DDL on the first connection. A service
+      # that started against a half-ready server would fail its migration and look like a code bug.
+      test: ["CMD-SHELL", "pg_isready -U lpr -d lpr_cpe"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # The one setting that changes behaviour here. With a DSN present `checkpointer_scope` selects
+      # the Postgres saver; without it, the in-memory one -- so this variable is the whole difference
+      # between a stack that survives a restart and one that does not.
+      LPR_POSTGRES_DSN: postgresql://lpr:lpr@postgres:5432/lpr_cpe
+      LPR_APP_MODE: simulation
+      LPR_ALLOW_PRODUCTION_WRITES: "false"
+      LPR_LOG_FORMAT: json
+    ports:
+      - "${API_PORT:-8000}:8000"
+    command:
+      - python
+      - -m
+      - uvicorn
+      - lpr_cpe.api.app:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:

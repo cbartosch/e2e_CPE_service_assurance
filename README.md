@@ -120,6 +120,28 @@ Every target is a thin wrapper over the commands its recipe shows, and [Makefile
 only owner, so where `make` is unavailable -- a plain Windows shell, for instance -- run those
 commands directly. `make help` lists every target.
 
+### The development stack
+
+```bash
+docker compose up --build
+```
+
+Postgres plus the API, which is the pairing that makes the durable checkpointer testable: a real
+database, and every external system still a fixture-backed simulator. The stack runs the
+**simulation** profile deliberately -- `LPR_APP_MODE=production` there would turn on the write gate
+for adapters with nowhere to write.
+
+`docker compose config` validates; the **build is unverified on the machine this was written on**,
+because `pip install` inside the container cannot verify pypi.org's certificate through a
+TLS-inspecting proxy. See the note at the top of [Dockerfile](Dockerfile).
+
+### Continuous integration
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs `python -m lpr_cpe.audit` -- the same six
+gates, in the same order, as a local run -- and uploads the bundle. Two further jobs stand up a real
+Postgres and the compose stack. **No run has happened yet**, so treat the workflow as reviewed
+rather than proven.
+
 ### The audit bundle
 
 `make audit` runs all six gates, writes each one's output verbatim to `audit/latest/`, and records

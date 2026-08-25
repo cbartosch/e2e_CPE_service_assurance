@@ -139,4 +139,4 @@ src\lpr_cpe\simulation\simulated_base.py                   54      2     10     
 ----------------------------------------------------------------------------------------------------
 TOTAL                                                   10167   1041   2610    428  86.25%
 Required test coverage of 85% reached. Total coverage: 86.25%
-1009 passed, 1 skipped, 1 warning in 115.91s (0:01:55)
+1009 passed, 1 skipped, 1 warning in 118.91s (0:01:58)

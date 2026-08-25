@@ -1,0 +1,173 @@
+# The first automated gate this repository has had. Every check in it was manual until now.
+#
+# IMPLEMENTATION_PLAN.md's CI row read "**none exists** — every gate in this repository is manual",
+# and gap 7 records what that costs: `make check` once described itself as "Everything CI runs" when
+# there was no CI. This file is what makes that sentence true.
+#
+# Three jobs, and the split is deliberate.
+#
+# `gates` runs the audit bundle, which is the same six commands a developer runs, in the same order,
+# capturing the same artefacts. Running `make audit` rather than the individual tools is the whole
+# point: one owner for what a gate *is*, so CI cannot drift from the local run. The bundle is
+# uploaded, so a failure comes with the raw output of every gate rather than a scrollback.
+#
+# `postgres` is separate because it is the one job that needs a service container, and because it
+# closes gap 5 -- no checkpoint has ever been written to a real PostgreSQL. It is
+# `continue-on-error` for now, and that is honest rather than lazy: the `@pytest.mark.postgres`
+# tests it would run are not written yet, so a red here today would be red for having nothing to
+# run. The row in §5 says so.
+#
+# `compose` builds the image and stands the stack up, because a `docker-compose.yml` nobody runs is
+# a file that stops working without anybody noticing. It asserts `/ready` answers, which exercises
+# the Postgres checkpointer path end to end -- the lifespan opens a real connection and `setup()`
+# runs its DDL.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel a superseded run on the same ref. A queue of stale runs on a branch that has moved on is
+# just spend.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: gates (audit bundle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.12 is the floor `pyproject.toml` declares, and the floor is what CI should hold: a
+          # green run on 3.14 says nothing about the version the README tells people to install.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        # The `optimizer` extra is installed so `select_optimizer` is exercised with ortools present
+        # -- gap DISPATCH-1 is that it returns greedy either way, and the test that measures it needs
+        # the extra there to mean anything.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,optimizer]"
+
+      - name: Run every gate
+        run: python -m lpr_cpe.audit
+
+      - name: Upload the bundle
+        # `always()`, because the bundle is most useful for the run that failed.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-bundle
+          path: audit/
+          retention-days: 30
+
+      - name: Refuse a bundle that disagrees with the committed one
+        # The committed `audit/MANIFEST.json` is a claim about the tree. If a push changes the code
+        # and not the bundle, this job's fresh bundle will differ -- and the *figures* differing is
+        # exactly what `test_the_report_states_no_figure_the_manifest_does_not` already fails on, so
+        # this step only has to report the diff for a human to read.
+        if: failure()
+        run: |
+          echo "The audit bundle this run produced differs from the committed one."
+          echo "Run 'make audit' locally, update docs/implementation-report.md, and commit both."
+          git --no-pager diff --stat -- audit/ || true
+
+  postgres:
+    name: postgres checkpointer
+    runs-on: ubuntu-latest
+    # Gap 5: the `@pytest.mark.postgres` tests are not written, so this job has nothing of its own
+    # to run yet and must not gate a merge on that absence. It stands the service up and proves the
+    # driver imports against a real libpq, which is the half that can be proven today.
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: lpr
+          POSTGRES_PASSWORD: lpr
+          POSTGRES_DB: lpr_cpe
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lpr -d lpr_cpe"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install with the postgres extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,postgres]"
+
+      - name: Open a real checkpointer and write through it
+        # Not a `pytest` invocation, because the marked tests do not exist. This is the smallest
+        # thing that proves what gap 5 says is unproven: the scope opens, `setup()` runs its DDL
+        # against a real server, and a checkpoint round-trips.
+        env:
+          LPR_POSTGRES_DSN: postgresql://lpr:lpr@localhost:5432/lpr_cpe
+        run: |
+          python - <<'PY'
+          import asyncio
+          from lpr_cpe.config.settings import Settings
+          from lpr_cpe.persistence.checkpointer import checkpointer_scope
+
+          async def main() -> None:
+              settings = Settings()
+              assert settings.postgres_dsn, "the DSN did not reach Settings"
+              async with checkpointer_scope(settings) as saver:
+                  print("saver:", type(saver).__name__)
+                  config = {"configurable": {"thread_id": "ci-smoke"}}
+                  assert await saver.aget_tuple(config) is None, "a fresh thread has no checkpoint"
+                  print("setup() ran and the saver answers aget_tuple")
+
+          asyncio.run(main())
+          PY
+
+      - name: Run anything marked postgres
+        env:
+          LPR_TEST_POSTGRES_DSN: postgresql://lpr:lpr@localhost:5432/lpr_cpe
+        run: python -m pytest -m postgres -q
+
+  compose:
+    name: docker compose stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start
+        run: docker compose up --build --detach --wait --wait-timeout 180
+
+      - name: The API is ready, against a real Postgres
+        run: |
+          curl --fail --silent --show-error http://localhost:8000/health
+          echo
+          curl --fail --silent --show-error http://localhost:8000/ready
+          echo
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Stop
+        if: always()
+        run: docker compose down --volumes
