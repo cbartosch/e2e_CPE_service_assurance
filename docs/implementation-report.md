@@ -38,11 +38,11 @@ preferred to more stubs.
 | `dispatch` — greedy optimizer, twelve constraints, the seam a solver would fill | done |
 | `graph` — 17 parent steps, 9 subgraphs, all 24 decisions wired | done |
 | `persistence` — checkpointer factory and the allowlisted serialiser | done |
-| `cli.py` + `audit.py` — two console scripts | done |
+| `cli.py` + `audit.py` + `runner.py` — reports, the audit bundle, and `lpr-cpe run` | done |
 | `persistence` — transactional outbox and migrations | **not built** |
 | `api` — the FastAPI surface and its webhooks | **not built** |
 | model provider and the deterministic fake | **not built** |
-| the seventeen specification scenarios | **not built** |
+| the seventeen specification scenarios | **not built** — `lpr-cpe run` drives one scripted path, which is not the same thing |
 | Docker Compose development environment | **not built** |
 | CI | **none exists** |
 
@@ -123,19 +123,21 @@ whoever is reading it, and deliberately not here.
 
 | figure | value | note |
 | --- | --- | --- |
-| `tests_total` | 964 | all unit tests; see the caveat below |
-| `coverage_percent` | 85.57 | line and branch, over `src/lpr_cpe` |
+| `tests_total` | 985 | all unit tests; see the caveat below |
+| `coverage_percent` | 85.67 | line and branch, over `src/lpr_cpe` |
 | `coverage_gate_percent` | 85 | enforced from 2026-08-24; see below |
-| `source_files_typechecked` | 110 | `mypy --strict`, no issues |
-| `files_formatted` | 137 | `ruff format --check` |
+| `source_files_typechecked` | 111 | `mypy --strict`, no issues |
+| `files_formatted` | 139 | `ruff format --check` |
 
 **The suite is unit-only.** There are no integration, contract or scenario tests, and none of the
 seventeen required scenarios exist. Every "done" row in §1 rests on committed tests, but they are
 all of one kind, and the two resolution subgraphs being driven through the real parent graph from
 intake onwards is the closest thing to end-to-end that exists.
 
-**One incident runs from event to closure.** Sweeping all 41 fixture services through the real
-parent, `SVC-UT-001-B-01` reaches `closed`. The other forty escalate, for three causes, all three
+**Three incidents run from event to closure**, and the figure moved because the harness got
+better rather than the graph. Swept through `lpr-cpe run`, which answers all five pause shapes, the
+41 services close 3 and escalate 38; the earlier count of 1 came from a walk that answered two
+shapes and handed an approval payload to the other three. The other forty escalate, for three causes, all three
 recorded as gaps: EXEC-1, the static `Fixtures.telemetry` field no repair moves, and EXEC-2.
 
 **The coverage gate did not mean what it said until 2026-08-24.** `--cov-fail-under=85` compares

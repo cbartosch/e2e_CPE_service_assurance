@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import enum
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -267,11 +268,88 @@ def test_the_allowlist_order_does_not_depend_on_set_iteration() -> None:
 
 
 def test_both_backends_are_built_with_the_same_serde() -> None:
-    """The in-memory saver is what tests resume through; a laxer serde there hides Postgres bugs."""
+    """The in-memory saver is what tests resume through; a laxer serde there hides Postgres bugs.
+
+    True of the *factory*, and it was false of the tests until 2026-08-25 — see
+    `test_every_stage_test_resumes_through_the_production_serde`, which is the half of this claim
+    that has to be checked against the suite rather than against the constructor.
+    """
     assert (
         build_serde()._allowed_msgpack_modules
         == build_memory_checkpointer().serde._allowed_msgpack_modules
     )  # type: ignore[attr-defined]
+
+
+#: The two modules allowed to construct a saver by hand, and why each one is.
+#:
+#: This module is the first: it tests the serde itself, including three plausibly-wrong allowlists
+#: asserted to degrade every field, and handing it the production serde would delete its controls.
+#: `test_langgraph_replay_contract` is the second: it probes LangGraph's own replay semantics over
+#: reducer state that holds no domain models at all, so the allowlist would cover none of it.
+_MAY_BUILD_A_SAVER_BY_HAND = {"test_persistence.py", "test_langgraph_replay_contract.py"}
+
+
+def test_every_stage_test_resumes_through_the_production_serde() -> None:
+    """No test may drive a graph through a bare `InMemorySaver`, and 21 of them did.
+
+    `build_memory_checkpointer`'s own docstring calls itself "the local and **test** backend", and
+    until 2026-08-25 no test that drove a graph across an interrupt called it. Every stage module
+    built `InMemorySaver()` by hand instead, which is the permissive default serde — so the
+    allowlist this module spends 130 lines establishing was applied by the factory and by nothing
+    that used it.
+
+    It was not hypothetical. Running one incident to closure outside pytest emitted **45** distinct
+    `Deserializing unregistered type … This will be blocked in a future version` warnings, covering
+    `IncidentStatus`, `ApprovalRequest`, `WorkOrder`, `ClosureRecord` and forty-one others — every
+    one of them on the allowlist, and none of them reaching it. The same run through the factory
+    emits zero and reaches the same `closed`.
+
+    That is precisely the failure `serde.py` opens by describing: types off the allowlist are
+    degraded to primitives *silently*, so `advance_status` compares a `str` against an
+    `IncidentStatus`, finds no match, and the lifecycle check stops guarding anything. The suite
+    would not have noticed, because a green run over degraded state is exactly what the degradation
+    produces.
+
+    Watched red by reverting one call site::
+
+        AssertionError: these tests drive a graph through a bare InMemorySaver, so they resume
+        through the permissive default serde rather than the allowlist:
+          ['test_builder.py:777']
+    """
+    offenders: list[str] = []
+    for path in sorted(Path(__file__).parent.glob("test_*.py")):
+        if path.name in _MAY_BUILD_A_SAVER_BY_HAND:
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "InMemorySaver(" in line:
+                offenders.append(f"{path.name}:{number}")
+
+    assert not offenders, (
+        "these tests drive a graph through a bare InMemorySaver, so they resume through the "
+        "permissive default serde rather than the allowlist:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_hand_built_saver_exemptions_are_all_still_used() -> None:
+    """The other direction: an exemption that stops being needed is one nobody will remove.
+
+    Same rule as `builder._check_pending_stages` and `_DECLARED_MISSING` — a table that excuses
+    something has to fail when the excuse expires, or it silently widens.
+
+    Watched red by adding `test_builder.py` to the set::
+
+        AssertionError: these modules are exempted from the serde rule and no longer build a saver
+        by hand: ['test_builder.py']
+    """
+    stale = [
+        name
+        for name in sorted(_MAY_BUILD_A_SAVER_BY_HAND)
+        if "InMemorySaver(" not in (Path(__file__).parent / name).read_text(encoding="utf-8")
+    ]
+    assert not stale, (
+        "these modules are exempted from the serde rule and no longer build a saver by hand: "
+        f"{stale}. Delete the exemption."
+    )
 
 
 async def test_no_dsn_selects_the_in_memory_backend() -> None:

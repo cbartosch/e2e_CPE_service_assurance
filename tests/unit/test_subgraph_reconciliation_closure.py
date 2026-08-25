@@ -46,7 +46,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
@@ -87,6 +86,7 @@ from lpr_cpe.graph.subgraphs.reconciliation_closure import (
     reconcile_wfm,
     route_closure_gate,
 )
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 from lpr_cpe.policies.engine import PolicyEngine
 from lpr_cpe.policies.loader import load_pack
 from lpr_cpe.policies.models import PolicyPack
@@ -157,7 +157,7 @@ async def _to_p11(fixtures: Any, ref: str, *, thread: str, adapters: Any = None)
     ctx = build_context(clock=_Ticking(NOW), adapters=adapters)  # type: ignore[arg-type]
     parent = build_parent_graph().compile(
         name="lpr_cpe_parent",
-        checkpointer=InMemorySaver(),
+        checkpointer=build_memory_checkpointer(),
         interrupt_after=["generate_resolution_options"],
     )
     state = await parent.ainvoke(
@@ -211,7 +211,7 @@ def _validated(state: dict[str, Any], *, passed: bool, **extra: Any) -> dict[str
 
 async def _run(state: dict[str, Any], ctx: Any, *, thread: str) -> Any:
     graph = build_reconciliation_closure_graph().compile(
-        name="lpr_cpe_reconciliation_closure", checkpointer=InMemorySaver()
+        name="lpr_cpe_reconciliation_closure", checkpointer=build_memory_checkpointer()
     )
     config = {"configurable": {"thread_id": thread}}
     return graph, config, await graph.ainvoke(state, context=ctx, config=config)

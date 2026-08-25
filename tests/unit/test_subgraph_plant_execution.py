@@ -50,7 +50,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
@@ -91,6 +90,7 @@ from lpr_cpe.graph.subgraphs.plant_execution import (
     plant_report_extras,
     route_plant_gate,
 )
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 from lpr_cpe.simulation.loader import build_simulated_adapters
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
@@ -259,7 +259,9 @@ async def _arrival(fixtures: Any, ref: str, tag: str, *, seed: bool = True) -> A
     adapters = build_simulated_adapters(fixtures=fixtures, clock=_Ticking(NOW))
 
     parent = build_parent_graph().compile(
-        name="lpr_cpe_parent", checkpointer=InMemorySaver(), interrupt_after=["field_planning"]
+        name="lpr_cpe_parent",
+        checkpointer=build_memory_checkpointer(),
+        interrupt_after=["field_planning"],
     )
     parent_ctx = build_context(clock=_Ticking(NOW), adapters=adapters)  # type: ignore[arg-type]
     parent_config = {"configurable": {"thread_id": f"parent-{tag}"}}
@@ -275,7 +277,7 @@ async def _arrival(fixtures: Any, ref: str, tag: str, *, seed: bool = True) -> A
         values = _with_one_rejection(values)
 
     stage = build_field_execution_graph().compile(
-        name="lpr_cpe_field_execution", checkpointer=InMemorySaver()
+        name="lpr_cpe_field_execution", checkpointer=build_memory_checkpointer()
     )
     stage_ctx = build_context(clock=_Ticking(NOW), adapters=adapters)  # type: ignore[arg-type]
     stage_config = {"configurable": {"thread_id": f"field-{tag}"}}
@@ -311,7 +313,7 @@ async def _drive(
     """
     ctx = build_context(clock=clock or _Ticking(NOW), adapters=adapters)  # type: ignore[arg-type]
     graph = build_plant_execution_graph().compile(
-        name="lpr_cpe_plant_execution", checkpointer=InMemorySaver()
+        name="lpr_cpe_plant_execution", checkpointer=build_memory_checkpointer()
     )
     config = {"configurable": {"thread_id": f"plant-{tag}"}}
     await graph.ainvoke(state, context=ctx, config=config)

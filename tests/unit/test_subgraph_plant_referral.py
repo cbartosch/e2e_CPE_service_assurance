@@ -51,7 +51,6 @@ from itertools import pairwise
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
@@ -95,6 +94,7 @@ from lpr_cpe.graph.subgraphs.plant_referral import (
     referral_round,
     route_plant_referral_gate,
 )
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 from lpr_cpe.policies.engine import PolicyEngine
 from lpr_cpe.policies.loader import load_pack
 from lpr_cpe.simulation.loader import build_simulated_adapters
@@ -178,7 +178,7 @@ async def _arrival(fixtures: Any, ref: str, tag: str) -> Any:
     adapters = build_simulated_adapters(fixtures=fixtures, clock=_Ticking(NOW))
     parent = build_parent_graph().compile(
         name="lpr_cpe_parent",
-        checkpointer=InMemorySaver(),
+        checkpointer=build_memory_checkpointer(),
         interrupt_after=["generate_resolution_options"],
     )
     ctx = build_context(clock=_Ticking(NOW), adapters=adapters)  # type: ignore[arg-type]
@@ -196,7 +196,7 @@ async def _drive(state: Any, tag: str, answer: Any, *, adapters: Any = None, lap
     """Run this stage to a standstill, answering every pause, and report the payloads seen."""
     ctx = build_context(clock=_Ticking(NOW), adapters=adapters)  # type: ignore[arg-type]
     graph = build_plant_referral_graph().compile(
-        name="lpr_cpe_plant_referral", checkpointer=InMemorySaver()
+        name="lpr_cpe_plant_referral", checkpointer=build_memory_checkpointer()
     )
     config = {"configurable": {"thread_id": f"referral-{tag}"}}
     await graph.ainvoke(state, context=ctx, config=config)

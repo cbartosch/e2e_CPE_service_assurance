@@ -52,6 +52,7 @@ natural key, the SLA clock is write-once, and no non-idempotent external write s
 | `src/lpr_cpe/observability/` | Structured logging, tracing attributes, KPI derivation |
 | `src/lpr_cpe/cli.py` | The `lpr-cpe` console script: compile the graph, report topology and config |
 | `src/lpr_cpe/audit.py` | The `lpr-cpe-audit` console script: run every gate, write the evidence bundle |
+| `src/lpr_cpe/runner.py` | What `lpr-cpe run` calls: drive one incident, answering every pause |
 | `docs/` | The vendored specification, the gap register, the workflow diagrams, the implementation report |
 | `audit/` | The last bundle: each gate's raw output, and `MANIFEST.json` |
 
@@ -131,7 +132,26 @@ one moment anybody needed it.
 and reads off that manifest. It is the only document here whose figures a test checks: state a
 number it did not measure and the suite goes red.
 
-The console script reports; it does not run an incident:
+### Running one incident
+
+```bash
+lpr-cpe run SVC-UT-001-B-01
+```
+
+Drives one fixture service from event to standstill against the simulators, answering every
+approval gate, crew report, customer window and plant report itself, and prints what the run
+produced. `make demo` is this command; `DEMO_SERVICE=...` picks another service, `--decline`
+refuses every approval instead of granting it, and `--predictive` files the event as predictive
+maintenance so it takes D04's preventive arm.
+
+Swept across all 41 fixtures it closes 3 and escalates 38, which is the honest shape of the system
+today rather than a demonstration tuned to look complete. It refuses to start if
+`LPR_ALLOW_PRODUCTION_WRITES` is set.
+
+**It is not the seventeen specification scenarios.** Those are still unwritten; this is one scripted
+path, and the answers it gives are a script rather than a simulation of an operator.
+
+The other two commands report and change nothing:
 
 ```bash
 lpr-cpe topology   # compile the parent graph, then print its nodes, decisions and where runs end
@@ -143,10 +163,10 @@ Compiling *is* the check. The parent graph refuses to build when its three topol
 with each other or with the node registry, so `lpr-cpe topology` fails on that without needing a
 database, a network or a model provider.
 
-`make demo` and `make serve` are declared but not yet runnable, because the demonstration scenarios
-and the HTTP surface are both unwritten. Each names what is missing, points at the row in
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §5 that tracks it, and exits non-zero -- rather
-than failing on the import of something that was never there, which reads as a broken install.
+`make serve` is declared and not yet runnable, because the HTTP surface is unwritten. It names what
+is missing, points at the row in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §5 that tracks it,
+and exits non-zero -- rather than failing on the import of something that was never there, which
+reads as a broken install. `make demo` used to do the same and now runs `lpr-cpe run`.
 
 ## Writes are off by default
 

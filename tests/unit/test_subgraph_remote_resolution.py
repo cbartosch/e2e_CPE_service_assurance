@@ -27,7 +27,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
@@ -72,6 +71,7 @@ from lpr_cpe.graph.subgraphs.remote_resolution import (
 )
 from lpr_cpe.integrations.cpe.simulator import SUPPORTED_ACTIONS
 from lpr_cpe.observability.kpi import KPICalculator, MetricTimestamp
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 from lpr_cpe.policies.loader import load_pack
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
@@ -164,7 +164,7 @@ async def paused(fixtures: Any) -> Any:
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
     parent = build_parent_graph().compile(
         name="lpr_cpe_parent",
-        checkpointer=InMemorySaver(),
+        checkpointer=build_memory_checkpointer(),
         interrupt_after=["generate_resolution_options"],
     )
     parent_final = await parent.ainvoke(
@@ -185,7 +185,7 @@ async def paused(fixtures: Any) -> Any:
     }
 
     graph = build_remote_resolution_graph().compile(
-        name="lpr_cpe_remote_resolution", checkpointer=InMemorySaver()
+        name="lpr_cpe_remote_resolution", checkpointer=build_memory_checkpointer()
     )
     config = {"configurable": {"thread_id": f"remote-{OFFLINE_CPE_SERVICE}"}}
     first = await graph.ainvoke(parent_final, context=ctx, config=config)

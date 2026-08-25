@@ -44,7 +44,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
@@ -73,6 +72,7 @@ from lpr_cpe.graph.subgraphs.field_execution import (
     build_field_execution_graph,
 )
 from lpr_cpe.observability.kpi import MetricTimestamp
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
@@ -170,7 +170,9 @@ async def _seam(fixtures: Any, ref: str, tag: str) -> Any:
     service = fixtures.services[ref]
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
     parent = build_parent_graph().compile(
-        name="lpr_cpe_parent", checkpointer=InMemorySaver(), interrupt_after=["field_planning"]
+        name="lpr_cpe_parent",
+        checkpointer=build_memory_checkpointer(),
+        interrupt_after=["field_planning"],
     )
     config = {"configurable": {"thread_id": f"parent-{tag}"}}
     await parent.ainvoke(_initial(service), context=ctx, config=config)
@@ -195,7 +197,7 @@ async def _drive(at_seam: Any, tag: str, answer: Any, laps: int = 14) -> Any:
     """
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
     graph = build_field_execution_graph().compile(
-        name="lpr_cpe_field_execution", checkpointer=InMemorySaver()
+        name="lpr_cpe_field_execution", checkpointer=build_memory_checkpointer()
     )
     config = {"configurable": {"thread_id": f"field-{tag}"}}
     await graph.ainvoke(at_seam, context=ctx, config=config)
@@ -397,7 +399,7 @@ async def test_the_crew_is_briefed_and_asked_for_every_item_before_the_pause(
     )
 
     graph = build_field_execution_graph().compile(
-        name="lpr_cpe_field_execution", checkpointer=InMemorySaver()
+        name="lpr_cpe_field_execution", checkpointer=build_memory_checkpointer()
     )
     config = {"configurable": {"thread_id": "field-briefing"}}
     await graph.ainvoke(

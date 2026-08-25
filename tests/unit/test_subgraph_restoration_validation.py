@@ -26,7 +26,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
@@ -65,6 +64,7 @@ from lpr_cpe.graph.subgraphs.restoration_validation import (
     window_deadline,
 )
 from lpr_cpe.observability.kpi import MetricTimestamp
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 from lpr_cpe.policies.engine import PolicyEngine
 from lpr_cpe.policies.loader import load_pack
 from lpr_cpe.policies.models import ValidationPolicy
@@ -143,7 +143,7 @@ async def diagnosed(fixtures: Any) -> Any:
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
     parent = build_parent_graph().compile(
         name="lpr_cpe_parent",
-        checkpointer=InMemorySaver(),
+        checkpointer=build_memory_checkpointer(),
         interrupt_after=["generate_resolution_options"],
     )
     state = await parent.ainvoke(
@@ -169,7 +169,7 @@ def _with_repair(
 
 async def _run(state: dict[str, Any], ctx: Any, *, thread: str) -> Any:
     graph = build_restoration_validation_graph().compile(
-        name="lpr_cpe_restoration_validation", checkpointer=InMemorySaver()
+        name="lpr_cpe_restoration_validation", checkpointer=build_memory_checkpointer()
     )
     config = {"configurable": {"thread_id": thread}}
     return graph, config, await graph.ainvoke(state, context=ctx, config=config)

@@ -49,11 +49,17 @@ typecheck:  ## Mypy strict over src
 # targets are kept rather than deleted because IMPLEMENTATION_PLAN.md carries both as pending, and a
 # target that says why it cannot run is worth more than a name nobody can find.
 
-demo:  ## Not runnable yet -- the demonstration scenarios are unwritten
-	@echo "make demo: the seven scenarios are not written, and the parent graph still stops"
-	@echo "at the resolution fork. See IMPLEMENTATION_PLAN.md section 5, row 'demo'."
-	@echo "What does run today: lpr-cpe topology"
-	@exit 1
+DEMO_SERVICE ?= SVC-UT-001-B-01
+
+demo:  ## Drive one incident end to end against the simulators (DEMO_SERVICE=... to pick another)
+	$(VPY) -m lpr_cpe.cli run $(DEMO_SERVICE)
+
+# This target used to name a gap and exit 1, because the scenarios it would run were unwritten and a
+# command that printed nothing and exited zero would be indistinguishable from a demonstration that
+# had run. `lpr-cpe run` is not those scenarios -- the seventeen named ones are still unwritten and
+# IMPLEMENTATION_PLAN.md still carries them as pending -- but it is one incident driven from event to
+# closure, which is more than the gap message could say. `DEMO_SERVICE` is a variable because 38 of
+# the 41 fixtures escalate rather than close, and watching one of those is the more instructive run.
 
 serve:  ## Not runnable yet -- src/lpr_cpe/api/ is unwritten
 	@echo "make serve: there is no HTTP surface. src/lpr_cpe/api/ does not exist, so neither"

@@ -44,7 +44,6 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
@@ -88,6 +87,7 @@ from lpr_cpe.graph.subgraphs.self_help import (
     script_id_of,
     verify_self_help,
 )
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 from lpr_cpe.policies.engine import PolicyEngine, PolicyInput
 from lpr_cpe.policies.loader import load_pack
 
@@ -172,7 +172,7 @@ async def _parent_to_p11(initial: Any, ctx: Any, thread: str) -> Any:
     """
     parent = build_parent_graph().compile(
         name="lpr_cpe_parent",
-        checkpointer=InMemorySaver(),
+        checkpointer=build_memory_checkpointer(),
         interrupt_after=["generate_resolution_options"],
     )
     return await parent.ainvoke(
@@ -192,7 +192,9 @@ async def _drive(fixtures: Any, incident_id: str, now: datetime = NOW) -> Any:
     thread = f"parent-{incident_id}-{now.isoformat()}"
     parent_final = await _parent_to_p11(_initial(service, incident_id, now), ctx, thread)
 
-    graph = build_self_help_graph().compile(name="lpr_cpe_self_help", checkpointer=InMemorySaver())
+    graph = build_self_help_graph().compile(
+        name="lpr_cpe_self_help", checkpointer=build_memory_checkpointer()
+    )
     config = {"configurable": {"thread_id": f"self-help-{incident_id}-{now.isoformat()}"}}
     first = await graph.ainvoke(parent_final, context=ctx, config=config)
     return graph, ctx, config, first

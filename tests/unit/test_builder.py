@@ -19,7 +19,6 @@ from itertools import pairwise
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END
 from langgraph.types import Command
 
@@ -56,6 +55,7 @@ from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.nodes import CLOSURE_NODES, GOVERNANCE_NODES, PARENT_NODES
 from lpr_cpe.graph.nodes._runtime import derive_id
 from lpr_cpe.graph.state import make_initial_state, total_steps
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
@@ -774,7 +774,9 @@ async def _walk(
     """
     clock = _Ticking(NOW)
     ctx = build_context(clock=clock)
-    parent = build_parent_graph().compile(name="lpr_cpe_parent", checkpointer=InMemorySaver())
+    parent = build_parent_graph().compile(
+        name="lpr_cpe_parent", checkpointer=build_memory_checkpointer()
+    )
     config = {"configurable": {"thread_id": thread}}
     await parent.ainvoke(_initial(service), context=ctx, config=config)
     for _ in range(laps):

@@ -42,7 +42,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
 from langgraph.types import Command
 
@@ -93,6 +92,7 @@ from lpr_cpe.graph.subgraphs.field_planning import (
     selected_field_option,
 )
 from lpr_cpe.observability.kpi import MetricTimestamp
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
@@ -174,7 +174,7 @@ async def _drive_to_the_gate(fixtures: Any, ref: str, tag: str) -> Any:
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
     parent = build_parent_graph().compile(
         name="lpr_cpe_parent",
-        checkpointer=InMemorySaver(),
+        checkpointer=build_memory_checkpointer(),
         interrupt_after=["generate_resolution_options"],
     )
     parent_final = await parent.ainvoke(
@@ -182,7 +182,7 @@ async def _drive_to_the_gate(fixtures: Any, ref: str, tag: str) -> Any:
     )
 
     graph = build_field_planning_graph().compile(
-        name="lpr_cpe_field_planning", checkpointer=InMemorySaver()
+        name="lpr_cpe_field_planning", checkpointer=build_memory_checkpointer()
     )
     config = {"configurable": {"thread_id": f"field-{tag}"}}
     first = await graph.ainvoke(parent_final, context=ctx, config=config)

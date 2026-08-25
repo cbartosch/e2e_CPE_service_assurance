@@ -52,7 +52,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 import lpr_cpe.graph.inspect as gi
@@ -76,6 +75,7 @@ from lpr_cpe.graph.context import build_context
 from lpr_cpe.graph.nodes.governance import prepare_blast_radius_approval
 from lpr_cpe.graph.state import make_initial_state
 from lpr_cpe.observability.kpi import MetricTimestamp
+from lpr_cpe.persistence.checkpointer import build_memory_checkpointer
 
 NOW = datetime(2026, 3, 2, 14, 30, tzinfo=UTC)
 
@@ -165,7 +165,7 @@ async def _seeded(fixtures: Any, after: str, thread: str, **seed: Any) -> Any:
     service = next(s for s in fixtures.services.values() if s["health"] == HEALTH)
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
     app = build_parent_graph().compile(
-        name="lpr_cpe_parent", checkpointer=InMemorySaver(), interrupt_after=[after]
+        name="lpr_cpe_parent", checkpointer=build_memory_checkpointer(), interrupt_after=[after]
     )
     config: Any = {"configurable": {"thread_id": thread}}
     await app.ainvoke(_initial(service), context=ctx, config=config)
@@ -507,7 +507,7 @@ async def test_policy_blocking_every_remedy_escalates_without_asking_anyone(
     ctx = build_context(clock=_Ticking(NOW))  # type: ignore[arg-type]
     app = build_parent_graph().compile(
         name="lpr_cpe_parent",
-        checkpointer=InMemorySaver(),
+        checkpointer=build_memory_checkpointer(),
         interrupt_after=["generate_resolution_options"],
     )
     config: Any = {"configurable": {"thread_id": "gov-blocked"}}

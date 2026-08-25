@@ -1,15 +1,15 @@
 {
   "all_gates_passed": true,
-  "commit": "35f11c249b5b78e16c8c2bd56bd6d446dd6c2a52",
+  "commit": "642eaa791bc86d17f0e4aa07a8cf2a568db4fca4",
   "dirty": true,
   "figures": {
     "coverage_gate_percent": 85.0,
-    "coverage_percent": 85.57,
-    "files_formatted": 137,
-    "source_files_typechecked": 110,
+    "coverage_percent": 85.67,
+    "files_formatted": 139,
+    "source_files_typechecked": 111,
     "tests_failed": 0,
-    "tests_passing": 964,
-    "tests_total": 964
+    "tests_passing": 985,
+    "tests_total": 985
   },
   "gates": [
     {
@@ -18,7 +18,7 @@
       "name": "ruff-check",
       "output_file": "latest/ruff-check.txt",
       "proves": "no lint finding in the shipped source or its tests",
-      "seconds": 0.47
+      "seconds": 0.49
     },
     {
       "command": "python -m ruff format --check src tests",
@@ -26,7 +26,7 @@
       "name": "ruff-format",
       "output_file": "latest/ruff-format.txt",
       "proves": "every file is formatted as the committed configuration formats it",
-      "seconds": 0.4
+      "seconds": 0.38
     },
     {
       "command": "python -m mypy",
@@ -34,7 +34,7 @@
       "name": "mypy",
       "output_file": "latest/mypy.txt",
       "proves": "strict-mode type checking over src/lpr_cpe, with pydantic's plugin",
-      "seconds": 1.68
+      "seconds": 1.11
     },
     {
       "command": "python -m pytest --cov --cov-report=term-missing --cov-fail-under=85",
@@ -42,7 +42,7 @@
       "name": "pytest",
       "output_file": "latest/pytest.txt",
       "proves": "the committed suite, behind the coverage gate `make test` uses",
-      "seconds": 100.07
+      "seconds": 113.89
     },
     {
       "command": "python -m lpr_cpe.cli topology",
@@ -50,7 +50,7 @@
       "name": "topology",
       "output_file": "latest/topology.txt",
       "proves": "the parent graph compiles, so its four topology tables agree",
-      "seconds": 2.14
+      "seconds": 6.67
     },
     {
       "command": "python -m lpr_cpe.cli config",
@@ -58,10 +58,10 @@
       "name": "config",
       "output_file": "latest/config.txt",
       "proves": "the settings this process would run under, with no secret printed",
-      "seconds": 2.17
+      "seconds": 3.19
     }
   ],
-  "generated_at": "2026-08-25T06:38:41+00:00",
+  "generated_at": "2026-08-25T13:31:34+00:00",
   "interpreter": "C:\\Users\\bartosch christian\\Downloads\\e2e_CPE_service_assurance\\.venv\\Scripts\\python.exe",
   "packages": {
     "fastapi": "0.141.1",

@@ -7,18 +7,37 @@ lint error and not a test failure -- it is a `ModuleNotFoundError` in the user's
 `tests/unit/test_cli.py` keeps it ended by reading the declaration out of the packaging metadata and
 importing what it names, rather than importing this module under a name it hard-codes.
 
-The commands report; they do not run an incident. Compiling the parent graph is the cheapest honest
-check this system has, because `build_parent_graph` runs `_check_tables` before it returns anything:
-`topology` therefore fails on tables that disagree without a database, a network or a model
-provider. What it then prints comes from the compiled graph where that is the complete answer and
-from `builder`'s own tables where it is not -- see `report_topology`, which documents the one place
-the rendering is lossy and would otherwise have hidden four declared answers.
+Two of the three commands report. `topology` and `config` read nothing and write nothing: compiling
+the parent graph is the cheapest honest check this system has, because `build_parent_graph` runs
+`_check_tables` before it returns anything, so `topology` fails on tables that disagree without a
+database, a network or a model provider. What it then prints comes from the compiled graph where
+that is the complete answer and from `builder`'s own tables where it is not -- see
+`report_topology`, which documents the one place the rendering is lossy and would otherwise have
+hidden four declared answers.
 
-There is deliberately no `demo` command, though the Makefile's `demo` target reaches for one. The
-scenarios it would run are not written -- IMPLEMENTATION_PLAN.md §5 carries `demo` as pending and
-the parent graph still stops at the resolution fork -- and a command that printed nothing and exited
-zero would be indistinguishable from a demonstration that had run. An unrecognised argument names
-the commands that do exist, which is the more useful failure until the scenarios are written.
+`run` is the third, and it is different in kind
+-----------------------------------------------
+It drives one incident from event to standstill against the **fixture-backed simulators**, and it
+answers every `interrupt()` itself. Until it existed there was no way to run this workflow at all
+short of writing sixty lines of Python: the six approval gates pause and nothing but a test harness
+could resume them, `make serve` names an HTTP surface that is unbuilt, and `make demo` named
+scenarios that are unwritten. That is the gap this closes -- not the API, which is still owed.
+
+**It refuses to run with production writes enabled**, and that guard is what keeps this module's
+"reads no external system" promise true by construction rather than by the adapters happening to be
+fakes. `build_context` defaults every dependency to its simulation implementation, so no real
+endpoint is reachable from here today; the check means that stays true the day one is.
+
+The answers it gives are a **scripted operator, not a policy**. Every approval is approved, the crew
+reports a fault fixed at the drop, OSP reports the span repaired, the customer completes the step,
+and the stability window is released by moving the clock to its deadline. That is one path through a
+workflow with dozens, chosen because it is the one that reaches `closed`; `--decline` inverts the
+approvals to show the other side. It is a demonstration, and a demonstration that pretended to be a
+simulation of real operators would be the more misleading artefact.
+
+`make demo` reaches for this now. The seventeen specification scenarios are still unwritten, and
+IMPLEMENTATION_PLAN.md §5 still carries `demo` as pending for that reason: one scripted path is not
+seventeen named ones.
 """
 
 from __future__ import annotations
@@ -184,12 +203,31 @@ REPORTS: Mapping[str, Callable[[TextIO], None]] = {
 }
 
 
+#: The verb that is not a report. One entry, in a table, so `_build_parser` and `main` cannot
+#: disagree about which token routes away from the reports.
+RUN_COMMAND = "run"
+
+
 def _build_parser() -> argparse.ArgumentParser:
+    """The report parser: a bare `lpr-cpe`, or one of `REPORTS` by name.
+
+    **`run` is deliberately not an `add_subparsers` entry, and the first attempt at this shipped a
+    regression that proves why.** A subparser and an optional positional compete for the same first
+    token: with both declared, argparse hands `topology` to the subparser and fails with
+    `invalid choice: 'topology' (choose from run)`. So `lpr-cpe topology` -- the command the README
+    documents and `test_cli.py` drives -- stopped working, and nothing about the change looked like
+    it would touch it. `test_runner.py`'s
+    `test_the_cli_exposes_run_without_breaking_the_bare_invocation` is what caught it.
+
+    The two parsers are therefore separate and `main` picks between them on the first token. That is
+    more code than one parser and it is the arrangement in which neither form can break the other.
+    """
     parser = argparse.ArgumentParser(
         prog="lpr-cpe",
         description=(
-            "Report the compiled parent graph and the configuration this process would run "
-            "under. Reads no external system and writes to none."
+            "Report the compiled parent graph and the configuration this process would run under. "
+            "Reads no external system and writes to none. `lpr-cpe run SERVICE_REF` drives one "
+            "incident through the workflow instead; see `lpr-cpe run --help`."
         ),
     )
     parser.add_argument(
@@ -201,14 +239,59 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_run_parser() -> argparse.ArgumentParser:
+    """The `run` parser, reached only when the first argument is `run`."""
+    parser = argparse.ArgumentParser(
+        prog="lpr-cpe run",
+        description=(
+            "Drive one fixture service through the parent graph, answering every approval gate, "
+            "crew report, customer window and plant report, and print what the run produced. The "
+            "answers are a scripted operator chosen to reach closure, not a simulation of one. "
+            "Refuses to start if the configuration permits production writes."
+        ),
+    )
+    parser.add_argument("service_ref", help="a service reference from the fixture set")
+    parser.add_argument(
+        "--decline",
+        action="store_true",
+        help="refuse every approval instead of granting it, to show the other arm",
+    )
+    parser.add_argument(
+        "--predictive",
+        action="store_true",
+        help="file the event as predictive maintenance, which is D04's preventive arm",
+    )
+    return parser
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """The entry point `[project.scripts]` names. Returns the process exit code.
 
     `argv` is a parameter rather than read from `sys.argv` inside so that the tests drive the real
     entry point instead of a helper beside it. A console script calls this with no arguments, which
     is the path a bare `lpr-cpe` takes and the one the tests exercise by passing `None`.
+
+    `runner` is imported here rather than at module scope. It pulls in the fixture set, the policy
+    pack and the whole graph; `lpr-cpe config` should not pay for that, and `report_topology`'s
+    value is partly that it is the cheapest thing in the system to run.
     """
-    args = _build_parser().parse_args(argv)
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    if tokens and tokens[0] == RUN_COMMAND:
+        from lpr_cpe.runner import ProductionWritesRefusedError, run_service
+
+        run_args = _build_run_parser().parse_args(tokens[1:])
+        try:
+            return run_service(
+                run_args.service_ref,
+                sys.stdout,
+                approve=not run_args.decline,
+                predictive=run_args.predictive,
+            )
+        except ProductionWritesRefusedError as refused:
+            sys.stderr.write(f"{refused}\n")
+            return 3
+
+    args = _build_parser().parse_args(tokens)
     section: str | None = args.section
     for name in REPORTS if section is None else (section,):
         REPORTS[name](sys.stdout)
