@@ -40,7 +40,7 @@ preferred to more stubs.
 | `persistence` — checkpointer factory and the allowlisted serialiser | done |
 | `cli.py` + `audit.py` + `runner.py` — reports, the audit bundle, and `lpr-cpe run` | done |
 | `persistence` — transactional outbox and migrations | **not built** |
-| `api` — the FastAPI surface and its webhooks | **not built** |
+| `api` — the FastAPI surface, state reads, approval resume, webhooks | done |
 | model provider and the deterministic fake | **not built** |
 | the seventeen specification scenarios | **not built** — `lpr-cpe run` drives one scripted path, which is not the same thing |
 | Docker Compose development environment | **not built** |
@@ -123,11 +123,11 @@ whoever is reading it, and deliberately not here.
 
 | figure | value | note |
 | --- | --- | --- |
-| `tests_total` | 985 | all unit tests; see the caveat below |
-| `coverage_percent` | 85.67 | line and branch, over `src/lpr_cpe` |
+| `tests_total` | 1009 | all unit tests; see the caveat below |
+| `coverage_percent` | 86.25 | line and branch, over `src/lpr_cpe` |
 | `coverage_gate_percent` | 85 | enforced from 2026-08-24; see below |
-| `source_files_typechecked` | 111 | `mypy --strict`, no issues |
-| `files_formatted` | 139 | `ruff format --check` |
+| `source_files_typechecked` | 115 | `mypy --strict`, no issues |
+| `files_formatted` | 144 | `ruff format --check` |
 
 **The suite is unit-only.** There are no integration, contract or scenario tests, and none of the
 seventeen required scenarios exist. Every "done" row in §1 rests on committed tests, but they are
@@ -204,9 +204,13 @@ The ones that most change what this system can do:
 
 Ordered by what would hurt soonest.
 
-1. **There is no HTTP surface, so there is no way to answer an approval.** Six approval gates
-   interrupt and wait; nothing can resume them but a test harness. Until `api` exists the system
-   cannot be operated at all, only run.
+1. **There is no scheduler, so an incident that reaches its stability window never leaves it.**
+   `await_service_stability` is released by the clock and not by a resume value, and the API has no
+   way to move time. So the HTTP surface can drive an incident to a stability window and no further:
+   `lpr-cpe run` closes one only because it advances its own clock. The specification asks for
+   exactly this -- "persist the state and resume it from a scheduled timer event" -- and gap API-6
+   is where it is recorded. Until it exists the system can be operated up to validation and not
+   through it.
 2. **No checkpoint has ever been written to PostgreSQL.** The lazy import, the open/setup/close
    sequence and the `setup=False` path are exercised against an injected stand-in. `setup()`'s DDL
    and resume-after-restart are the two things a stand-in cannot prove, and both are exactly what a

@@ -53,15 +53,15 @@ natural key, the SLA clock is write-once, and no non-idempotent external write s
 | `src/lpr_cpe/cli.py` | The `lpr-cpe` console script: compile the graph, report topology and config |
 | `src/lpr_cpe/audit.py` | The `lpr-cpe-audit` console script: run every gate, write the evidence bundle |
 | `src/lpr_cpe/runner.py` | What `lpr-cpe run` calls: drive one incident, answering every pause |
+| `src/lpr_cpe/api/` | The HTTP surface: intake, state reads, approval resume, webhooks |
 | `docs/` | The vendored specification, the gap register, the workflow diagrams, the implementation report |
 | `audit/` | The last bundle: each gate's raw output, and `MANIFEST.json` |
 
-Three things this table would otherwise be expected to list are **not written yet**. They are named
+Two things this table would otherwise be expected to list are **not written yet**. They are named
 here rather than omitted, so that their absence reads as a gap and not as a table nobody updated:
-`src/lpr_cpe/api/` (the HTTP surface, approval resume and the inbound webhooks), the transactional
-outbox and migrations under `persistence/`, and seven of the nine documents `docs/` is eventually to
-hold -- the decision tables, the runbook, the KPI definitions and the decision records.
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §5 tracks each one.
+the transactional outbox and migrations under `persistence/`, and seven of the nine documents
+`docs/` is eventually to hold -- the decision tables, the runbook, the KPI definitions and the
+decision records. [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §5 tracks each one.
 
 This paragraph said **four** things until 2026-08-24, and the fourth was "the six resolution
 subgraphs past the fork in `graph/`". All nine subgraphs are built and all 24 decisions are wired;

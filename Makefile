@@ -61,11 +61,11 @@ demo:  ## Drive one incident end to end against the simulators (DEMO_SERVICE=...
 # closure, which is more than the gap message could say. `DEMO_SERVICE` is a variable because 38 of
 # the 41 fixtures escalate rather than close, and watching one of those is the more instructive run.
 
-serve:  ## Not runnable yet -- src/lpr_cpe/api/ is unwritten
-	@echo "make serve: there is no HTTP surface. src/lpr_cpe/api/ does not exist, so neither"
-	@echo "does the approval-resume endpoint or any webhook. See IMPLEMENTATION_PLAN.md"
-	@echo "section 5, row 'api'. What does run today: lpr-cpe config"
-	@exit 1
+SERVE_HOST ?= 127.0.0.1
+SERVE_PORT ?= 8000
+
+serve:  ## Run the HTTP surface (SERVE_HOST / SERVE_PORT to change where)
+	$(VPY) -m uvicorn lpr_cpe.api.app:create_app --factory --host $(SERVE_HOST) --port $(SERVE_PORT)
 
 check: lint typecheck test  ## lint, typecheck, then the suite behind the coverage gate
 

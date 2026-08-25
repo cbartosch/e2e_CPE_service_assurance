@@ -331,9 +331,13 @@ _EXTERNAL_PATHS = {
 #: `builder._check_pending_stages` checks `PENDING_STAGES`. An entry whose path now exists is a
 #: failure, because the day `src/lpr_cpe/api/` is written is the day three documents describing its
 #: absence become wrong and nothing else would notice.
+#:
+#: **That day was 2026-08-25 and the gate fired.** `src/lpr_cpe/api/` was built and
+#: `test_nothing_declared_missing_has_quietly_been_built` failed, which is the first time the reverse
+#: direction has caught anything real. It named four places still describing the API as absent -- the
+#: plan's `api` row, README's gap paragraph, and two lines in the dashboard design -- and every one
+#: of them was wrong by then. That is the whole argument for the table being checked both ways.
 _DECLARED_MISSING = {
-    # §5 row `api`, pending. Named by README's Layout table, the dashboard design and the plan.
-    "src/lpr_cpe/api/",
     # Two of the eight documents the specification asks for and §5 counts as unwritten.
     "docs/policy-controls.md",
     "docs/operations-runbook.md",
