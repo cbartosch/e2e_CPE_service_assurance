@@ -39,7 +39,7 @@ preferred to more stubs.
 | `graph` — 17 parent steps, 9 subgraphs, all 24 decisions wired | done |
 | `persistence` — checkpointer factory and the allowlisted serialiser | done |
 | `cli.py` + `audit.py` + `runner.py` — reports, the audit bundle, and `lpr-cpe run` | done |
-| `persistence` — transactional outbox and migrations | **not built** |
+| `persistence` — transactional outbox and migrations | done, with the atomicity boundary named (OUTBOX-1) |
 | `api` — the FastAPI surface, state reads, approval resume, webhooks | done |
 | model provider and the deterministic fake | done |
 | the seventeen specification scenarios | **not built** — `lpr-cpe run` drives one scripted path, which is not the same thing |
@@ -128,11 +128,11 @@ whoever is reading it, and deliberately not here.
 
 | figure | value | note |
 | --- | --- | --- |
-| `tests_total` | 1026 | all unit tests; see the caveat below |
-| `coverage_percent` | 86.62 | line and branch, over `src/lpr_cpe` |
+| `tests_total` | 1045 | all unit tests; see the caveat below |
+| `coverage_percent` | 86.45 | line and branch, over `src/lpr_cpe` |
 | `coverage_gate_percent` | 85 | enforced from 2026-08-24; see below |
-| `source_files_typechecked` | 119 | `mypy --strict`, no issues |
-| `files_formatted` | 149 | `ruff format --check` |
+| `source_files_typechecked` | 121 | `mypy --strict`, no issues |
+| `files_formatted` | 152 | `ruff format --check` |
 
 **The suite is unit-only.** There are no integration, contract or scenario tests, and none of the
 seventeen required scenarios exist. Every "done" row in §1 rests on committed tests, but they are

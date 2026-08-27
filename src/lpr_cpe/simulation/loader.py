@@ -240,7 +240,10 @@ def build_simulated_adapters(
     `test_no_write_escapes_in_simulation_mode` asserts over.
     """
     resolved_clock = clock or SystemClock()
-    resolved_gate = gate or WriteGate()
+    # The gate gets the same clock as the adapters. It stamps every staged outbox row, so a gate on
+    # the wall clock inside a run driven by a frozen one would put two time bases in one trail --
+    # and the outbox row would claim to have been staged before the incident that staged it.
+    resolved_gate = gate or WriteGate(clock=resolved_clock)
     data = fixtures or load_fixtures()
     return SimulatedAdapters(
         nxt=SimulatedNXTAdapter(data, resolved_clock, resolved_gate),

@@ -29,8 +29,10 @@ from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from lpr_cpe.config import Settings, get_settings
-from lpr_cpe.domain.enums import ActionOutcome, ReasonCode
+from lpr_cpe.config.clock import Clock
+from lpr_cpe.domain.enums import ActionOutcome, ActionType, ReasonCode
 from lpr_cpe.domain.governance import ActionRequest
+from lpr_cpe.persistence.outbox import OutboxEvent, StagedWrites
 
 T = TypeVar("T")
 
@@ -61,6 +63,35 @@ class CircuitOpenError(AdapterUnavailableError):
     """The local breaker is open, so we did not even try."""
 
 
+#: Which integration a given action leaves through. The outbox relay dispatches on this, so it is
+#: the routing table for every external write in the system.
+#:
+#: Actions absent from this map go to `cpe`, which is the majority and the reason for a default
+#: rather than an exhaustive mapping: the twelve device-level actions all reach the same adapter and
+#: listing them would be a list to keep in step for no gain. What must be listed is every action
+#: that goes *somewhere else*, because those are the ones a default would silently misroute -- a
+#: work order posted to the CPE adapter is a work order nobody in the field ever sees.
+_TARGET_SYSTEMS: dict[ActionType, str] = {
+    ActionType.SEND_SELF_HELP: "communications",
+    ActionType.NOTIFY_CUSTOMER: "communications",
+    ActionType.CREATE_WORK_ORDER: "wfm",
+    ActionType.CANCEL_WORK_ORDER: "wfm",
+    ActionType.RAISE_MR: "jtrack",
+    ActionType.UPDATE_MR: "jtrack",
+    ActionType.CLOSE_INCIDENT: "nxt",
+    ActionType.CREATE_PM_CASE: "nxt",
+    ActionType.NODE_LEVEL_RESET: "hfc",
+    ActionType.OLT_PORT_RESET: "pon",
+    ActionType.BULK_CONFIG_PUSH: "inventory",
+    ActionType.PROFILE_CHANGE: "inventory",
+    ActionType.REPROVISION: "inventory",
+}
+
+
+def _target_system(request: ActionRequest) -> str:
+    return _TARGET_SYSTEMS.get(request.action_type, "cpe")
+
+
 @dataclass(frozen=True, slots=True)
 class WriteVerdict:
     """The gate's answer. `simulated=True` means "proceed, but do not call out"."""
@@ -84,13 +115,18 @@ class WriteGate:
     switch. There is no combination that writes without both being deliberately set.
     """
 
-    __slots__ = ("_recorded", "_settings")
+    __slots__ = ("_clock", "_recorded", "_settings", "_staged")
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, *, clock: Clock | None = None) -> None:
         self._settings = settings or get_settings()
         # Every authorize() call, for the test that asserts nothing bypassed the gate and for the
         # simulation-mode audit trail: in simulation the intent IS the record.
         self._recorded: list[dict[str, Any]] = []
+        # Outbox rows for the same calls, waiting for somebody to make them durable. The gate is the
+        # right place to stage them because it is the one choke point every external write passes
+        # through -- staging at each of the eleven adapters would mean eleven chances to forget.
+        self._staged = StagedWrites()
+        self._clock = clock
 
     @property
     def settings(self) -> Settings:
@@ -100,7 +136,23 @@ class WriteGate:
     def recorded(self) -> tuple[dict[str, Any], ...]:
         return tuple(self._recorded)
 
+    @property
+    def staged(self) -> StagedWrites:
+        """Intents authorised and not yet persisted. See `persistence.outbox.StagedWrites`."""
+        return self._staged
+
+    def _now(self) -> datetime:
+        """The injected clock's instant, or the wall clock.
+
+        The fallback exists because `WriteGate` is constructed in places that have no clock to hand,
+        and it is a gap rather than a design: a gate stamping wall-clock times inside a run whose
+        every other timestamp came from a frozen clock produces a trail with two time bases in it.
+        Gap OUTBOX-4.
+        """
+        return self._clock.now() if self._clock is not None else datetime.now(UTC)
+
     def authorize(self, request: ActionRequest) -> WriteVerdict:
+        now = self._now()
         self._recorded.append(
             {
                 "action_id": request.action_id,
@@ -108,8 +160,15 @@ class WriteGate:
                 "target_ref": request.target_ref,
                 "idempotency_key": request.idempotency_key,
                 "incident_id": request.incident_id,
-                "at": datetime.now(UTC).isoformat(),
+                "at": now.isoformat(),
             }
+        )
+        # Staged whether or not the write is permitted, and that is the point rather than an
+        # oversight. In simulation the outbox is the record of what *would* have been sent, which is
+        # the artefact a reviewer reads before turning writes on; in production it is the durable
+        # intent the relay drains. One code path, so the thing reviewed is the thing that runs.
+        self._staged.stage(
+            OutboxEvent.from_action(request, target_system=_target_system(request), now=now)
         )
         if self._settings.writes_permitted:
             return WriteVerdict(
