@@ -209,6 +209,7 @@ from lpr_cpe.graph.nodes._runtime import (
 from lpr_cpe.graph.nodes.evidence import SOURCES, Subject, place_payloads, reads_for, subject_of
 from lpr_cpe.graph.state import IncidentState
 from lpr_cpe.graph.subgraphs._shared import evidence_support
+from lpr_cpe.models.narrative import write_narrative
 
 # ------------------------------------------------------------------------------------------------
 # What this stage reads
@@ -328,6 +329,18 @@ async def assess_predictive_risk(state: IncidentState, ctx: GraphContext) -> Nod
     if prediction is None and "cpe.wifi" in payloads:
         gathered.add_note("the CPE answered but reported no readable Wi-Fi metric")
 
+    # The one model-assisted step in this system, and the one place D6 is executed rather than
+    # described. `write_narrative` is handed the *finished* prediction -- band, score and levers all
+    # already derived -- and the schema it gives the model has no `verdict` and no
+    # `wifi_health_score` field to return. So the prose is merged onto a verdict, never the other
+    # way round, and a provider that is down or that ignores the schema yields a templated narrative
+    # rather than an absent one. `narrative_source` records which happened.
+    if prediction is not None:
+        narrative = await write_narrative(prediction, provider=ctx.model, settings=ctx.settings)
+        prediction = prediction.model_copy(
+            update={"narrative": narrative.text, "narrative_source": narrative.source}
+        )
+
     return {
         "status": IncidentStatus.DIAGNOSING,
         "evidence": evidence,
@@ -351,6 +364,9 @@ async def assess_predictive_risk(state: IncidentState, ctx: GraphContext) -> Nod
                     "wifi_band": prediction.band.value
                     if prediction is not None and prediction.band is not None
                     else None,
+                    "narrative_source": (
+                        prediction.narrative_source if prediction is not None else None
+                    ),
                 },
             )
         ],

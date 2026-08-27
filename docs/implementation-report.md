@@ -41,7 +41,7 @@ preferred to more stubs.
 | `cli.py` + `audit.py` + `runner.py` — reports, the audit bundle, and `lpr-cpe run` | done |
 | `persistence` — transactional outbox and migrations | **not built** |
 | `api` — the FastAPI surface, state reads, approval resume, webhooks | done |
-| model provider and the deterministic fake | **not built** |
+| model provider and the deterministic fake | done |
 | the seventeen specification scenarios | **not built** — `lpr-cpe run` drives one scripted path, which is not the same thing |
 | Docker Compose development environment | written; the build is unverified locally (DOCKER-1) |
 | CI | written, never executed |
@@ -74,8 +74,13 @@ Recorded in full as A1–A5 in IMPLEMENTATION_PLAN.md §1. In short:
   timezone-aware UTC; there is no naive datetime anywhere.
 - **A4** — production writes are off unless switched on. `APP_MODE` defaults to `simulation` and
   `ALLOW_PRODUCTION_WRITES` to `false`, enforced in one place.
-- **A5** — no language model is consulted for any number a decision depends on. Nothing in `src`
-  calls a model provider at all today.
+- **A5** — no language model is consulted for any number a decision depends on. One function
+  consults a model, `models.narrative.write_narrative`, and it is asked for prose. The enforcement
+  is structural rather than a convention: `NarrativeDraft` has no `verdict` field and no
+  `wifi_health_score` field, `extra="forbid"` rejects a model that returns either, and the test that
+  matters reads the schema text the prompt actually carries — which is how the schema was found to
+  be shipping pydantic's rendering of the docstrings that explain why those fields are absent, and
+  so naming both of them to the model. The deterministic scorer owns both numbers.
 
 Eight further decisions worth their own record are D1–D8 in IMPLEMENTATION_PLAN.md §4.
 
@@ -123,11 +128,11 @@ whoever is reading it, and deliberately not here.
 
 | figure | value | note |
 | --- | --- | --- |
-| `tests_total` | 1009 | all unit tests; see the caveat below |
-| `coverage_percent` | 86.25 | line and branch, over `src/lpr_cpe` |
+| `tests_total` | 1026 | all unit tests; see the caveat below |
+| `coverage_percent` | 86.62 | line and branch, over `src/lpr_cpe` |
 | `coverage_gate_percent` | 85 | enforced from 2026-08-24; see below |
-| `source_files_typechecked` | 115 | `mypy --strict`, no issues |
-| `files_formatted` | 144 | `ruff format --check` |
+| `source_files_typechecked` | 119 | `mypy --strict`, no issues |
+| `files_formatted` | 149 | `ruff format --check` |
 
 **The suite is unit-only.** There are no integration, contract or scenario tests, and none of the
 seventeen required scenarios exist. Every "done" row in §1 rests on committed tests, but they are

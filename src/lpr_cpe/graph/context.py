@@ -32,6 +32,7 @@ from lpr_cpe.policies.engine import PolicyEngine
 from lpr_cpe.security.rbac import Role
 
 if TYPE_CHECKING:
+    from lpr_cpe.models.base import ModelProvider
     from lpr_cpe.simulation.loader import SimulatedAdapters
 
 
@@ -51,6 +52,13 @@ class GraphContext:
     clock: Clock
     policy: PolicyEngine
     adapters: SimulatedAdapters
+
+    #: The narrative model, or `None` for no model at all. **Optional on purpose**: A5 is that no
+    #: number a decision depends on comes from a model, so a context with no provider is a fully
+    #: functioning context and `models.narrative.write_narrative` returns a templated narrative for
+    #: it. `build_context` defaults this to the configured provider -- `fake` unless told otherwise
+    #: -- and `build_context(model=None)` is how a caller asks for the template path explicitly.
+    model: ModelProvider | None = None
 
     #: Who the graph acts as when no human is in the loop. Every automated action carries this in
     #: its `ActionRequest.actor`, because `policies.engine` blocks an action with no actor as
@@ -79,12 +87,26 @@ class GraphContext:
         return self.settings.max_resolution_cycles
 
 
+class _Unset:
+    """ "Not supplied", as distinct from "supplied as `None`".
+
+    `model` has two absent-ish values that mean different things, and one default cannot carry both.
+    A private class rather than `object()` so the type checker can narrow on it.
+    """
+
+    __slots__ = ()
+
+
+_UNSET = _Unset()
+
+
 def build_context(
     *,
     settings: Settings | None = None,
     clock: Clock | None = None,
     policy: PolicyEngine | None = None,
     adapters: SimulatedAdapters | None = None,
+    model: ModelProvider | _Unset | None = _UNSET,
     step_budget_override: int | None = None,
     node_visit_budget: dict[str, int] | None = None,
 ) -> GraphContext:
@@ -109,15 +131,24 @@ def build_context(
     made at a frozen instant stamps that instant. Two clocks in one graph is how a `PolicyDecision`
     comes to be timestamped after the action it authorised.
     """
+    from lpr_cpe.models.providers import build_provider
     from lpr_cpe.simulation.loader import build_simulated_adapters
 
     resolved_settings = settings or get_settings()
     resolved_clock = clock or SystemClock(resolved_settings.timezone)
+
     return GraphContext(
         settings=resolved_settings,
         clock=resolved_clock,
         policy=policy or PolicyEngine.load(clock=resolved_clock),
         adapters=adapters or build_simulated_adapters(clock=resolved_clock),
+        # A sentinel rather than `None`, because the two mean different things and one value cannot
+        # carry both. Omitted: use whatever `LPR_MODEL_PROVIDER` selects, which is `fake` by
+        # default. Explicitly `None`: run with no model, so `write_narrative` templates. The first
+        # version conflated them and `build_context(model=None)` silently got the fake -- so the
+        # template branch was unreachable through the public constructor, which is precisely the
+        # branch A5 makes load-bearing.
+        model=build_provider(resolved_settings) if isinstance(model, _Unset) else model,
         step_budget_override=step_budget_override,
         node_visit_budget=dict(node_visit_budget or {}),
     )
