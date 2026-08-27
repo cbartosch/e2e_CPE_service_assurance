@@ -128,11 +128,11 @@ whoever is reading it, and deliberately not here.
 
 | figure | value | note |
 | --- | --- | --- |
-| `tests_total` | 1045 | all unit tests; see the caveat below |
+| `tests_total` | 1047 | all unit tests; see the caveat below |
 | `coverage_percent` | 86.45 | line and branch, over `src/lpr_cpe` |
 | `coverage_gate_percent` | 85 | enforced from 2026-08-24; see below |
 | `source_files_typechecked` | 121 | `mypy --strict`, no issues |
-| `files_formatted` | 152 | `ruff format --check` |
+| `files_formatted` | 153 | `ruff format --check` |
 
 **The suite is unit-only.** There are no integration, contract or scenario tests, and none of the
 seventeen required scenarios exist. Every "done" row in §1 rests on committed tests, but they are
