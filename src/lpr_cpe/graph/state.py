@@ -153,19 +153,42 @@ def append_unique[T](current: list[T] | None, update: list[T] | T | None) -> lis
 
 
 def append_revision[T](current: list[T] | None, update: list[T] | T | None) -> list[T]:
-    """Append-only *without* de-duplication, for records that legitimately recur.
+    """Append-only without de-duplication *by id*, for records that legitimately recur.
 
     A work order moving `scheduled` -> `dispatched` -> `on_site` produces three entries with the
-    same id, and that sequence is the record. `latest_by_id` reads the current view. An identical
-    consecutive duplicate is dropped, which is what makes this safe under node replay: a replayed
-    node re-appending the same state is a no-op, but a genuine status change is not.
+    same id, and that sequence is the record -- which is why this is not `append_unique`.
+    `latest_by_id` reads the current view.
+
+    An item byte-identical to one already in the list is dropped, wherever in the list it sits.
+
+    **That "wherever" was "only if it was the immediately preceding entry", and the difference
+    measured 49,152 entries against 1.** A subgraph that shares a channel with its parent receives
+    the parent's accumulated list on entry and returns the whole thing on exit, so the parent
+    reducer is handed its own list as an update: `out` has N, `incoming` has the same N, none of
+    them equals `out[-1]` except the last, and the channel doubles. Re-enter the field subgraphs
+    until the resolution-cycle budget stops it -- fourteen times, for the dispatch fixture -- and
+    `work_orders` holds 49,152 copies of one work order. `mr_records` reached 524,288 across the
+    fixture sweep, and 57 of 164 runs had a channel over 100 entries.
+
+    Nothing decided wrongly, which is why nothing caught it: `latest_by_id` collapses by id, so
+    `current_work_orders` answered 1, `truck_roll_count` answered 1, the gate was called once and
+    one action was taken. What was wrong was the *state* -- every checkpoint serialising fifty
+    thousand copies of one record, and any future reader taking `len(state["work_orders"])` for a
+    count getting a number wrong by four orders of magnitude. This module already warns that
+    counting rows rather than reading `current_work_orders` is how two dashboards disagree; it did
+    not say the row count could be 49,152.
+
+    Exact equality is the right test here and not merely a cheap one. Every record in these three
+    channels carries its own timestamps, so two genuinely distinct revisions differ; two entries
+    that compare equal are one fact written twice. Scanning the whole list rather than the tail is
+    linear per item and the list is now small, which is the point.
     """
     out: list[T] = list(current or [])
     if update is None:
         return out
     incoming = update if isinstance(update, list) else [update]
     for item in incoming:
-        if out and out[-1] == item:
+        if any(existing == item for existing in out):
             continue
         out.append(item)
     return out

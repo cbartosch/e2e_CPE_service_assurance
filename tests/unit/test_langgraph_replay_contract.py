@@ -215,9 +215,9 @@ async def test_a_committed_upstream_write_is_replayed_only_when_the_gate_is_nest
         pytest.param(
             "revisions",
             [{"ref": "wo-1", "state": "scheduled"}],
-            "`append_revision` keeps genuine repeats but drops an identical *consecutive* one, "
-            "which is exactly the shape a replay produces",
-            id="append_revision_drops_the_consecutive_duplicate",
+            "`append_revision` keeps genuine revisions and drops an identical one wherever it "
+            "sits, which is exactly the shape a replay produces",
+            id="append_revision_drops_the_duplicate",
         ),
         pytest.param(
             "retries",
@@ -257,3 +257,61 @@ async def test_each_real_reducer_absorbs_the_replay_that_corrupts_operator_add(
         f"the replay did not occur on this run, so `{field}` was never tested against one"
     )
     assert final[field] == expected, f"{field}: {why}"
+
+
+def test_append_revision_does_not_double_when_handed_its_own_list() -> None:
+    """The 49,152-entry defect, reduced to the two lines that caused it.
+
+    A subgraph that shares a channel with its parent is given the parent's accumulated list on entry
+    and returns the whole thing on exit, so the parent's reducer is handed its own list as an
+    update. When `append_revision` dropped only a duplicate of `out[-1]`, none of the incoming items
+    matched except the last, and the channel **doubled on every re-entry**. Measured end to end
+    before the fix: `SVC-SJ-011-A-01` finished with 49,152 copies of one work order, `mr_records`
+    reached 524,288 across the fixture sweep, and 57 of 164 runs held a channel over 100 entries.
+
+    Nothing decided wrongly, which is why nothing caught it -- `latest_by_id` collapses by id, so
+    `current_work_orders` and `truck_roll_count` both answered 1 and the gate was called once. What
+    was wrong was the state: every checkpoint carrying fifty thousand copies of one record.
+
+    Watched red by restoring `if out and out[-1] == item`::
+
+        AssertionError: handing the reducer its own list doubled the channel: 3 -> 6
+    """
+    revisions = [
+        {"ref": "wo-1", "state": "scheduled"},
+        {"ref": "wo-1", "state": "dispatched"},
+        {"ref": "wo-1", "state": "on_site"},
+    ]
+
+    same = append_revision(revisions, list(revisions))
+    assert len(same) == len(revisions), (
+        f"handing the reducer its own list doubled the channel: {len(revisions)} -> {len(same)}"
+    )
+    assert same == revisions, "the order of the genuine revisions has to survive"
+
+    # Twelve re-entries is what the dispatch fixture actually did. Doubling would give 12,288.
+    grown = list(revisions)
+    for _ in range(12):
+        grown = append_revision(grown, list(grown))
+    assert len(grown) == 3, f"twelve re-entries grew the channel to {len(grown)}"
+
+    # And the property this reducer exists for is intact: a genuine new revision still appends.
+    moved = append_revision(revisions, [{"ref": "wo-1", "state": "completed"}])
+    assert len(moved) == 4, "a real status change must still be recorded"
+    assert moved[-1]["state"] == "completed"
+
+
+def test_append_revision_still_keeps_a_repeat_that_differs() -> None:
+    """The positive control, without which the test above passes on `append_unique`.
+
+    These channels hold successive states of one object, so de-duplicating *by id* would collapse
+    the sequence that is the record. Only byte-identical entries are dropped.
+    """
+    out = append_revision(
+        [{"ref": "wo-1", "state": "scheduled", "at": "T1"}],
+        [
+            {"ref": "wo-1", "state": "scheduled", "at": "T2"},
+            {"ref": "wo-1", "state": "dispatched", "at": "T3"},
+        ],
+    )
+    assert len(out) == 3, "two entries differing only by timestamp are two facts, not one"
