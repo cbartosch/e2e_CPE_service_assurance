@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Request, status
@@ -51,7 +50,7 @@ from lpr_cpe.domain.enums import KPIName
 from lpr_cpe.domain.records import AssuranceEvent, SLAContext
 from lpr_cpe.graph import inspect as graph_inspect
 from lpr_cpe.graph.builder import build_parent_graph
-from lpr_cpe.graph.context import build_context
+from lpr_cpe.graph.context import GraphContext, build_context
 from lpr_cpe.graph.state import make_initial_state
 from lpr_cpe.observability.kpi import NOT_DERIVABLE_FROM_STATE
 from lpr_cpe.persistence.checkpointer import checkpointer_scope
@@ -138,9 +137,35 @@ async def _accepted(app: Any, incident_id: str) -> IncidentAccepted:
     )
 
 
-def build_app(*, settings: Settings | None = None) -> FastAPI:
-    """Assemble the app. `settings` is injectable so a test can drive the production profile."""
+def build_app(*, settings: Settings | None = None, context: GraphContext | None = None) -> FastAPI:
+    """Assemble the app. `settings` and `context` are injectable, for two different reasons.
+
+    `settings` so a test can drive the production profile, which is what makes the write guard
+    assertable at all.
+
+    `context` so a test can **freeze the clock**, and that one is not a convenience. Every other
+    entry point in this system takes an injected clock; this one did not, so the app called
+    `SystemClock` and `datetime.now()` and the route an incident took depended on the hour the suite
+    happened to run at. A sweep of the dispatch fixture across the day shows it reaching an approval
+    gate between 01:00 and 17:00 Puerto Rico time and reaching no gate at all outside that band --
+    quiet hours and the crew scheduling window are real policy, and the fixture sits close enough to
+    the edge to cross it. So five of this module's tests were red for roughly a third of every day,
+    and green when the audit happened to run. That is the worst shape a test can have: it passes
+    when you check and fails when somebody else does.
+
+    Injected, the context is reused for every request rather than rebuilt per request. That is a
+    deliberate difference from the default and it is what a test wants -- one frozen clock and one
+    `WriteGate` it can assert against afterwards.
+    """
     resolved = settings or get_settings()
+
+    def _context() -> GraphContext:
+        """The injected context, or a fresh one per request.
+
+        Per request is the right default in production: `build_context` opens the adapters, and a
+        long-lived one shared across concurrent incidents would share a `WriteGate` between them.
+        """
+        return context if context is not None else build_context(settings=resolved)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -220,7 +245,11 @@ def build_app(*, settings: Settings | None = None) -> FastAPI:
 
     async def _start(app_: Any, body: EventIn) -> IncidentAccepted:
         incident_id = body.incident_id or f"INC-{body.service_ref}"
-        now = datetime.now(tz=UTC)
+        ctx = _context()
+        # From the context's clock, not `datetime.now()`. This stamps `occurred_at`, `received_at`
+        # and the SLA start, so a test that froze the clock and still got a wall-clock `now` here
+        # would have frozen nothing that mattered.
+        now = ctx.clock.now()
         event = AssuranceEvent(
             event_id=body.event_id,
             source=body.source,
@@ -245,9 +274,7 @@ def build_app(*, settings: Settings | None = None) -> FastAPI:
             sla=SLAContext(clock_started_at=now),
             now=now,
         )
-        await app_.ainvoke(
-            state, context=build_context(settings=resolved), config=_config(incident_id)
-        )
+        await app_.ainvoke(state, context=ctx, config=_config(incident_id))
         return await _accepted(app_, incident_id)
 
     @app.post("/events", status_code=status.HTTP_202_ACCEPTED, tags=["intake"])
@@ -363,9 +390,7 @@ def build_app(*, settings: Settings | None = None) -> FastAPI:
                     f"status is {_status_of(await graph_inspect.effective_state(app_, config))!r}."
                 ),
             )
-        await app_.ainvoke(
-            Command(resume=value), context=build_context(settings=resolved), config=config
-        )
+        await app_.ainvoke(Command(resume=value), context=_context(), config=config)
         state = await graph_inspect.effective_state(app_, config)
         return ResumeResult(
             incident_id=incident_id,

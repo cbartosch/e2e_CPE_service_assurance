@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import io
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -37,6 +39,16 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "lpr_cpe"
 #: The one fixture measured reaching `closed`. Named rather than found, so a change of outcome fails
 #: here with the service in the message.
 CLOSING_SERVICE = "SVC-UT-001-B-01"
+
+#: Every `drive()` below runs at this instant rather than at whatever time the suite is run.
+#:
+#: `drive(now=None)` means `datetime.now()`, which is right for the CLI and wrong for a test. The
+#: routing in this system genuinely depends on the hour -- quiet hours and the crew scheduling
+#: window are policy, and `test_api.py` records a fixture whose pause set is non-empty from 01:00 to
+#: 16:00 Puerto Rico time and empty outside it. `test_one_incident_reaches_closure_through_the_command`
+#: asserts an exact pause *set*, so it is the same shape of hostage. Measured stable across the day
+#: at the time of writing; pinned anyway, because "stable today" is not a property a suite can keep.
+FROZEN = datetime(2026, 8, 27, 14, 0, tzinfo=ZoneInfo("America/Puerto_Rico"))
 
 
 # ------------------------------------------------------------------------------------------------
@@ -157,7 +169,7 @@ async def test_one_incident_reaches_closure_through_the_command(fixtures: Any) -
     answered five approvals instead of two approvals and three window waits would reach the same
     status having exercised nothing.
     """
-    outcome = await drive(fixtures.services[CLOSING_SERVICE])
+    outcome = await drive(fixtures.services[CLOSING_SERVICE], now=FROZEN)
 
     assert outcome.status == "closed", f"expected closure, got {outcome.status}: {outcome.reason}"
     assert outcome.escalated is False
@@ -175,8 +187,8 @@ async def test_declining_every_approval_changes_the_ending(fixtures: Any) -> Non
     takes is the graph's business and this test's business is that the flag is wired to it.
     """
     service = fixtures.services[CLOSING_SERVICE]
-    approved = await drive(service, approve=True)
-    refused = await drive(service, approve=False)
+    approved = await drive(service, approve=True, now=FROZEN)
+    refused = await drive(service, approve=False, now=FROZEN)
 
     assert approved.status != refused.status, (
         "granting and refusing every approval reached the same ending, so --decline is inert"
@@ -192,7 +204,7 @@ async def test_a_predictive_filing_takes_d04s_other_arm(fixtures: Any) -> None:
     is why the pause tally is asserted empty rather than merely different.
     """
     service = fixtures.services["SVC-UT-001-A-03"]
-    outcome = await drive(service, case_type=CaseType.PREDICTIVE_MAINTENANCE)
+    outcome = await drive(service, case_type=CaseType.PREDICTIVE_MAINTENANCE, now=FROZEN)
 
     assert outcome.settled is True
     assert outcome.pauses == {}, "the preventive arm holds no interrupt; it selects and stops"
@@ -219,7 +231,7 @@ async def test_the_runner_refuses_to_drive_a_configuration_that_permits_writes(
     assert live.writes_permitted, "this test needs a configuration that really would write"
 
     with pytest.raises(ProductionWritesRefusedError, match="will not do it"):
-        await drive(fixtures.services[CLOSING_SERVICE], settings=live)
+        await drive(fixtures.services[CLOSING_SERVICE], settings=live, now=FROZEN)
 
 
 def test_the_refusal_names_the_environment_variables_and_not_the_fields(

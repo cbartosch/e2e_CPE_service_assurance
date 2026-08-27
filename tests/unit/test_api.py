@@ -13,14 +13,18 @@ Neither can be reproduced without a real pause, so there are no mocks in this mo
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
 
 from lpr_cpe.api import build_app
 from lpr_cpe.api.app import WEBHOOK_SOURCES
+from lpr_cpe.config.clock import FrozenClock
 from lpr_cpe.config.settings import AppMode, Settings
+from lpr_cpe.graph.context import build_context
 
 #: The fixture measured reaching a dispatch approval, so `/state` has a nested pause to report.
 DISPATCH_SERVICE = "SVC-SJ-011-A-01"
@@ -53,15 +57,37 @@ def _event(service: dict[str, Any], **over: Any) -> dict[str, Any]:
     return body
 
 
+#: The instant every test in this module runs at. Inside the crew scheduling window and outside
+#: quiet hours, which is the band the dispatch fixture needs to reach its approval gate.
+#:
+#: **A literal, because the wall clock is not one.** See `client` below.
+FROZEN = datetime(2026, 8, 27, 14, 0, tzinfo=ZoneInfo("America/Puerto_Rico"))
+
+
 @pytest.fixture
 def client() -> Any:
-    """A client over the real app, in the simulation profile.
+    """A client over the real app, in the simulation profile, at a frozen instant.
 
     `TestClient` as a context manager, which is what runs the lifespan -- without the `with` the
     checkpointer is never opened and `app.state.graph` does not exist, so every request 500s on the
     dependency. That is worth a sentence because the failure looks like a routing bug.
+
+    **The frozen clock is the load-bearing part and it was not here originally.** The first version
+    let the app build its own context, so the graph ran on `SystemClock` and the route depended on
+    what time it was. Quiet hours (21:00-07:00 local) and the crew scheduling window (07:00-21:00)
+    are real policy in `pack.yaml`, and the dispatch fixture crosses them: swept hour by hour it
+    reaches an approval gate from 01:00 to 16:00 Puerto Rico time and reaches *no gate at all* from
+    17:00 to 00:00. So the five tests below were red for roughly a third of every day. They were
+    green when the audit bundle was generated and red when this module was next run, with nothing
+    changed in between, which is how the defect was found rather than by reading the code.
+
+    Watched red by passing `SystemClock("America/Puerto_Rico")` instead, at an evening instant::
+
+        AssertionError: this fixture reaches an approval gate
+        assert False is True
     """
-    with TestClient(build_app(settings=Settings())) as c:
+    context = build_context(settings=Settings(), clock=FrozenClock(FROZEN))
+    with TestClient(build_app(settings=Settings(), context=context)) as c:
         yield c
 
 
