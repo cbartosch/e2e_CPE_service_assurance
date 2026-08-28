@@ -42,7 +42,7 @@ preferred to more stubs.
 | `persistence` — transactional outbox and migrations | done, with the atomicity boundary named (OUTBOX-1) |
 | `api` — the FastAPI surface, state reads, approval resume, webhooks | done |
 | model provider and the deterministic fake | done |
-| the seventeen specification scenarios | **not built** — `lpr-cpe run` drives one scripted path, which is not the same thing |
+| the seventeen specification scenarios | done — 24 tests in `tests/scenarios/`, 14 of the 17 reaching their specified outcome; the other three are fixture-set gaps SCENARIO-1/2/3/10/14/16 |
 | Docker Compose development environment | written; the build is unverified locally (DOCKER-1) |
 | CI | written, never executed |
 
@@ -128,11 +128,11 @@ whoever is reading it, and deliberately not here.
 
 | figure | value | note |
 | --- | --- | --- |
-| `tests_total` | 1047 | all unit tests; see the caveat below |
-| `coverage_percent` | 86.45 | line and branch, over `src/lpr_cpe` |
+| `tests_total` | 1071 | all unit tests; see the caveat below |
+| `coverage_percent` | 86.57 | line and branch, over `src/lpr_cpe` |
 | `coverage_gate_percent` | 85 | enforced from 2026-08-24; see below |
 | `source_files_typechecked` | 121 | `mypy --strict`, no issues |
-| `files_formatted` | 153 | `ruff format --check` |
+| `files_formatted` | 156 | `ruff format --check` |
 
 **The suite is unit-only.** There are no integration, contract or scenario tests, and none of the
 seventeen required scenarios exist. Every "done" row in §1 rests on committed tests, but they are

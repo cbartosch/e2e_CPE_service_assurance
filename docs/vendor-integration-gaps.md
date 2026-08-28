@@ -814,3 +814,75 @@ everything about what a visit needs beyond a crew type, and how far ahead this s
   real blocker turned out to be answerable the same way `field_execution` answers its own: the four
   dispositions are separated by a **local** gate inside the subgraph, where `_check_tables` does not
   require them to be members of `routing.DECISIONS`, rather than on the parent's edge where it does.
+
+
+## Scenario coverage gaps
+
+The seventeen scenarios in `tests/scenarios/` drive the real parent graph end to end over the
+committed fixture set. Fourteen reach their specified outcome. The five entries below are the parts
+that do not, each measured across all 41 services under both case types rather than inferred. Every
+one of them is a **fixture-set** limitation rather than a code one, which is why none is fixed by
+editing `src`: the machinery exists on all five paths and nothing exercises it.
+
+Each gap is pinned by an assertion in the scenario that names it, so a fixture change that closed
+one would turn the suite red and demand the real scenario be written rather than quietly widening
+coverage nobody notices.
+
+* **SCENARIO-1** — *No customer update is sent on the common-cause path.* Scenario 1 asks that
+  affected customers receive appropriate updates. `customer_communications` is empty for every
+  service behind `TAP-SJ-011-A`. The notification arm exists and is exercised — `SVC-SJ-011-B-01`
+  sends one on the self-help path — but nothing on the common-cause path invokes it. Four of that
+  scenario's five expectations are met; this is the fifth.
+
+* **SCENARIO-2** — *The remote-repair fixture is PON, and the specification's scenario 2 is HFC.*
+  Exactly two of the 41 services attempt a remote action at all: `SVC-UT-001-B-01` (PON, closes
+  through `cpe_reboot` → `cpe_resync` → `cpe_firmware_update`) and `SVC-SJ-011-B-01` (HFC, but it
+  routes to guided self-help, which is scenario 4). The behaviour is proven; the access technology
+  is not. Wants an HFC fixture with a recoverable provisioning fault.
+
+* **SCENARIO-3** — *Nothing attempts a remote repair and then dispatches.* Scenario 3 is a
+  *sequence* across two resolution arms: remote fails, workflow returns to RCA, Clean Boots is
+  dispatched and resolves it. No fixture has both `remote_attempt_count > 0` and
+  `field_visit_count > 0` — two services attempt remote actions and neither dispatches, twenty
+  dispatch and none tried a remote repair first. Both arms are individually driven to their
+  endpoints by scenarios 2 and 11; the transition between them is untested.
+
+  Scenarios 4 and 5 have the same shape from the other side: `SVC-SJ-011-B-01` reaches guided
+  self-help, sends the instructions and captures the answer, and then escalates on the
+  resolution-cycle guard whether the customer completes or not. So "telemetry validates
+  restoration" (4) and the follow-on dispatch (5) are not reached. What *is* asserted for 5 is the
+  claim worth having: the SLA clock does not move between the completed and the failed journey.
+
+* **SCENARIO-10** — *The reverse handover's return edge is not exercised.* Plant repaired, customer
+  still degraded, workflow returns from Dirty Boots to Clean Boots. The successful plant report
+  leads to validation and then the total-steps guard on every fixture that reaches it, never back
+  to a second Clean Boots visit. The adjacent property that *is* reachable is asserted instead: a
+  crew reporting no fault found builds no handover contract, files no MR, and does not silently
+  re-dispatch — which is what keeps the repeat counts scenario 10 depends on accurate.
+
+* **SCENARIO-14** — *No fixture produces stale telemetry.* The machinery is all present:
+  `DataQualityAssessment` is on the state, the policy pack carries per-decision freshness windows,
+  and the simulators stamp every reading from the injected clock. That last point is the problem —
+  offsets are resolved against the clock at read time, so evidence is fresh by construction and no
+  run records a single error. The rejection path has nothing to reject. Wants a fixture pinned to an
+  absolute past instant rather than to a relative offset.
+
+* **SCENARIO-16** — *A later customer incident does not link back to its preventive case.* The first
+  two expectations hold — a predictive filing creates a `pm_case`, and it does so with no truck
+  roll, no MR and no customer contact, so the action is before impact. The third needs two incidents
+  on one service with a link between them, and nothing writes that link today.
+
+Two further notes belong here rather than in a scenario docstring.
+
+**Scenarios 6, 7 and 9 seed one rejected hypothesis to run at all.** That is EXEC-1 above, reached
+from the parent graph rather than the subgraph seam: `HandoverContract.missing_items()` requires
+`ruled_out` to be non-empty, and nothing in `src` can put anything there. Confirmed again here —
+all twelve fixtures that reach a Clean Boots dispatch finish with `ruled_out == 0`,
+`missing_items() == ["ruled_out"]`, D18 answering `reject` on every lap. With one hypothesis marked
+rejected through `RCAHypothesis`' own validator, the whole D18 → P19 → P20 chain runs: contract
+complete and accepted, `raise_mr`, the OSP asked, `update_mr`, one MR.
+
+**Scenario 8 needs no seed**, because "MR creation is blocked and structured missing-evidence
+reasons are returned" is what the unseeded system already does — which is worth noticing, since it
+means the specification's failure case is this system's default and its success case is the one that
+needs help.
